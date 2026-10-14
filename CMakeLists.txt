@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(fastprox VERSION 0.1.0 LANGUAGES C CXX)
+# PEP 440 pre-release tag (a1, rc1, ...) appended to the version; empty for a
+# final release. pyproject.toml reads both lines.
+set(FASTPROX_VERSION_SUFFIX "rc1")
+set(FASTPROX_VERSION_FULL "${PROJECT_VERSION}${FASTPROX_VERSION_SUFFIX}")
 
 option(FASTPROX_OPENMP "Parallelise over rows with OpenMP" ON)
 option(FASTPROX_BUILD_TESTS "Build the C and C++ tests" ${PROJECT_IS_TOP_LEVEL})
@@ -59,7 +63,7 @@ target_include_directories(fastprox
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_compile_definitions(fastprox
-  PRIVATE FASTPROX_BUILDING FASTPROX_VERSION_STRING="${PROJECT_VERSION}")
+  PRIVATE FASTPROX_BUILDING FASTPROX_VERSION_STRING="${FASTPROX_VERSION_FULL}")
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(fastprox PUBLIC FASTPROX_STATIC)
 endif()

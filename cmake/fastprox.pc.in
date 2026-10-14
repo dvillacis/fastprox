@@ -4,6 +4,6 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: fastprox
 Description: Exact proximal operators and projections with derivatives
-Version: @PROJECT_VERSION@
+Version: @FASTPROX_VERSION_FULL@
 Libs: -L${libdir} -lfastprox
 Cflags: -I${includedir}

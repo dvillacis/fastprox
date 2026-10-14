@@ -3,7 +3,7 @@
 All notable changes to fastprox. Planned work is in [ROADMAP.md](ROADMAP.md).
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 0.1.0
+## [Unreleased] — 0.1.0rc1
 
 ### Added
 
@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Batching over any axis of strided n-d arrays, OpenMP parallelism with bit-identical results for any thread count, and allocation-free calls with a workspace.
 - Python package built with nanobind (abi3, CPython ≥ 3.12): one-shot functions and operator classes with `prox`, `prox_conj`, `jvp` and `vjp`.
 - C/C++ and Python test suites, a benchmark script, and a CI workflow.
+- Release pipeline: sdist job, trusted publishing to TestPyPI (manual dispatch with `publish`) and to PyPI (tags `v*`, checked against the package version); PyPI metadata and a README for the project page; pre-release tags through `FASTPROX_VERSION_SUFFIX` in `CMakeLists.txt`; Python tests also run on CPython 3.14.
 - Fuzz harness for the whole API (libFuzzer target and standalone driver) with a nightly workflow; CVXPY + Clarabel reference fixtures; benchmarks against proxTV and Condat's code (`bench/compare_external.py`, `docs/benchmarks.md`); API reference (`docs/api.md`); Valgrind CI job.
 
 ### Changed

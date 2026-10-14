@@ -374,3 +374,8 @@ def test_errors():
             v[pos] = np.inf
             with pytest.raises(ValueError):
                 f(v)
+
+
+def test_version_matches_metadata():
+    from importlib.metadata import version
+    assert fp.__version__ == version("fastprox")

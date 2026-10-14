@@ -10,6 +10,7 @@ Exact proximal operators with JVP/VJP. C++17 core behind the plain-C header
 - Sanitizers: configure a second tree with `-DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DCMAKE_BUILD_TYPE=Debug`
 - Python (always through uv): `uv sync`, `uv run pytest -q`. uv rebuilds the extension when C++ sources change (`tool.uv.cache-keys`).
 - Benchmarks: `uv run python bench/bench_python.py`
+- Releasing: set the version in `project()` and `FASTPROX_VERSION_SUFFIX` (`CMakeLists.txt`) and the macros in `fastprox.h`; dry run with `gh workflow run ci.yml -f publish=true` (TestPyPI); then push the tag `v<version>`, which publishes to PyPI.
 
 ## Layout
 
