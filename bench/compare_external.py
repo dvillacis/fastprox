@@ -67,11 +67,13 @@ def exported(lib: pathlib.Path):
 
 
 def gsl_flags():
-    """Condat's files include GSL for their demo main(); find its headers."""
+    """Compile and link flags for GSL, which Condat's files use in their demo
+    main(). Link flags go after the source: GNU ld drops libraries that appear
+    before the objects needing them."""
     for prefix in ("/opt/homebrew/opt/gsl", "/usr/local/opt/gsl"):
         if pathlib.Path(prefix, "include").exists():
-            return [f"-I{prefix}/include", f"-L{prefix}/lib", "-lgsl", "-lgslcblas"]
-    return ["-lgsl", "-lgslcblas"]
+            return [f"-I{prefix}/include"], [f"-L{prefix}/lib", "-lgsl", "-lgslcblas"]
+    return [], ["-lgsl", "-lgslcblas"]
 
 
 def build_condat():
@@ -86,8 +88,9 @@ def build_condat():
         if not lib.exists():
             # Its entry points are static; -Dstatic= exports them unchanged.
             extra = ["-Dstatic="] if name == "condat_simplex" else []
-            run([CC, *OPT, "-w", "-Dmain=condat_unused_main", *extra, *gsl_flags(), "-o",
-                 str(lib), str(src), "-lm"])
+            cflags, ldflags = gsl_flags()
+            run([CC, *OPT, "-w", "-Dmain=condat_unused_main", *extra, *cflags, "-o", str(lib),
+                 str(src), *ldflags, "-lm"])
         libs[name] = lib
     return libs
 
