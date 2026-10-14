@@ -3,7 +3,9 @@
 All notable changes to fastprox. Planned work is in [ROADMAP.md](ROADMAP.md).
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 0.1.0rc2
+## [Unreleased]
+
+## [0.1.0rc2] — 2026-10-15
 
 ### Fixed
 
