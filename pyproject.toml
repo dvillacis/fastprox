@@ -59,7 +59,7 @@ testpaths = ["tests/python"]
 [tool.cibuildwheel]
 # abi3 wheels: one build per platform covers CPython >= 3.12.
 build = "cp312-*"
-skip = "*-musllinux_*"
+skip = ["*-musllinux_*", "*-win32"]  # 64-bit Windows only (spec Section 12)
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 test-requires = ["pytest", "hypothesis"]
@@ -78,3 +78,9 @@ environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
 [[tool.cibuildwheel.overrides]]
 select = "*-macosx_x86_64"
 environment = { MACOSX_DEPLOYMENT_TARGET = "15.0" }
+
+[tool.cibuildwheel.windows]
+# MSVC's OpenMP runtime (vcomp140.dll) is not part of a Python install:
+# bundle it into the wheel, as delocate and auditwheel do on macOS and Linux.
+before-build = "pip install delvewheel"
+repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"
