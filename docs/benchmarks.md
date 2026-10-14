@@ -84,3 +84,28 @@ kernel at λ ≤ 1, and up to 21% faster than always branch-free at λ = 10);
 the segment-based taut string, 0.74–0.83× the time of the double-double
 version; weighted Condat within 10% of uniform Condat; the simplex with its
 finiteness test folded into the pivot pass, 0.81× the previous time.
+
+## 2026-10-14, GitHub Actions runners (`bench` workflow, quick mode, n = 10⁵)
+
+Started by hand from the Actions tab (`.github/workflows/bench.yml`); each
+runner records its CPU and compiler in `machine.txt` in the artifact. On a
+private repository the Linux runners have 2 vCPUs, and they are shared VMs:
+two identical runs on x86_64 differed between 25 and 17 of 30 comparisons
+won, so read one run at a time and prefer `full` mode for anything finer.
+
+| Runner | CPU | Compiler | fastprox fastest or within 2% |
+| --- | --- | --- | --- |
+| `ubuntu-latest` | AMD EPYC 9V45, 1 core with 2 hyperthreads | GCC 13.3 | 25 and 17 of 30 (two runs) |
+| `ubuntu-24.04-arm` | Neoverse-N2, 2 cores | GCC 13.3 | 12 and 11 of 30 (two runs) |
+
+On Neoverse-N2 fastprox trails consistently: 1D TV at λ = 0.1 by 9–17%
+(float64 and float32), weighted 1D TV at λ = 0.1 by 10–16% and on white
+noise at λ = 10 by about 20%, and the simplex projection by 24–31%. The kernels
+were tuned on Apple silicon with Clang (branch-free updates for short
+segments, the finiteness test folded into the pivot pass); the same choices
+do not carry over to this core and compiler.
+
+Python call overhead was 2.0–3.4 µs at n = 100 on both runners (target:
+under 5 µs). Parallel scaling on the arm64 runner's two physical cores: 1.96×
+at 2 threads (efficiency 0.98; target 0.7). The x86_64 runner's two vCPUs are
+hyperthreads of one core, so its 2-thread figure says nothing about scaling.
