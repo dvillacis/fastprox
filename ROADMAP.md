@@ -22,7 +22,7 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 - [x] C/C++ tests (certificates, finite differences, adjointness, determinism, allocation counter) and Python tests (references, properties)
 
 - [x] Benchmarks against proxTV and Condat's C code (`bench/compare_external.py`, fetched and built at run time, fresh input per call); results in [docs/benchmarks.md](docs/benchmarks.md)
-- [x] Condat backtracking budget tuned to `4n + 1024` from measured work per sample (typical signals 1–4n, ramps up to 3000n); ramp regression test
+- [x] Condat backtracking budget tuned from measured work per sample (now `3n + 1024` rescanned steps; typical signals rescan 0–3n, ramps up to 3000n); ramp regression test
 - [x] Fuzz harness `fuzz/fuzz_ops.cpp`: libFuzzer target where available plus a standalone driver; 400k inputs clean under ASan/UBSan; nightly workflow `.github/workflows/fuzz.yml`
 - [x] CVXPY + Clarabel fixtures (180 problems, n ≤ 200) in `tests/fixtures/`; agreement within 4.2e-10
 - [x] Valgrind job in CI
@@ -32,9 +32,9 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
 **Open**
 
-- [ ] Reach the speed gate on 1D TV: fastprox's Condat path is 10–30% slower than proxTV's linearized/hybrid taut string at λ = 1, and Condat's own float32 code is up to 40% faster there. The cost is per step (work per sample is already minimal: the paper's tighter end-of-signal restart saves nothing, checked over 200k signals). Also bring the taut string closer to proxTV's classic one (now ~1.5× slower, mostly the compensated sums)
-- [ ] Simplex and ℓ1 ball: fastprox is 10–30% slower than Condat's code at n ≥ 10⁵ (faster at 10³); the remaining gap is mostly the separate finiteness pass
-- [ ] Benchmark on a homogeneous-core runner (this laptop varies ±20% run to run), and measure the design targets there: parallel scaling ≥ 0.7 × threads (measured locally: 0.86 at 2 threads, 0.69 at 4 on a 5P+10E machine) and Python overhead < 5 µs (measured 0.9–2.3 µs at n = 100); confirm or revise them in the spec
+- [~] Reach the speed gate on 1D TV. With the branch-free kernel fastprox is the fastest code in 7 of 9 float64 settings and matches or beats Condat's float32 code everywhere ([docs/benchmarks.md](docs/benchmarks.md)). Remaining: λ = 10 on smooth signals, 6–12% behind proxTV's linearized taut string; and the taut string itself (weighted problems, fallback), about 1.5× slower than proxTV's linearized one. Compensated heights explain only 10–20% of that; look at the chain updates and slope tests next
+- [ ] Simplex and ℓ1 ball: 20–35% slower than Condat's code at n ≥ 10⁵ (faster at 10³). The kernel alone is within 15%; the rest is the separate finiteness pass and the driver
+- [ ] Benchmark on a homogeneous-core runner (separate runs on this laptop differ by up to 1.6×), and measure the design targets there: parallel scaling ≥ 0.7 × threads (measured locally: 0.86 at 2 threads, 0.69 at 4 on a 5P+10E machine) and Python overhead < 5 µs (measured 0.9–2.3 µs at n = 100); confirm or revise them in the spec
 - [ ] Run the CI matrix (needs a GitHub remote); expect fixes for MSVC (OpenMP 2.0 loop variables, `/W4`). The macOS wheel runners are pinned to `macos-14`/`macos-13` because delocate raises the wheel's minimum macOS to that of Homebrew's libomp; a libomp built for older targets would widen support
 - [ ] Release wheels with cibuildwheel
 
@@ -87,8 +87,10 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 | 2026-10-14 | `fp_jvp` takes a `dparams` argument, so JVPs cover the parameters as the spec requires | `fastprox.h` |
 | 2026-10-14 | `fp_op_tv1d` takes an `fp_tv1d_method` (auto, Condat, taut string) for the manual override | `fastprox.h` |
 | 2026-10-14 | Every operator has a parameter vector θ (`fp_op_nparams`); for soft thresholding θ is the weights, and Python also reports `grads.lam` | `fastprox.h`, Python |
-| 2026-10-14 | At the end of the signal, Condat's algorithm restarts after a jump with the plain post-jump bounds instead of the paper's tightened ones (more rescanning, cannot be wrong) | `src/ops/tv1d.cpp` |
+| 2026-10-14 | At the end of the signal, Condat's algorithm restarts after a jump with the plain post-jump bounds instead of the paper's tightened ones (measured: identical work over 200k signals, and simpler) | `src/ops/tv1d.cpp` |
 | 2026-10-14 | Taut-string heights are carried as compensated double-double sums to meet the 10 n ε ‖x‖∞ accuracy on long rows | `src/ops/tv1d.cpp` |
 | 2026-10-14 | OpenMP uses dynamic scheduling over rows (balances performance and efficiency cores); determinism holds because rows are independent and vjp reductions use fixed blocks | `src/core/driver.hpp` |
-| 2026-10-14 | The automatic 1D TV path gives Condat's algorithm a budget of 4n + 1024 steps before switching to the taut string (measured: typical signals need 1–4n, ramps up to 3000n; past 4n the taut string is also faster) | `src/ops/tv1d.cpp` |
+| 2026-10-14 | The automatic 1D TV path lets Condat's algorithm rescan at most 3n + 1024 steps before switching to the taut string (measured: typical signals rescan 0–3n, ramps up to 3000n; past that the taut string is also faster) | `src/ops/tv1d.cpp` |
+| 2026-10-14 | Condat's bound updates use branch-free selects and a static table of 2¹⁵ reciprocals: faster on noisy signals, about 4% slower on smooth ones at large λ; an adaptive switch on clamp frequency was tried and mispredicts | `src/ops/tv1d.cpp` |
+| 2026-10-14 | The taut string keeps double-double tube heights: single doubles with a compensated running sum are only 10–20% faster and up to 3000× less accurate (still within the bound) | `src/ops/tv1d.cpp` |
 | 2026-10-14 | macOS wheels target the macOS version of the build runner's Homebrew libomp (14.0 arm64, 13.0 x86_64), since delocate refuses older targets | `pyproject.toml`, CI |

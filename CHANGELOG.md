@@ -17,7 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- 1D TV: the Condat path falls back to the taut string after 4n + 1024 steps (was 16n + 1024), which halves the cost on adversarial inputs such as ramps without affecting typical signals.
+- 1D TV: the Condat path falls back to the taut string after 3n + 1024 rescanned steps (was 16n + 1024 steps in total), which makes adversarial inputs such as ramps about 3.5× cheaper without affecting typical signals.
+- 1D TV: the bound updates of Condat's algorithm are branch-free selects with a table of reciprocals, 25–35% faster on noisy signals (same arithmetic, so the same results).
 - Unweighted simplex and ℓ1-ball projections keep candidate values instead of indices (about 30% faster).
 - Workspace scratch is no longer zero-filled, and the finiteness check is a branch-free pass: one-shot calls on large rows are noticeably faster.
 - The version is defined once, in `CMakeLists.txt`; the Python package reads it from there.

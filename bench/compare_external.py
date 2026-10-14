@@ -8,8 +8,11 @@ Clean-room rule: this script only compiles and calls them. Condat's files
 (CeCILL) and proxTV's bundled copies of Condat's and Kolmogorov's codes are
 not to be read by anyone working on fastprox's kernels.
 
-Timing uses a fresh input for every call: repeating one input lets the branch
-predictor learn it and makes the direct algorithms look several times faster.
+Timing uses a fresh input for every repetition, shared by all solvers in turn:
+repeating one input lets the branch predictor learn it and makes the direct
+algorithms look several times faster, and interleaving the solvers keeps the
+drift of a laptop (frequency, migration between core types) out of the
+comparison.
 Every external result is checked against fastprox before it is timed.
 """
 
@@ -176,18 +179,6 @@ def signal(kind, n, rng):
     return rng.normal(size=n)
 
 
-def time_fresh(f, make, reps):
-    """Mean time per call, each call on a fresh input made outside the timer."""
-    total = 0.0
-    for r in range(reps):
-        x, arg = make(r)
-        out = np.empty_like(x)
-        t = time.perf_counter()
-        f(x, arg, out)
-        total += time.perf_counter() - t
-    return total / reps
-
-
 def check(solvers, x, arg):
     """Names of solvers whose output differs from fastprox in their precision."""
     ref = {}
@@ -206,20 +197,34 @@ def check(solvers, x, arg):
 
 
 def table(solvers, make_input, arg, sizes, quick):
+    """One row per solver. For every size, each repetition draws a fresh
+    input and runs every solver on it in turn, so drift of the machine
+    (frequency, core migration) affects all solvers alike; the median over
+    repetitions is reported."""
     bad = check(solvers, make_input(2000, np.random.default_rng(0)), arg)
     if bad:
         print(f"  disagree with fastprox (excluded): {', '.join(bad)}")
+    names = [k for k in solvers if k not in bad]
+    best = {k: [] for k in names}
+    for n in sizes:
+        reps = 3 if quick else max(5, min(30, 10**6 // n))
+        rng = np.random.default_rng(n)
+        times = {k: [] for k in names}
+        for r in range(reps + 1):  # the first round warms up
+            x64 = make_input(n, rng)
+            for k in names:
+                f, dt = solvers[k]
+                x = x64.astype(dt)
+                out = np.empty_like(x)
+                t = time.perf_counter()
+                f(x, arg, out)
+                if r:
+                    times[k].append(time.perf_counter() - t)
+        for k in names:
+            best[k].append(np.median(times[k]) / n * 1e9)
     print("  " + " " * 34 + "".join(f"{n:>10.0e}" for n in sizes))
-    for name, (f, dt) in solvers.items():
-        if name in bad:
-            continue
-        row = []
-        for n in sizes:
-            reps = 3 if quick else max(3, min(50, 10**6 // n))
-            seeds = np.random.default_rng(n)
-            time_fresh(f, lambda r: (make_input(n, seeds).astype(dt), arg), 1)  # warm up
-            row.append(time_fresh(f, lambda r: (make_input(n, seeds).astype(dt), arg), reps) / n * 1e9)
-        print(f"  {name:34s}" + "".join(f"{v:10.2f}" for v in row))
+    for k in names:
+        print(f"  {k:34s}" + "".join(f"{v:10.2f}" for v in best[k]))
 
 
 def main():
