@@ -19,6 +19,12 @@ Exact proximal operators with JVP/VJP. C++17 core behind the plain-C header
 - `src/api/api.cpp` — the only `extern "C"` code: validation, dtype dispatch, try/catch.
 - `bindings/python/src/module.cpp` calls only the C API; `bindings/python/fastprox/__init__.py` is the user-facing package.
 
+## Tracking
+
+- `ROADMAP.md` lists planned work per release with status boxes; tick items as they land and add new ones as they come up.
+- `CHANGELOG.md` records finished changes under `[Unreleased]`, in the same change that makes them.
+- Any decision that departs from `docs/spec.md` goes in the decisions table at the end of `ROADMAP.md`, with its date.
+
 ## Rules
 
 - Clean room: never read GPL, CeCILL or unlicensed code (Condat's C files, Kolmogorov's maxflow/TVTree, Chambolle's graphTV, PyMaxflow, gco). Implement from papers and cite them in the kernel's header comment. proxTV (BSD) may be consulted with attribution.
