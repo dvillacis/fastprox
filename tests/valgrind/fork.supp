@@ -1,0 +1,12 @@
+# A child forked after the thread pool started has none of the parent's
+# worker threads, so the std::thread state those threads own (created in
+# Pool::grow) has no reference left in the child. Bounded, one per worker.
+{
+   pool-thread-state-after-fork
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:_Znwm
+   ...
+   fun:*Pool4grow*
+}
