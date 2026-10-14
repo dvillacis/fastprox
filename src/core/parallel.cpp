@@ -6,7 +6,8 @@
 // pool is never destroyed: joining threads from static destructors can
 // deadlock (under the Windows loader lock, for instance), and the threads end
 // with the process. After fork() the child has none of the parent's threads,
-// so a pool created by another process id is abandoned and a new one built.
+// so a pool created by another process id is abandoned (never touched again)
+// and a new one built.
 //
 // SPDX-License-Identifier: MIT
 #include "core/parallel.hpp"
@@ -109,7 +110,7 @@ bool spin_until(Pred pred) noexcept {
 
 class Pool {
   public:
-    explicit Pool(long pid) noexcept : pid_(pid) {}
+    Pool(long pid, Pool *abandoned) noexcept : pid_(pid), abandoned_(abandoned) {}
     long pid() const noexcept { return pid_; }
 
     // False when another caller holds the pool.
@@ -189,6 +190,7 @@ class Pool {
     }
 
     const long pid_;
+    [[maybe_unused]] Pool *const abandoned_;  // a parent process's pool, kept reachable on purpose
     std::mutex run_m_;  // one job at a time; guards threads_ and the job fields
     std::mutex m_;      // for the condition variables
     std::condition_variable wake_, done_;
@@ -208,7 +210,7 @@ Pool *get_pool() noexcept {
     const long pid = process_id();
     Pool *p = g_pool.load(std::memory_order_acquire);
     if (p && p->pid() == pid) return p;
-    Pool *fresh = new (std::nothrow) Pool(pid);
+    Pool *fresh = new (std::nothrow) Pool(pid, p);
     if (!fresh) return nullptr;
     if (g_pool.compare_exchange_strong(p, fresh, std::memory_order_acq_rel)) return fresh;
     delete fresh;  // another thread installed one first
