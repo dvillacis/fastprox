@@ -138,7 +138,7 @@ FP_API fp_status fp_op_l2_ball(double radius, fp_op **out);
 FP_API fp_status fp_op_simplex(double radius, fp_op **out);
 
 /* Projection onto sum_i w_i |z_i| <= radius. weights: NULL (w = 1), length 1
- * or the axis length, all > 0. theta = (radius). */
+ * or the axis length, all > 0, with min/max >= 1e-100. theta = (radius). */
 FP_API fp_status fp_op_l1_ball(double radius, const fp_array *weights, fp_op **out);
 
 /* g(z) = lambda ||z||_inf, through the Moreau identity with the l1 ball.

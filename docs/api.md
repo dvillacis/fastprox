@@ -39,6 +39,8 @@ Notes:
 
 - **Step versus weights.** γ multiplies the whole of g, so soft thresholding
   uses the threshold γλwᵢ and 1D TV the edge thresholds γwᵢ. Projections ignore γ.
+- **Weighted ℓ1 ball:** weights must be positive with min/max ≥ 1e-100 (only
+  their ratios matter; smaller ratios are rejected with `FP_EPARAM`).
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct

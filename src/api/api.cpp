@@ -75,10 +75,15 @@ fp_status read_vec(const fp_array *a, Vec &v) {
     const int64_t m = x.shape[0];
     if (m == 0) return FP_ESHAPE;
     v.resize(static_cast<size_t>(m));
-    for (int64_t i = 0; i < m; ++i) {
-        const int64_t o = i * x.strides[0];
-        v[static_cast<size_t>(i)] = x.dtype == FP_F32 ? reinterpret_cast<const float *>(x.data)[o]
-                                                      : reinterpret_cast<const double *>(x.data)[o];
+    const int64_t st = x.strides[0];
+    if (x.dtype == FP_F64 && st == 1) {
+        std::memcpy(v.data(), x.data, static_cast<size_t>(m) * sizeof(double));
+    } else if (x.dtype == FP_F64) {
+        const double *d = reinterpret_cast<const double *>(x.data);
+        for (int64_t i = 0; i < m; ++i) v[static_cast<size_t>(i)] = d[i * st];
+    } else {
+        const float *f = reinterpret_cast<const float *>(x.data);
+        for (int64_t i = 0; i < m; ++i) v[static_cast<size_t>(i)] = f[i * st];
     }
     return FP_OK;
 }

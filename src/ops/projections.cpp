@@ -15,6 +15,7 @@
 #include "core/op.hpp"
 #include "ops/ops.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <utility>
@@ -101,14 +102,29 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
 
 // The same method with unit weights, keeping candidate values rather than
 // indices: no indirect loads, and the pivot is (sum_V a - r) / |V|.
+//
+// If finite is not null, step 1 also tests every value for NaN or infinity
+// (an integer test on the exponent bits, off the floating-point dependency
+// chain): it reads every entry anyway, which saves a separate pass. On a
+// non-finite value *finite is false and the result is meaningless.
 template <class A>
-double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt) noexcept {
+double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
+                       bool *finite = nullptr) noexcept {
+    constexpr uint64_t kExp = 0x7ff0000000000000ull;
+    uint64_t bad = 0;
+    auto check = [&](double d) {
+        uint64_t b;
+        std::memcpy(&b, &d, sizeof b);
+        bad |= static_cast<uint64_t>((b & kExp) == kExp);
+    };
     int64_t nv = 0, nvt = 0;
     v[nv++] = a(0);
+    if (finite) check(v[0]);
     double s1 = v[0];
     double rho = s1 - r;
     for (int64_t i = 1; i < n; ++i) {
         const double ai = a(i);
+        if (finite) check(ai);
         if (ai > rho) {
             const double t1 = s1 + ai;
             const double rn = (t1 - r) / static_cast<double>(nv + 1);
@@ -124,6 +140,10 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt) noexcept
                 rho = ai - r;
             }
         }
+    }
+    if (finite) {
+        *finite = bad == 0;
+        if (bad) return 0.0;
     }
     for (int64_t j = 0; j < nvt; ++j) {
         const double ai = vt[j];
@@ -234,20 +254,31 @@ struct Simplex final : RowOp<Simplex> {
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
-        bool nan;
-        if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
-        if (nan || r == 0.0) {
+        // Non-finite input: an error for infinities, NaN in the whole row.
+        auto nonfinite = [&]() {
+            bool nan;
+            if (scan_row(x, n, nan) != kRowOk) return static_cast<int>(kRowNonFinite);
             if (nan) fill_nan(z, n); else std::memset(z, 0, static_cast<size_t>(n) * sizeof(T));
             if (code) std::memset(code, 0, static_cast<size_t>(n));
-            return kRowOk;
-        }
+            return static_cast<int>(kRowOk);
+        };
+        if (r == 0.0) return nonfinite();  // z = 0 unless the row has NaN or an infinity
         double *v = static_cast<double *>(scr);
-        const double tau =
-            condat_tau_unit(n, [x](int64_t i) { return static_cast<double>(x[i]); }, r, v, v + n);
-        for (int64_t i = 0; i < n; ++i) {
-            const double d = static_cast<double>(x[i]) - tau;
-            z[i] = static_cast<T>(d > 0 ? d : 0.0);
-            if (code) code[i] = d > 0;
+        bool finite;
+        const double tau = condat_tau_unit(
+            n, [x](int64_t i) { return static_cast<double>(x[i]); }, r, v, v + n, &finite);
+        if (!finite) return nonfinite();
+        if (code) {
+            for (int64_t i = 0; i < n; ++i) {
+                const double d = static_cast<double>(x[i]) - tau;
+                z[i] = static_cast<T>(d > 0 ? d : 0.0);
+                code[i] = d > 0;
+            }
+        } else {
+            for (int64_t i = 0; i < n; ++i) {  // vectorises
+                const double d = static_cast<double>(x[i]) - tau;
+                z[i] = static_cast<T>(d > 0 ? d : 0.0);
+            }
         }
         return kRowOk;
     }
@@ -285,16 +316,26 @@ struct Simplex final : RowOp<Simplex> {
 
 // ---------------------------------------------------------------------------
 
+constexpr double kL1Inside = -1.0, kL1Infinite = -2.0, kL1NaN = -3.0;
+
 // Projection of x onto {sum_i w_i |z_i| <= radius}; shared by the l1 ball and
 // the l-infinity prox. Returns tau with z_i = sign(x_i) max(|x_i| - tau w_i, 0),
-// or -1 when x is inside.
+// kL1Inside when x is inside the ball, or kL1Infinite / kL1NaN for rows with
+// an infinity or a NaN. The l1 norm doubles as the finiteness test: it is
+// non-finite exactly when an entry is, or when it overflows.
 template <class T>
 double l1_threshold(const T *x, int64_t n, const Vec &w, double radius, void *scr) noexcept {
     const bool weighted = w.size() > 1;
     double norm1 = 0.0;
     for (int64_t i = 0; i < n; ++i)
         norm1 += (weighted ? w[i] : w[0]) * std::fabs(static_cast<double>(x[i]));
-    if (norm1 <= radius) return -1.0;
+    if (!(norm1 <= 1.7976931348623157e308)) {
+        bool nan;
+        if (scan_row(x, n, nan) != kRowOk) return kL1Infinite;
+        if (nan) return kL1NaN;
+        // Finite entries whose norm overflows: certainly outside the ball.
+    }
+    if (norm1 <= radius) return kL1Inside;
     if (radius == 0.0) return HUGE_VAL;
     auto a = [x](int64_t i) { return std::fabs(static_cast<double>(x[i])); };
     if (weighted) {
@@ -306,10 +347,14 @@ double l1_threshold(const T *x, int64_t n, const Vec &w, double radius, void *sc
     return condat_tau_unit(n, a, radius / w[0], v, v + n) / w[0];
 }
 
+// Weights are stored divided by their maximum `scale` (the projection
+// depends only on their ratios, with radius r / scale), so that sums of
+// squared weights cannot underflow for tiny but valid weights.
 struct L1Ball final : RowOp<L1Ball> {
     double r;
-    Vec w;
-    L1Ball(double rr, Vec ww) : r(rr), w(std::move(ww)) {}
+    Vec w;         // normalised: max w = 1
+    double scale;  // the largest weight given
+    L1Ball(double rr, Vec ww, double sc) : r(rr), w(std::move(ww)), scale(sc) {}
     const char *name() const noexcept override { return "l1_ball"; }
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t n) const noexcept override {
@@ -320,15 +365,14 @@ struct L1Ball final : RowOp<L1Ball> {
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
-        bool nan;
-        if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
-        if (nan) {
+        const double tau = l1_threshold(x, n, w, r / scale, scr);
+        if (tau == kL1Infinite) return kRowNonFinite;
+        if (tau == kL1NaN) {
             fill_nan(z, n);
             if (code) std::memset(code, 0, static_cast<size_t>(n));
             return kRowOk;
         }
-        const double tau = l1_threshold(x, n, w, r, scr);
-        if (tau < 0) {
+        if (tau == kL1Inside) {
             if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
             if (code) std::memset(code, kInside, static_cast<size_t>(n));
             return kRowOk;
@@ -357,7 +401,7 @@ struct L1Ball final : RowOp<L1Ball> {
                 dot += a * static_cast<double>(dx[i]);
                 w2 += wi(i) * wi(i);
             }
-        const double c = w2 > 0 ? (dot - (dp ? dp[0] : 0.0)) / w2 : 0.0;
+        const double c = w2 > 0 ? (dot - (dp ? dp[0] / scale : 0.0)) / w2 : 0.0;
         for (int64_t i = 0; i < n; ++i) {
             if (code[i]) {
                 const double a = std::copysign(wi(i), static_cast<double>(x[i]));
@@ -390,7 +434,7 @@ struct L1Ball final : RowOp<L1Ball> {
                 gx[i] = T(0);
             }
         }
-        acc[0] += c;
+        acc[0] += c / scale;
     }
 };
 
@@ -409,15 +453,14 @@ struct LInf final : RowOp<LInf> {
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
-        bool nan;
-        if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
-        if (nan) {
+        const double tau = l1_threshold(x, n, one, gamma * lambda, scr);
+        if (tau == kL1Infinite) return kRowNonFinite;
+        if (tau == kL1NaN) {
             fill_nan(z, n);
             if (code) std::memset(code, 0, static_cast<size_t>(n));
             return kRowOk;
         }
-        const double tau = l1_threshold(x, n, one, gamma * lambda, scr);
-        if (tau < 0) {
+        if (tau == kL1Inside) {
             std::memset(z, 0, static_cast<size_t>(n) * sizeof(T));
             if (code) std::memset(code, kInside, static_cast<size_t>(n));
             return kRowOk;
@@ -490,9 +533,17 @@ fp_status make_simplex(double radius, fp_op **out) {
 fp_status make_l1_ball(double radius, Vec w, fp_op **out) {
     if (!finite_nonneg(radius)) return FP_EPARAM;
     if (w.empty()) w.assign(1, 1.0);
-    for (double v : w)
+    double wmax = 0.0, wmin = HUGE_VAL;
+    for (double v : w) {
         if (!finite_nonneg(v) || v == 0.0) return FP_EPARAM;
-    *out = new L1Ball(radius, std::move(w));
+        wmax = std::max(wmax, v);
+        wmin = std::min(wmin, v);
+    }
+    // Squares of weight ratios below 1e-100 underflow; such weights are
+    // rejected rather than silently mishandled.
+    if (wmin / wmax < 1e-100) return FP_EPARAM;
+    for (double &v : w) v /= wmax;
+    *out = new L1Ball(radius, std::move(w), wmax);
     return FP_OK;
 }
 

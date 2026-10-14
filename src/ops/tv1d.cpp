@@ -51,6 +51,8 @@ struct RecipTable {
     }
 };
 
+constexpr int64_t kBranchFree = 8;  // measured: 8 to 16 is best across signals
+
 inline const double *recip_table() noexcept {
     static const RecipTable t;
     return t.r;
@@ -65,10 +67,11 @@ inline const double *recip_table() noexcept {
 // than `budget` steps had to be rescanned after jumps (the output is then
 // incomplete).
 //
-// The bound updates inside a segment are branch-free selects: whether a bound
-// is clamped is close to random on noisy signals, and mispredicted branches
-// cost more than always computing the update. The arithmetic is the same
-// either way, so this changes speed, not results.
+// In the first kBranchFree samples of a segment the bound updates are
+// branch-free selects: there, whether a bound is clamped is close to random
+// and mispredicted branches cost more than always computing the update. In
+// longer segments the bounds settle and branches predict well. The arithmetic
+// is the same either way, so this changes speed, not results.
 template <class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
@@ -122,14 +125,29 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                 umin += yn - vmin;
                 umax += yn - vmax;
                 const int64_t m = k - k0 + 1;
-                const double r = m < kRecip ? recip[m] : 1.0 / static_cast<double>(m);
-                const bool cm = umin >= ln, cp = umax <= -ln;
-                vmin = cm ? vmin + (umin - ln) * r : vmin;
-                umin = cm ? ln : umin;
-                km = cm ? k : km;
-                vmax = cp ? vmax + (umax + ln) * r : vmax;
-                umax = cp ? -ln : umax;
-                kp = cp ? k : kp;
+                if (m < kBranchFree) {
+                    const double r = recip[m];
+                    const bool cm = umin >= ln, cp = umax <= -ln;
+                    vmin = cm ? vmin + (umin - ln) * r : vmin;
+                    umin = cm ? ln : umin;
+                    km = cm ? k : km;
+                    vmax = cp ? vmax + (umax + ln) * r : vmax;
+                    umax = cp ? -ln : umax;
+                    kp = cp ? k : kp;
+                } else {
+                    // Clamps are rare here: fetch 1/m only when one happens.
+                    auto rcp = [&] { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
+                    if (umin >= ln) {
+                        vmin += (umin - ln) * rcp();
+                        umin = ln;
+                        km = k;
+                    }
+                    if (umax <= -ln) {
+                        vmax += (umax + ln) * rcp();
+                        umax = -ln;
+                        kp = k;
+                    }
+                }
             }
         }
         // End of the signal: the last segment must close with u_{n-1} = 0.
@@ -294,23 +312,28 @@ void taut_string(const T *y, T *z, int64_t m, R edge_radius, uint8_t *code, void
 }
 
 struct TV1D final : RowOp<TV1D> {
-    Vec w;
-    bool uniform;
+    Vec wpad;  // the weights followed by a zero: radius(m - 1) of the last piece reads it
+    int64_t nw;  // number of weights (1 or n - 1)
+    double wmax;
+    bool uniform, has_zero;
     fp_tv1d_method method;
 
-    TV1D(Vec ww, bool uni, fp_tv1d_method m) : w(std::move(ww)), uniform(uni), method(m) {}
+    // wp holds the weights plus one trailing zero.
+    TV1D(Vec wp, double mx, bool uni, bool zero, fp_tv1d_method m)
+        : wpad(std::move(wp)), nw(static_cast<int64_t>(wpad.size()) - 1), wmax(mx), uniform(uni),
+          has_zero(zero), method(m) {}
 
     const char *name() const noexcept override { return "tv1d"; }
-    int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
+    int64_t nparams() const noexcept override { return nw; }
     fp_status check_n(int64_t n) const noexcept override {
-        return (w.size() == 1 || static_cast<int64_t>(w.size()) == n - 1) ? FP_OK : FP_ESHAPE;
+        return (nw == 1 || nw == n - 1) ? FP_OK : FP_ESHAPE;
     }
     size_t scratch_bytes(int64_t n) const noexcept override {
         return taut_scratch(n) + static_cast<size_t>(n + 1) * sizeof(double);  // chains, radii
     }
     bool needs_distinct() const noexcept override { return true; }
 
-    double we(int64_t e) const noexcept { return w.size() == 1 ? w[0] : w[e]; }
+    double we(int64_t e) const noexcept { return nw == 1 ? wpad[0] : wpad[e]; }
 
     // z = x with the structure of the limit gamma -> 0+.
     template <class T>
@@ -333,6 +356,20 @@ struct TV1D final : RowOp<TV1D> {
     template <class T>
     void solve_weighted(const T *x, T *z, int64_t m, double gamma, const double *we, double range,
                         uint8_t *code, void *scr) const noexcept {
+        // Fast path: every radius is at most 2 range, below the smallest
+        // clamping bound, and comparable to the data, so the scan reads
+        // gamma w_e directly. we[m - 1] is the zero that ends the piece
+        // (a zero-weight edge, or the padding after the last edge).
+        if (gamma * wmax <= 2.0 * range) {
+            auto edge = [gamma, we](int64_t e) { return gamma * we[e]; };
+            if (method != FP_TV1D_TAUT_STRING) {
+                const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : condat_budget(m);
+                if (condat(x, z, m, edge, code, budget)) return;
+                if (code) std::memset(code + 1, 0, static_cast<size_t>(m - 1));
+            }
+            taut_string(x, z, m, edge, code, scr);
+            return;
+        }
         double *rad = reinterpret_cast<double *>(static_cast<char *>(scr) + taut_scratch(m));
         bool all_inactive = true;
         for (int64_t e = 0; e + 1 < m; ++e) {
@@ -373,11 +410,11 @@ struct TV1D final : RowOp<TV1D> {
         }
         if (uniform) {
             // No edge can be active: |u_e| <= min(e + 1, n - 1 - e) range.
-            if (gamma * w[0] >= static_cast<double>(n / 2) * range) {
+            if (gamma * wpad[0] >= static_cast<double>(n / 2) * range) {
                 constant_mean(x, z, n);
                 return kRowOk;
             }
-            const double lam = std::min(gamma * w[0], inactive_radius(n / 2, range));
+            const double lam = std::min(gamma * wpad[0], inactive_radius(n / 2, range));
             if (lam == 0.0) {
                 identity(x, z, n, code);
                 return kRowOk;
@@ -391,10 +428,14 @@ struct TV1D final : RowOp<TV1D> {
             return kRowOk;
         }
         // Weighted: independent pieces between zero-weight edges.
+        if (!has_zero) {
+            solve_weighted(x, z, n, gamma, wpad.data(), range, code, scr);
+            return kRowOk;
+        }
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
-            if (e == n - 1 || w[e] == 0.0) {
-                solve_weighted(x + s, z + s, e - s + 1, gamma, w.data() + s, range,
+            if (e == n - 1 || wpad[e] == 0.0) {
+                solve_weighted(x + s, z + s, e - s + 1, gamma, wpad.data() + s, range,
                                code ? code + s : nullptr, scr);
                 if (code) {
                     if (s > 0) code[s] = kFree;
@@ -430,11 +471,11 @@ struct TV1D final : RowOp<TV1D> {
             for (int64_t i = s; i <= t; ++i) num += static_cast<double>(dx[i]);
             if (s > 0) {
                 num += sl * we(s - 1) * dgamma;
-                if (dp) num += gamma * sl * dp[w.size() == 1 ? 0 : s - 1];
+                if (dp) num += gamma * sl * dp[nw == 1 ? 0 : s - 1];
             }
             if (t < n - 1) {
                 num -= sr * we(t) * dgamma;
-                if (dp) num -= gamma * sr * dp[w.size() == 1 ? 0 : t];
+                if (dp) num -= gamma * sr * dp[nw == 1 ? 0 : t];
             }
             const T v = static_cast<T>(num / static_cast<double>(t - s + 1));
             for (int64_t i = s; i <= t; ++i) dz[i] = v;
@@ -452,11 +493,11 @@ struct TV1D final : RowOp<TV1D> {
             for (int64_t i = s; i <= t; ++i) gx[i] = static_cast<T>(m);
             if (s > 0 && sl != 0.0) {
                 acc[P] += sl * we(s - 1) * m;
-                acc[w.size() == 1 ? 0 : s - 1] += gamma * sl * m;
+                acc[nw == 1 ? 0 : s - 1] += gamma * sl * m;
             }
             if (t < n - 1 && sr != 0.0) {
                 acc[P] -= sr * we(t) * m;
-                acc[w.size() == 1 ? 0 : t] -= gamma * sr * m;
+                acc[nw == 1 ? 0 : t] -= gamma * sr * m;
             }
         });
     }
@@ -468,12 +509,16 @@ fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out) {
     if (method != FP_TV1D_AUTO && method != FP_TV1D_CONDAT && method != FP_TV1D_TAUT_STRING)
         return FP_EPARAM;
     if (w.empty()) w.assign(1, 1.0);
-    bool uniform = true;
-    for (double v : w) {
+    bool uniform = true, zero = false;
+    double wmax = 0.0;
+    for (double v : w) {  // one pass: validate, and find uniformity, zeros, max
         if (!finite_nonneg(v)) return FP_EPARAM;
         uniform = uniform && v == w[0];
+        zero = zero || v == 0.0;
+        wmax = v > wmax ? v : wmax;
     }
-    *out = new TV1D(std::move(w), uniform, method);
+    w.push_back(0.0);
+    *out = new TV1D(std::move(w), wmax, uniform, zero, method);
     return FP_OK;
 }
 

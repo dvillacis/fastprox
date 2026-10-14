@@ -144,6 +144,20 @@ def test_tv1d_extreme_weights_within_spec_bound(method):
         assert ref.tv1d_kkt_residual(x, z, gamma, 1.0) < bound
 
 
+def test_l1_ball_tiny_weights():
+    # Only weight ratios matter: uniformly tiny weights must behave like any
+    # other scale (their squares would underflow without normalisation).
+    rng = np.random.default_rng(4)
+    x = rng.normal(size=50)
+    w = rng.uniform(0.5, 1.5, 50)
+    for s in (1e-200, 1.0, 1e200):
+        z = fp.project_l1_ball(x, 2.0 * s, weights=w * s)
+        np.testing.assert_allclose(z, ref.l1_ball(x, 2.0, w), rtol=1e-12, atol=1e-12)
+    # Ratios whose squares underflow are rejected.
+    with pytest.raises(ValueError):
+        fp.L1Ball(1.0, np.r_[1.0, 1e-200])
+
+
 def test_tv1d_gamma_zero_is_identity():
     x = np.random.default_rng(0).normal(size=(3, 50))
     np.testing.assert_array_equal(fp.tv1d(x, 0.0), x)
@@ -348,3 +362,15 @@ def test_errors():
     assert np.isnan(z).all()
     z = fp.soft_threshold(np.array([np.nan, 3.0]))
     assert np.isnan(z[0]) and z[1] == 2.0
+    # Row operators: NaN fills the row, an infinity is an error, in either
+    # position of the row and on every code path (radius zero included).
+    for f in (lambda v: fp.project_simplex(v, 1.0), lambda v: fp.project_simplex(v, 0.0),
+              lambda v: fp.project_l1_ball(v, 1.0), lambda v: fp.prox_linf(v, 1.0),
+              lambda v: fp.project_l1_ball(v, 1.0, weights=np.arange(1.0, 5.0))):
+        for pos in (0, 3):
+            v = np.array([5.0, -2.0, 0.5, 1.0])
+            v[pos] = np.nan
+            assert np.isnan(f(v)).all()
+            v[pos] = np.inf
+            with pytest.raises(ValueError):
+                f(v)

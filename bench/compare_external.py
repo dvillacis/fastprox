@@ -157,8 +157,17 @@ def tv_solvers():
 def weighted_tv_solvers():
     """name -> (f(x, lam_per_edge, out), dtype) for weighted 1D TV."""
     f64 = np.float64
-    solvers = {"fastprox": (lambda x, lam, out: fp.tv1d(x, 1.0, weights=lam, out=out, threads=1),
-                            f64)}
+    # Weights are fixed per operator in fastprox: build it once per weight
+    # vector (outside the timer) and reuse it, as an application would.
+    ops = {}
+
+    def fastprox_weighted(x, lam, out):
+        op = ops.get(id(lam))
+        if op is None:
+            op = ops[id(lam)] = (fp.TV1D(lam), lam)
+        op[0].prox(x, 1.0, out=out, threads=1)
+
+    solvers = {"fastprox": (fastprox_weighted, f64)}
     try:
         ptv = ctypes.CDLL(str(build_proxtv()))
         ptv.shim_weighted_taut.argtypes = [DBL, DBL, DBL, ctypes.c_int]

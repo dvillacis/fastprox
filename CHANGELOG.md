@@ -22,12 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 1D TV: weighted problems now use Condat's direct algorithm, generalised to per-edge weights (radii precomputed per piece), with the same budgeted fallback to the taut string; `FP_TV1D_CONDAT` accepts weights. Weighted rows went from 1.4–2.8× slower than proxTV's weighted taut string to faster in most settings.
 - 1D TV: radii that can never be active (above the dual bound j · (max x − min x)) are clamped, and when no edge can be active the result is the constant mean. Extreme weights or steps no longer cost accuracy: the residual stays within 10 n ε ‖x‖∞.
 - 1D TV: the taut string stores its two chains as segments (length, rise, cached slope) in coordinates local to the current knot, an idea taken from proxTV's classic taut string. It is 17–26% faster and needs no compensated sums: the cumulative sum of the signal is never formed.
-- Unweighted simplex and ℓ1-ball projections keep candidate values instead of indices (about 30% faster).
+- Unweighted simplex and ℓ1-ball projections keep candidate values instead of indices (about 30% faster). The simplex also tests finiteness inside its pivot pass instead of a separate pass (a further 19%), and the ℓ1 ball and ℓ∞ prox reuse their ℓ1 norm as the test.
+- 1D TV: bound updates are branch-free only in the first 8 samples of a segment; weighted rows read their radii directly when none can need clamping; operator construction makes one pass over the weights.
 - Workspace scratch is no longer zero-filled, and the finiteness check is a branch-free pass: one-shot calls on large rows are noticeably faster.
 - The version is defined once, in `CMakeLists.txt`; the Python package reads it from there.
 
 ### Fixed
 
+- Weighted ℓ1-ball projection returned infinities for tiny weights (around 1e-279) because sums of squared weights underflowed (found by fuzzing). Weights are now normalised by their maximum, and ratios below 1e-100 are rejected.
 - `fp_prox_conj` with σ = 0 on arrays with negative strides computed byte offsets in unsigned arithmetic (undefined behaviour, found by fuzzing).
 - Static Windows builds marked API symbols `dllexport`.
 - The taut string kept cumulative sums in plain doubles and missed the 10 n ε ‖x‖∞ accuracy bound on long rows; its chains now use local coordinates.
