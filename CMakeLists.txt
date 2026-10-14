@@ -5,6 +5,7 @@ option(FASTPROX_OPENMP "Parallelise over rows with OpenMP" ON)
 option(FASTPROX_BUILD_TESTS "Build the C and C++ tests" ${PROJECT_IS_TOP_LEVEL})
 option(FASTPROX_PYTHON "Build the nanobind Python extension" OFF)
 option(FASTPROX_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+option(FASTPROX_FUZZ "Build the fuzzing harnesses" OFF)
 option(BUILD_SHARED_LIBS "Build libfastprox as a shared library" ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -18,6 +19,16 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(GNUInstallDirs)
+
+# project() above is the single source of the version (pyproject.toml reads it
+# too); the public header's macros must agree with it.
+file(STRINGS include/fastprox.h _fp_version_lines REGEX "#define FP_VERSION_(MAJOR|MINOR|PATCH) ")
+string(REGEX REPLACE ".*MAJOR ([0-9]+).*MINOR ([0-9]+).*PATCH ([0-9]+).*" "\\1.\\2.\\3"
+  _fp_header_version "${_fp_version_lines}")
+if(NOT _fp_header_version STREQUAL PROJECT_VERSION)
+  message(FATAL_ERROR "fastprox.h declares version ${_fp_header_version}, "
+                      "CMakeLists.txt ${PROJECT_VERSION}")
+endif()
 
 # The Python extension links the core statically.
 if(FASTPROX_PYTHON)
@@ -125,6 +136,13 @@ endif()
 if(FASTPROX_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests/c)
+endif()
+
+if(FASTPROX_FUZZ)
+  if(NOT FASTPROX_BUILD_TESTS)
+    enable_testing()
+  endif()
+  add_subdirectory(fuzz)
 endif()
 
 # ---------------------------------------------------------------- python

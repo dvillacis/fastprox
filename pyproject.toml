@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "fastprox"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "Exact proximal operators and projections with derivatives"
 readme = "README.md"
 license = "MIT"
@@ -20,6 +20,10 @@ classifiers = [
 
 [dependency-groups]
 dev = ["pytest>=8", "hypothesis>=6", "cmake>=3.20", "ninja"]
+ref = [
+    "clarabel>=0.11.1",
+    "cvxpy>=1.9.3",
+]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -27,6 +31,12 @@ build-dir = "build/{wheel_tag}"
 wheel.py-api = "cp312"
 wheel.packages = ["bindings/python/fastprox"]
 cmake.build-type = "Release"
+
+# One version for the C core and the Python package: CMakeLists.txt project().
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\(fastprox VERSION (?P<value>[0-9][0-9.]*)'
 
 [tool.scikit-build.cmake.define]
 FASTPROX_PYTHON = "ON"
@@ -57,4 +67,14 @@ test-command = "pytest -q {project}/tests/python"
 
 [tool.cibuildwheel.macos]
 before-all = "brew install libomp"
-# delocate (the default repair command) bundles libomp into the wheel.
+# delocate (the default repair command) bundles libomp into the wheel. It
+# refuses libraries built for a newer macOS than the wheel targets, so the
+# deployment target follows the runners' Homebrew libomp bottles.
+
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_arm64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
+
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_x86_64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "13.0" }

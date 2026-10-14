@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace fp {
@@ -228,10 +229,41 @@ struct RowOp : fp_op {
 #undef FP_ROW_FORWARD
 };
 
+// Bit layout of the exponent field, to test finiteness without branches.
+template <class T>
+struct FloatBits;
+template <>
+struct FloatBits<float> {
+    using U = uint32_t;
+    static constexpr U exp = 0x7f800000u;
+};
+template <>
+struct FloatBits<double> {
+    using U = uint64_t;
+    static constexpr U exp = 0x7ff0000000000000ull;
+};
+
+// True when every entry is finite. A branch-free pass over the bit patterns,
+// which the compiler vectorises; the common case costs a fraction of a
+// nanosecond per entry.
+template <class T>
+inline bool all_finite(const T *x, int64_t n) noexcept {
+    using U = typename FloatBits<T>::U;
+    constexpr U e = FloatBits<T>::exp;
+    U bad = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        U b;
+        std::memcpy(&b, x + i, sizeof b);
+        bad |= static_cast<U>((b & e) == e);
+    }
+    return bad == 0;
+}
+
 // Scans a row: returns kRowNonFinite on any infinity and sets has_nan.
 template <class T>
 inline int scan_row(const T *x, int64_t n, bool &has_nan) noexcept {
     has_nan = false;
+    if (all_finite(x, n)) return kRowOk;
     for (int64_t i = 0; i < n; ++i) {
         const T v = x[i];
         if (v != v) {

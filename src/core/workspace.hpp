@@ -9,7 +9,7 @@
 #include "core/op.hpp"
 
 #include <cstdint>
-#include <vector>
+#include <memory>
 
 namespace fp {
 
@@ -18,6 +18,23 @@ constexpr int64_t kParallelMin = 1 << 15;  // below this many entries, run seria
 constexpr int64_t kMaxBlocks = 64;         // vjp reduction blocks
 
 inline int64_t ceil_div(int64_t a, int64_t b) noexcept { return (a + b - 1) / b; }
+
+// Owning array that is not zero-filled: workspace memory is scratch, and
+// clearing megabytes on every one-shot call would cost more than the kernels.
+template <class T>
+class Buffer {
+  public:
+    void resize(size_t n) {
+        p_.reset(n ? new T[n] : nullptr);  // default-initialised: no clearing
+        n_ = n;
+    }
+    T *data() const noexcept { return p_.get(); }
+    size_t size() const noexcept { return n_; }
+
+  private:
+    std::unique_ptr<T[]> p_;
+    size_t n_ = 0;
+};
 
 // Number of fixed reduction blocks for a vjp over `units` work units (rows or
 // chunks). It depends only on the problem, never on the thread count, so
@@ -43,15 +60,15 @@ struct fp_workspace {
 
     // Per-thread scratch: four rows of T plus the kernel's own scratch.
     size_t thread_bytes = 0;
-    mutable std::vector<double> scratch;
+    fp::Buffer<double> scratch;
 
     // Saved structure, in canonical order: C order for elementwise operators,
     // rows (axis last) for row operators.
-    std::vector<double> xsave, zsave;  // raw storage for T
-    std::vector<uint8_t> code;
-    mutable std::vector<double> acc;      // reduction blocks, nblocks * (P + 2)
-    mutable std::vector<double> tot;      // reduced totals, P + 2
-    mutable std::vector<double> dparams;  // dparams converted to double
+    fp::Buffer<double> xsave, zsave;  // raw storage for T
+    fp::Buffer<uint8_t> code;
+    fp::Buffer<double> acc;      // reduction blocks, nblocks * (P + 2)
+    fp::Buffer<double> tot;      // reduced totals, P + 2
+    fp::Buffer<double> dparams;  // dparams converted to double
     int64_t nblocks = 1;
 
     // State of the last prox call.

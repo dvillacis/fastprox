@@ -203,11 +203,13 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         Arr src = x;
         const int64_t *st[2] = {x.strides, out.strides};
         const ElemPlan p = make_elem_plan(x.ndim, x.shape, axis, false, 2, st);
-        const size_t item = x.itemsize();
+        // Byte offsets stay signed: strides may be negative.
+        const int64_t item = static_cast<int64_t>(x.itemsize());
         p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
             for (int64_t i = 0; i < len; ++i)
                 std::memmove(out.data + (off[1] + i * p.stride[1][p.ndim - 1]) * item,
-                             src.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item, item);
+                             src.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item,
+                             static_cast<size_t>(item));
         });
         return FP_OK;
     }

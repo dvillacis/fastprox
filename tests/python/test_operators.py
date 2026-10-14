@@ -100,6 +100,20 @@ def test_tv1d_optimality(n, gamma):
         np.testing.assert_allclose(zs[1], zs[2], rtol=0, atol=1e-10 * (1 + np.abs(x).max()))
 
 
+@pytest.mark.parametrize("gamma", [1e-3, 1.0, 1e3])
+def test_tv1d_adversarial_inputs_stay_fast(gamma):
+    # A linear ramp makes Condat's algorithm quadratic (about 3000 n steps at
+    # gamma = 1e3); the automatic path must switch to the taut string.
+    import time
+
+    n = 10**5
+    for x in (np.arange(n) / n, np.arange(n) / n * 10 + 0.1 * np.sin(np.arange(n))):
+        t = time.perf_counter()
+        z = fp.tv1d(x, gamma, threads=1)
+        assert time.perf_counter() - t < 0.5  # forced Condat takes seconds
+        assert ref.tv1d_kkt_residual(x, z, gamma, 1.0) < 1e-11
+
+
 def test_tv1d_weighted_with_zeros():
     rng = np.random.default_rng(3)
     for _ in range(100):

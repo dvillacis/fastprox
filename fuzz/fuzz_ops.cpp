@@ -1,0 +1,296 @@
+// Fuzz harness for the public API: arbitrary bytes become an operator, its
+// parameters, an array (shape, axis, strides, dtype, values including NaN,
+// infinities and denormals), a step and options; the harness runs prox,
+// prox_conj, jvp and vjp and checks the invariants that must hold for every
+// input:
+//   * every call returns a valid fp_status and never crashes or hangs;
+//   * results are bit-identical for one and several threads;
+//   * finite moderate inputs give finite outputs from a successful prox.
+//
+// Built as a libFuzzer target where the compiler supports -fsanitize=fuzzer,
+// and otherwise as a standalone driver (fuzz/standalone.cpp) that replays
+// files or generates random inputs.
+#include "fastprox.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+struct Bytes {
+    const uint8_t *p;
+    size_t n;
+    uint8_t u8() {
+        if (!n) return 0;
+        --n;
+        return *p++;
+    }
+    uint64_t u64() {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v = (v << 8) | u8();
+        return v;
+    }
+    double f64() {  // raw bit patterns: NaN, infinities, denormals included
+        const uint64_t b = u64();
+        double d;
+        std::memcpy(&d, &b, 8);
+        return d;
+    }
+    // A double that is usually tame and sometimes raw.
+    double value() {
+        switch (u8() % 8) {
+            case 0: return f64();
+            case 1: return 0.0;
+            case 2: return static_cast<double>(static_cast<int8_t>(u8()));
+            default: return static_cast<double>(static_cast<int16_t>(u8() << 8 | u8())) / 256.0;
+        }
+    }
+    double max_param = 0.0;  // largest magnitude handed out by param()
+    double param() {
+        double v;
+        switch (u8() % 6) {
+            case 0: v = f64(); break;
+            case 1: v = 0.0; break;
+            default: v = (u8() + 1) / 64.0;
+        }
+        if (!(std::fabs(v) <= max_param)) max_param = std::fabs(v);  // NaN sticks
+        return v;
+    }
+};
+
+char g_case[256];  // description of the case under test, for reports
+
+[[noreturn]] void fail(const char *what) {
+    std::fprintf(stderr, "invariant violated: %s\n  case: %s\n", what, g_case);
+    std::abort();
+}
+
+bool valid_status(fp_status s) { return s >= FP_OK && s <= FP_EINTERNAL; }
+
+struct Case {
+    fp_op *op = nullptr;
+    std::vector<double> params[2];
+    std::vector<int64_t> groups;
+};
+
+fp_array vec(std::vector<double> &v) {
+    static thread_local int64_t shape[2];
+    shape[0] = static_cast<int64_t>(v.size());
+    return fp_array{v.data(), FP_F64, 1, shape, nullptr, FP_DEVICE_CPU};
+}
+
+// Builds an operator from the bytes; params are sized for axis length n.
+fp_status make_op(Bytes &b, int64_t n, Case &c) {
+    const int kind = b.u8() % 13;
+    auto fill = [&](std::vector<double> &v, int64_t len) {
+        v.resize(static_cast<size_t>(len > 0 ? len : 1));
+        for (auto &x : v) x = b.param();
+    };
+    const int64_t pick = (b.u8() % 3 == 0) ? 1 : n;  // scalar or per-entry
+    static int64_t s0[1], s1[1];
+    fp_array a0, a1;
+    switch (kind) {
+        case 0:
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            return fp_op_soft(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        case 1: return fp_op_elastic_net(b.param(), b.param(), &c.op);
+        case 2: return fp_op_huber(b.param(), b.param(), &c.op);
+        case 3: {
+            const int64_t G = 1 + b.u8() % 4;
+            c.groups.resize(static_cast<size_t>(n > 0 ? n : 1));
+            for (auto &g : c.groups) g = b.u8() % (G + (b.u8() % 8 == 0));  // occasionally out of range
+            fill(c.params[0], b.u8() % 2 ? G : 1);
+            a0 = vec(c.params[0]);
+            return fp_op_group_l2(b.param(), static_cast<int64_t>(c.groups.size()),
+                                  b.u8() % 3 ? c.groups.data() : nullptr, G, &a0, &c.op);
+        }
+        case 4: {
+            fill(c.params[0], pick);
+            fill(c.params[1], pick);
+            for (size_t i = 0; i < c.params[0].size(); ++i) c.params[0][i] = -c.params[0][i];
+            s0[0] = static_cast<int64_t>(c.params[0].size());
+            s1[0] = static_cast<int64_t>(c.params[1].size());
+            a0 = fp_array{c.params[0].data(), FP_F64, 1, s0, nullptr, FP_DEVICE_CPU};
+            a1 = fp_array{c.params[1].data(), FP_F64, 1, s1, nullptr, FP_DEVICE_CPU};
+            const bool arrays = b.u8() % 2;
+            return fp_op_box(-b.param(), b.param(), arrays ? &a0 : nullptr, arrays ? &a1 : nullptr,
+                             &c.op);
+        }
+        case 5: return fp_op_nonneg(&c.op);
+        case 6: return fp_op_l2_ball(b.param(), &c.op);
+        case 7: return fp_op_simplex(b.param(), &c.op);
+        case 8:
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            return fp_op_l1_ball(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        case 9: return fp_op_linf(b.param(), &c.op);
+        case 10:
+            fill(c.params[0], n);
+            a0 = vec(c.params[0]);
+            return fp_op_isotonic(b.u8() % 2 ? &a0 : nullptr, b.u8() % 2, &c.op);
+        default:
+            fill(c.params[0], pick == 1 ? 1 : n - 1);
+            if (b.u8() % 4 == 0)  // zero weights split the row
+                for (auto &w : c.params[0])
+                    if (b.u8() % 3 == 0) w = 0.0;
+            a0 = vec(c.params[0]);
+            return fp_op_tv1d(b.u8() % 2 ? &a0 : nullptr, static_cast<fp_tv1d_method>(b.u8() % 4),
+                              &c.op);
+    }
+}
+
+void run(const uint8_t *data, size_t size) {
+    Bytes b{data, size};
+
+    // Array: up to 3 dimensions of up to 40 entries, optionally a strided
+    // (reversed or stepped) view of a larger buffer.
+    const int ndim = b.u8() % 4;  // 0 = scalar
+    int64_t shape[3] = {1, 1, 1}, base[3], strides[3];
+    int64_t numel = 1;
+    for (int d = 0; d < ndim; ++d) {
+        shape[d] = b.u8() % 41;
+        numel *= shape[d];
+    }
+    const int axis = ndim ? static_cast<int>(b.u8() % (2 * ndim)) - ndim : -1;
+    const int64_t n = ndim ? shape[(axis + ndim) % ndim] : 1;
+    const bool f32 = b.u8() % 3 == 0;
+    const int step = 1 + b.u8() % 2;
+    const bool reverse = b.u8() % 4 == 0;
+
+    int64_t total = 1;
+    for (int d = ndim - 1; d >= 0; --d) {
+        base[d] = total;
+        total *= (d == ndim - 1 ? step : 1) * std::max<int64_t>(shape[d], 1);
+    }
+    for (int d = 0; d < ndim; ++d) strides[d] = base[d] * (d == ndim - 1 ? step : 1);
+    const size_t item = f32 ? 4 : 8;
+    std::vector<unsigned char> xbuf(static_cast<size_t>(total) * item + 8);
+    int64_t offset = 0;
+    if (reverse && ndim && shape[0] > 0) {
+        offset = (shape[0] - 1) * strides[0];
+        strides[0] = -strides[0];
+    }
+    for (int64_t i = 0; i < total; ++i) {
+        const double v = b.value();
+        if (f32) {
+            const float f = static_cast<float>(v);
+            std::memcpy(&xbuf[static_cast<size_t>(i) * 4], &f, 4);
+        } else {
+            std::memcpy(&xbuf[static_cast<size_t>(i) * 8], &v, 8);
+        }
+    }
+    void *x0 = xbuf.data() + offset * static_cast<int64_t>(item);
+
+    Case c;
+    const fp_status cs = make_op(b, n, c);
+    if (!valid_status(cs)) fail("constructor status");
+    if (cs != FP_OK) {
+        if (c.op) fail("constructor wrote a handle on failure");
+        return;
+    }
+
+    const double gamma = b.u8() % 4 ? b.param() : b.f64();
+    std::snprintf(g_case, sizeof g_case, "op=%s nparams=%lld dtype=%s ndim=%d shape=(%lld,%lld,%lld) axis=%d gamma=%.17g",
+                  fp_op_name(c.op), static_cast<long long>(fp_op_nparams(c.op)), f32 ? "f32" : "f64", ndim,
+                  static_cast<long long>(shape[0]), static_cast<long long>(shape[1]),
+                  static_cast<long long>(shape[2]), axis, gamma);
+    fp_options o;
+    fp_options_init(&o);
+    o.axis = axis;
+
+    // Contiguous outputs for one and four threads.
+    const fp_dtype dt = f32 ? FP_F32 : FP_F64;
+    std::vector<unsigned char> z1(static_cast<size_t>(numel) * item + 8),
+        z4(static_cast<size_t>(numel) * item + 8);
+    const fp_array x{x0, dt, ndim, shape, strides, FP_DEVICE_CPU};
+    fp_array o1{z1.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array o4{z4.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+
+    const bool conj = b.u8() % 3 == 0;
+    std::strncat(g_case, conj ? " conj" : "", sizeof g_case - std::strlen(g_case) - 1);
+    auto prox = conj ? fp_prox_conj : fp_prox;
+    o.threads = 1;
+    const fp_status s1 = prox(c.op, gamma, &x, &o1, &o, nullptr, nullptr);
+    o.threads = 4;
+    const fp_status s4 = prox(c.op, gamma, &x, &o4, &o, nullptr, nullptr);
+    if (!valid_status(s1) || s1 != s4) fail("prox status");
+    if (s1 == FP_OK && std::memcmp(z1.data(), z4.data(), static_cast<size_t>(numel) * item) != 0)
+        fail("thread count changed the result");
+
+    // Finite moderate input, parameters and step: the output of a successful
+    // prox is finite. Moderate means far from overflow in the array's dtype.
+    const double big = f32 ? 1e12 : 1e100;
+    if (s1 == FP_OK && std::isfinite(gamma) && gamma < 1e6 && b.max_param < big &&
+        !(conj && gamma < 1e-6)) {
+        bool moderate = true;
+        std::vector<double> xs;
+        for (int64_t i = 0; i < total && moderate; ++i) {
+            double v;
+            if (f32) {
+                float f;
+                std::memcpy(&f, &xbuf[static_cast<size_t>(i) * 4], 4);
+                v = f;
+            } else {
+                std::memcpy(&v, &xbuf[static_cast<size_t>(i) * 8], 8);
+            }
+            moderate = std::isfinite(v) && std::fabs(v) < big;
+        }
+        if (moderate)
+            for (int64_t i = 0; i < numel; ++i) {
+                const double v = f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[i])
+                                     : reinterpret_cast<double *>(z1.data())[i];
+                if (!std::isfinite(v)) {
+                    std::fprintf(stderr, "x (raw buffer):");
+                    for (int64_t k = 0; k < total; ++k)
+                        std::fprintf(stderr, " %.9g", f32 ? static_cast<double>(reinterpret_cast<float *>(xbuf.data())[k])
+                                                          : reinterpret_cast<double *>(xbuf.data())[k]);
+                    std::fprintf(stderr, "\nz:");
+                    for (int64_t k = 0; k < numel; ++k)
+                        std::fprintf(stderr, " %.9g", f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[k])
+                                                          : reinterpret_cast<double *>(z1.data())[k]);
+                    std::fprintf(stderr, "\nparams:");
+                    for (auto p : c.params[0]) std::fprintf(stderr, " %.17g", p);
+                    std::fprintf(stderr, "\n");
+                    fail("non-finite output from finite input");
+                }
+            }
+    }
+
+    // Derivatives at the saved structure.
+    if (b.u8() % 2) {
+        o.keep_structure = 1;
+        o.threads = 1 + b.u8() % 3;
+        fp_workspace *ws = nullptr;
+        const fp_status ws_s = fp_workspace_create(c.op, &x, &o, &ws);
+        if (!valid_status(ws_s)) fail("workspace status");
+        if (ws_s == FP_OK) {
+            const fp_status ps = prox(c.op, gamma, &x, &o1, &o, ws, nullptr);
+            if (!valid_status(ps)) fail("prox with workspace status");
+            const int64_t P = fp_op_nparams(c.op);
+            std::vector<double> dp(static_cast<size_t>(P > 0 ? P : 1)), gp(dp.size());
+            for (auto &v : dp) v = b.value();
+            int64_t ps_shape[1] = {P};
+            fp_array dpa{dp.data(), FP_F64, 1, ps_shape, nullptr, FP_DEVICE_CPU};
+            fp_array gpa{gp.data(), FP_F64, 1, ps_shape, nullptr, FP_DEVICE_CPU};
+            const fp_status js = fp_jvp(c.op, ws, &x, b.value(), P ? &dpa : nullptr, &o4);
+            double gg = 0;
+            const fp_status vs = fp_vjp(c.op, ws, &x, &o4, &gg, P ? &gpa : nullptr);
+            if (!valid_status(js) || !valid_status(vs)) fail("derivative status");
+            if (ps != FP_OK && (js == FP_OK || vs == FP_OK)) fail("derivative without structure");
+        }
+        fp_workspace_free(ws);
+    }
+    fp_op_free(c.op);
+}
+
+}  // namespace
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    run(data, size);
+    return 0;
+}

@@ -32,9 +32,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DFASTPROX_FUZZ=ON
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
+
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_OPENMP=OFF
+      - run: cmake --build build
+      - name: Memcheck
+        run: |
+          for t in build/tests/c/test_header build/tests/c/test_core; do
+            valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite "$t"
+          done
 
   python:
     name: Python ${{ matrix.os }}
@@ -57,7 +70,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest]
+        # macOS runners are pinned: the wheel's minimum macOS is that of the
+        # runner's Homebrew libomp, which must match MACOSX_DEPLOYMENT_TARGET.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: pypa/cibuildwheel@v3.1

@@ -273,7 +273,10 @@ struct TV1D final : RowOp<TV1D> {
                 return kRowOk;
             }
             if (method != FP_TV1D_TAUT_STRING) {
-                const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : 16 * n + 1024;
+                // Typical signals need 1 to 4 steps per sample; ramps and
+                // noisy ramps with large gamma need 10 to 3000 (quadratic).
+                // Past about 4n steps the taut string is also the faster path.
+                const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : 4 * n + 1024;
                 if (condat(x, z, n, lam, code, budget)) return kRowOk;
                 if (code) std::memset(code, 0, static_cast<size_t>(n));
             }

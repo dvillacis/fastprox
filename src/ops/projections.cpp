@@ -99,7 +99,64 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
     return (s1 - r) / s2;
 }
 
-inline size_t condat_scratch(int64_t n) noexcept { return 2 * static_cast<size_t>(n) * sizeof(int64_t); }
+// The same method with unit weights, keeping candidate values rather than
+// indices: no indirect loads, and the pivot is (sum_V a - r) / |V|.
+template <class A>
+double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt) noexcept {
+    int64_t nv = 0, nvt = 0;
+    v[nv++] = a(0);
+    double s1 = v[0];
+    double rho = s1 - r;
+    for (int64_t i = 1; i < n; ++i) {
+        const double ai = a(i);
+        if (ai > rho) {
+            const double t1 = s1 + ai;
+            const double rn = (t1 - r) / static_cast<double>(nv + 1);
+            if (rn > ai - r) {
+                v[nv++] = ai;
+                s1 = t1;
+                rho = rn;
+            } else {
+                for (int64_t j = 0; j < nv; ++j) vt[nvt++] = v[j];
+                nv = 0;
+                v[nv++] = ai;
+                s1 = ai;
+                rho = ai - r;
+            }
+        }
+    }
+    for (int64_t j = 0; j < nvt; ++j) {
+        const double ai = vt[j];
+        if (ai > rho) {
+            v[nv++] = ai;
+            s1 += ai;
+            rho = (s1 - r) / static_cast<double>(nv);
+        }
+    }
+    bool changed = true;
+    while (changed && nv > 1) {
+        changed = false;
+        int64_t m = 0;
+        for (int64_t j = 0; j < nv; ++j) {
+            const double ai = v[j];
+            if (ai > rho || nv - (j - m) == 1) {
+                v[m++] = ai;
+            } else {
+                s1 -= ai;
+                rho = (s1 - r) / static_cast<double>(nv - (j - m) - 1);
+                changed = true;
+            }
+        }
+        nv = m;
+    }
+    s1 = 0.0;
+    for (int64_t j = 0; j < nv; ++j) s1 += v[j];
+    return (s1 - r) / static_cast<double>(nv);
+}
+
+inline size_t condat_scratch(int64_t n) noexcept {
+    return 2 * static_cast<size_t>(n) * sizeof(int64_t);  // n indices or n doubles, twice
+}
 
 // ---------------------------------------------------------------------------
 
@@ -184,10 +241,9 @@ struct Simplex final : RowOp<Simplex> {
             if (code) std::memset(code, 0, static_cast<size_t>(n));
             return kRowOk;
         }
-        int64_t *v = static_cast<int64_t *>(scr);
-        const double tau = condat_tau<false>(
-            n, [x](int64_t i) { return static_cast<double>(x[i]); }, [](int64_t) { return 1.0; },
-            r, v, v + n);
+        double *v = static_cast<double *>(scr);
+        const double tau =
+            condat_tau_unit(n, [x](int64_t i) { return static_cast<double>(x[i]); }, r, v, v + n);
         for (int64_t i = 0; i < n; ++i) {
             const double d = static_cast<double>(x[i]) - tau;
             z[i] = static_cast<T>(d > 0 ? d : 0.0);
@@ -240,12 +296,14 @@ double l1_threshold(const T *x, int64_t n, const Vec &w, double radius, void *sc
         norm1 += (weighted ? w[i] : w[0]) * std::fabs(static_cast<double>(x[i]));
     if (norm1 <= radius) return -1.0;
     if (radius == 0.0) return HUGE_VAL;
-    int64_t *v = static_cast<int64_t *>(scr);
     auto a = [x](int64_t i) { return std::fabs(static_cast<double>(x[i])); };
-    if (weighted)
+    if (weighted) {
+        int64_t *v = static_cast<int64_t *>(scr);
         return condat_tau<true>(n, a, [&w](int64_t i) { return w[i]; }, radius, v, v + n);
+    }
     // A uniform weight c: project onto sum |z| <= radius / c.
-    return condat_tau<false>(n, a, [](int64_t) { return 1.0; }, radius / w[0], v, v + n) / w[0];
+    double *v = static_cast<double *>(scr);
+    return condat_tau_unit(n, a, radius / w[0], v, v + n) / w[0];
 }
 
 struct L1Ball final : RowOp<L1Ball> {

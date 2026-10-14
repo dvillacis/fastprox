@@ -27,10 +27,10 @@
 #define FP_MAX_NDIM 32
 
 #if defined(_WIN32) || defined(__CYGWIN__)
-#  if defined(FASTPROX_BUILDING)
-#    define FP_API __declspec(dllexport)
-#  elif defined(FASTPROX_STATIC)
+#  if defined(FASTPROX_STATIC)
 #    define FP_API
+#  elif defined(FASTPROX_BUILDING)
+#    define FP_API __declspec(dllexport)
 #  else
 #    define FP_API __declspec(dllimport)
 #  endif
