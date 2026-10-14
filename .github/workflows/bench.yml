@@ -29,11 +29,11 @@ jobs:
       - name: Machine
         run: |
           {
-            echo "### ${{ matrix.os }}"
-            echo '```'
             lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket|MHz|L2|L3' || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+            cc --version | head -1
+            c++ --version | head -1
+          } | tee machine.txt
+          { echo "### ${{ matrix.os }}"; echo '```'; cat machine.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Overhead, throughput and parallel scaling
         run: uv run python bench/bench_python.py | tee bench_python.txt
       - name: Against proxTV and Condat's code
