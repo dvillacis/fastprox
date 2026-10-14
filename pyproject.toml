@@ -1,0 +1,60 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "fastprox"
+version = "0.1.0.dev0"
+description = "Exact proximal operators and projections with derivatives"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["numpy>=1.26"]
+authors = [{ name = "David Villacís", email = "david@villacis.net" }]
+classifiers = [
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "hypothesis>=6", "cmake>=3.20", "ninja"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.py-api = "cp312"
+wheel.packages = ["bindings/python/fastprox"]
+cmake.build-type = "Release"
+
+[tool.scikit-build.cmake.define]
+FASTPROX_PYTHON = "ON"
+FASTPROX_BUILD_TESTS = "OFF"
+
+[tool.uv]
+# Rebuild the extension whenever the C++ sources change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "CMakeLists.txt" },
+  { file = "include/**/*.h" },
+  { file = "src/**/*.[ch]pp" },
+  { file = "bindings/python/**/*.cpp" },
+  { file = "bindings/python/**/*.txt" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.cibuildwheel]
+# abi3 wheels: one build per platform covers CPython >= 3.12.
+build = "cp312-*"
+skip = "*-musllinux_*"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+test-requires = ["pytest", "hypothesis"]
+test-command = "pytest -q {project}/tests/python"
+
+[tool.cibuildwheel.macos]
+before-all = "brew install libomp"
+# delocate (the default repair command) bundles libomp into the wheel.

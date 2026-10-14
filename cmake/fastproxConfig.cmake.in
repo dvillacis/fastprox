@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+include("${CMAKE_CURRENT_LIST_DIR}/fastproxTargets.cmake")
+check_required_components(fastprox)

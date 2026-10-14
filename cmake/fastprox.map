@@ -1,0 +1,7 @@
+/* Linux linker version script: export only the public fp_ API. */
+{
+  global:
+    fp_*;
+  local:
+    *;
+};
