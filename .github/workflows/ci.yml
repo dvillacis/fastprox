@@ -12,25 +12,23 @@ on:
 
 jobs:
   c:
-    name: C/C++ ${{ matrix.os }} ${{ matrix.cc }} openmp=${{ matrix.openmp }}
+    name: C/C++ ${{ matrix.os }} ${{ matrix.cc }} threads=${{ matrix.threads }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, cc: gcc, cxx: g++, openmp: ON }
-          - { os: ubuntu-latest, cc: clang, cxx: clang++, openmp: ON }
-          - { os: ubuntu-latest, cc: gcc, cxx: g++, openmp: OFF }
-          - { os: macos-latest, cc: clang, cxx: clang++, openmp: ON }
-          - { os: macos-15-intel, cc: clang, cxx: clang++, openmp: ON }
-          - { os: windows-latest, cc: cl, cxx: cl, openmp: ON }
+          - { os: ubuntu-latest, cc: gcc, cxx: g++, threads: ON }
+          - { os: ubuntu-latest, cc: clang, cxx: clang++, threads: ON }
+          - { os: ubuntu-latest, cc: gcc, cxx: g++, threads: OFF }
+          - { os: macos-latest, cc: clang, cxx: clang++, threads: ON }
+          - { os: macos-15-intel, cc: clang, cxx: clang++, threads: ON }
+          - { os: windows-latest, cc: cl, cxx: cl, threads: ON }
     steps:
       - uses: actions/checkout@v4
-      - if: runner.os == 'macOS'
-        run: brew install libomp
       - name: Configure
         env: { CC: "${{ matrix.cc }}", CXX: "${{ matrix.cxx }}" }
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFASTPROX_OPENMP=${{ matrix.openmp }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFASTPROX_THREADS=${{ matrix.threads }}
       - run: cmake --build build --config Release
       - run: ctest --test-dir build -C Release --output-on-failure --timeout 300
 
@@ -38,16 +36,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DFASTPROX_FUZZ=ON
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_SANITIZE=ON -DFASTPROX_FUZZ=ON
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure --timeout 300
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TSan in clang 18 rejects the runner kernel's high ASLR entropy.
+      - run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        env: { CC: clang, CXX: clang++ }
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_FLAGS=-fsanitize=thread -DCMAKE_CXX_FLAGS=-fsanitize=thread
+          -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure --timeout 300
+        env: { TSAN_OPTIONS: "halt_on_error=1" }
 
   valgrind:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y valgrind
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_OPENMP=OFF
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
       - name: Memcheck
         run: |
@@ -67,8 +82,6 @@ jobs:
           - { os: ubuntu-latest, python: "3.14" }  # the abi3 wheel on a newer CPython
     steps:
       - uses: actions/checkout@v4
-      - if: runner.os == 'macOS'
-        run: brew install libomp
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --python ${{ matrix.python }}
       - run: uv run pytest -q
@@ -79,8 +92,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # macOS runners are pinned: the wheel's minimum macOS is that of the
-        # runner's Homebrew libomp, which must match MACOSX_DEPLOYMENT_TARGET.
+        # macos-15-intel builds the x86_64 wheel natively, so its tests run.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +127,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'workflow_dispatch' && inputs.publish
-    needs: [c, sanitizers, valgrind, python, wheels, sdist]
+    needs: [c, sanitizers, tsan, valgrind, python, wheels, sdist]
     runs-on: ubuntu-latest
     environment: { name: testpypi, url: "https://test.pypi.org/p/fastprox" }
     permissions: { id-token: write }
@@ -128,7 +140,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [c, sanitizers, valgrind, python, wheels, sdist]
+    needs: [c, sanitizers, tsan, valgrind, python, wheels, sdist]
     runs-on: ubuntu-latest
     environment: { name: pypi, url: "https://pypi.org/p/fastprox" }
     permissions: { id-token: write }

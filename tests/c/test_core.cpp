@@ -15,7 +15,20 @@
 #include <new>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define FP_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define FP_TSAN 1
+#endif
+#endif
 
 // ---------------------------------------------------------------- allocation counter
 static std::atomic<long> g_allocs{0};
@@ -459,6 +472,51 @@ static void test_no_allocation() {
     fp_op_free(op);
 }
 
+// Several callers at once: one of them gets the thread pool and the others
+// run serially; every result matches the serial one. After fork() the child
+// has none of the parent's pool threads and must build its own.
+static void test_concurrent_callers() {
+    fp_op *op;
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
+    const int64_t rows = 64, n = 2000;
+    Arr x({rows, n}, randn(rows * n)), ref({rows, n});
+    fp_options serial = opts(-1, 1);
+    CHECK_OK(fp_prox(op, 0.5, &x.a, &ref.a, &serial, nullptr, nullptr));
+
+    std::deque<Arr> outs;
+    for (int k = 0; k < 6; ++k) outs.emplace_back(std::vector<int64_t>{rows, n});
+    std::atomic<int> failures{0};
+    std::vector<std::thread> callers;
+    for (int k = 0; k < 6; ++k)
+        callers.emplace_back([&, k] {
+            fp_options o = opts(-1, 4);
+            for (int rep = 0; rep < 20; ++rep)
+                if (fp_prox(op, 0.5, &x.a, &outs[k].a, &o, nullptr, nullptr) != FP_OK ||
+                    outs[k].data != ref.data)
+                    ++failures;
+        });
+    for (auto &t : callers) t.join();
+    CHECK(failures.load() == 0);
+
+#if !defined(_WIN32) && !defined(FP_TSAN)  // TSan cannot start threads after fork
+    Arr z({rows, n});
+    fp_options o = opts(-1, 4);
+    CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, nullptr, nullptr));  // the pool exists now
+    std::fflush(nullptr);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        Arr zc({rows, n});
+        const bool ok = fp_prox(op, 0.5, &x.a, &zc.a, &o, nullptr, nullptr) == FP_OK &&
+                        zc.data == ref.data;
+        _exit(ok ? 0 : 1);
+    }
+    int status = -1;
+    CHECK(pid > 0 && waitpid(pid, &status, 0) == pid);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+#endif
+    fp_op_free(op);
+}
+
 static void test_errors_and_special_values() {
     fp_op *op;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
@@ -525,8 +583,9 @@ int main() {
     test_derivatives();
     test_batching();
     test_no_allocation();
+    test_concurrent_callers();
     test_errors_and_special_values();
     test_float32();
-    std::printf("%d checks, %d failures (openmp: %d)\n", g_checks, g_fail, fp_has_openmp());
+    std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;
 }

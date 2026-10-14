@@ -220,5 +220,5 @@ NB_MODULE(_fastprox, m) {
 
     m.def("abi_version", &fp_abi_version);
     m.def("version", &fp_version_string);
-    m.def("has_openmp", [] { return fp_has_openmp() != 0; });
+    m.def("default_threads", &fp_default_threads);
 }

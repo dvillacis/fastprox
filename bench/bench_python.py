@@ -92,7 +92,7 @@ def scaling():
 
 
 if __name__ == "__main__":
-    print(f"fastprox {fp.__version__}, OpenMP {fp.has_openmp()}")
+    print(f"fastprox {fp.__version__}, default threads {fp.default_threads()}")
     overhead()
     tv1d_throughput()
     simplex_throughput()

@@ -80,7 +80,7 @@ typedef struct fp_workspace fp_workspace; /* opaque, one per concurrent caller *
 
 typedef struct {
     int    axis;           /* operator axis; negative counts from the end */
-    int    threads;        /* 0 = OpenMP default, 1 = serial */
+    int    threads;        /* 0 = fp_default_threads(), 1 = serial */
     double tol;            /* relative duality-gap tolerance (iterative ops) */
     int    max_iter;       /* iteration cap (iterative ops) */
     int    tie;            /* fp_tie, for nonconvex ops */
@@ -196,7 +196,10 @@ FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws,
 FP_API const char *fp_strerror(fp_status s);
 FP_API int         fp_abi_version(void);
 FP_API const char *fp_version_string(void);
-FP_API int         fp_has_openmp(void);
+/* Threads used when fp_options.threads is 0: the environment variable
+ * FASTPROX_NUM_THREADS, else the first number in OMP_NUM_THREADS, else the
+ * CPUs the process may run on (read once). 1 in builds without threads. */
+FP_API int         fp_default_threads(void);
 
 #ifdef __cplusplus
 }

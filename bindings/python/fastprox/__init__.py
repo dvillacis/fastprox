@@ -32,15 +32,17 @@ __all__ = [
     "L1Ball", "LInf", "Isotonic", "TV1D",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
-    "project_l1_ball", "prox_linf", "isotonic", "tv1d", "has_openmp",
+    "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
 
 
-def has_openmp() -> bool:
-    """True when the compiled core runs rows in parallel."""
-    return _C.has_openmp()
+def default_threads() -> int:
+    """Threads used when ``threads=0``: the environment variable
+    ``FASTPROX_NUM_THREADS``, else the first number in ``OMP_NUM_THREADS``, else
+    the CPUs this process may run on (read once). 1 for a serial build."""
+    return _C.default_threads()
 
 
 class Info(NamedTuple):

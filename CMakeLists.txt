@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 project(fastprox VERSION 0.1.0 LANGUAGES C CXX)
 # PEP 440 pre-release tag (a1, rc1, ...) appended to the version; empty for a
 # final release. pyproject.toml reads both lines.
-set(FASTPROX_VERSION_SUFFIX "rc1")
+set(FASTPROX_VERSION_SUFFIX "rc2")
 set(FASTPROX_VERSION_FULL "${PROJECT_VERSION}${FASTPROX_VERSION_SUFFIX}")
 
-option(FASTPROX_OPENMP "Parallelise over rows with OpenMP" ON)
+option(FASTPROX_THREADS "Parallelise over rows on a thread pool" ON)
 option(FASTPROX_BUILD_TESTS "Build the C and C++ tests" ${PROJECT_IS_TOP_LEVEL})
 option(FASTPROX_PYTHON "Build the nanobind Python extension" OFF)
 option(FASTPROX_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
@@ -47,6 +47,7 @@ endif()
 
 add_library(fastprox
   src/api/api.cpp
+  src/core/parallel.cpp
   src/ops/pointwise.cpp
   src/ops/group.cpp
   src/ops/projections.cpp
@@ -83,22 +84,14 @@ else()
   target_compile_options(fastprox PRIVATE -Wall -Wextra -Wno-unknown-pragmas -fno-fast-math)
 endif()
 
-if(FASTPROX_OPENMP)
-  if(APPLE AND NOT OpenMP_ROOT)
-    # Apple Clang ships without libomp; use Homebrew's when present.
-    foreach(_prefix /opt/homebrew/opt/libomp /usr/local/opt/libomp)
-      if(EXISTS "${_prefix}/include/omp.h")
-        set(OpenMP_ROOT "${_prefix}")
-        break()
-      endif()
-    endforeach()
-  endif()
-  find_package(OpenMP COMPONENTS CXX)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(fastprox PRIVATE OpenMP::OpenMP_CXX)
-  else()
-    message(WARNING "OpenMP not found: fastprox will run serially")
-  endif()
+# Rows run on fastprox's own threads (src/core/parallel.cpp), not OpenMP, so
+# no OpenMP runtime is linked: copies of libomp in one process abort each other.
+if(FASTPROX_THREADS)
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
+  target_link_libraries(fastprox PRIVATE Threads::Threads)
+else()
+  target_compile_definitions(fastprox PRIVATE FASTPROX_NO_THREADS)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

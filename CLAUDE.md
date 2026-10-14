@@ -7,7 +7,7 @@ Exact proximal operators with JVP/VJP. C++17 core behind the plain-C header
 ## Commands
 
 - C library and tests: `cmake -S . -B build/c -G Ninja && cmake --build build/c && ./build/c/tests/c/test_core && ./build/c/tests/c/test_header`
-- Sanitizers: configure a second tree with `-DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DCMAKE_BUILD_TYPE=Debug`
+- Sanitizers: configure a second tree with `-DFASTPROX_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug` (ThreadSanitizer: `-fsanitize=thread` in the C/C++ and linker flags, as in the `tsan` CI job)
 - Python (always through uv): `uv sync`, `uv run pytest -q`. uv rebuilds the extension when C++ sources change (`tool.uv.cache-keys`).
 - Benchmarks: `uv run python bench/bench_python.py`
 - Releasing: set the version in `project()` and `FASTPROX_VERSION_SUFFIX` (`CMakeLists.txt`) and the macros in `fastprox.h`; dry run with `gh workflow run ci.yml -f publish=true` (TestPyPI); then push the tag `v<version>`, which publishes to PyPI.
@@ -15,7 +15,7 @@ Exact proximal operators with JVP/VJP. C++17 core behind the plain-C header
 ## Layout
 
 - `src/core/op.hpp` — `fp_op` base class; `ElemOp<D>` (elementwise, needs `prox1`/`deriv1`) and `RowOp<D>` (row kernels `prox`/`jvp`/`vjp`) CRTP helpers.
-- `src/core/driver.hpp` — batching over strided n-d arrays, OpenMP, saved structure; `src/core/layout.hpp` — row and elementwise iteration plans.
+- `src/core/driver.hpp` — batching over strided n-d arrays, saved structure; `src/core/parallel.cpp` — the thread pool (no OpenMP: bundled libomp copies abort each other, e.g. next to PyTorch); `src/core/layout.hpp` — row and elementwise iteration plans.
 - `src/ops/*.cpp` — one file per operator family, each with a `make_*` factory declared in `src/ops/ops.hpp`.
 - `src/api/api.cpp` — the only `extern "C"` code: validation, dtype dispatch, try/catch.
 - `bindings/python/src/module.cpp` calls only the C API; `bindings/python/fastprox/__init__.py` is the user-facing package.

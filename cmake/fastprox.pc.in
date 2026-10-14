@@ -6,4 +6,5 @@ Name: fastprox
 Description: Exact proximal operators and projections with derivatives
 Version: @FASTPROX_VERSION_FULL@
 Libs: -L${libdir} -lfastprox
+Libs.private: @CMAKE_THREAD_LIBS_INIT@
 Cflags: -I${includedir}

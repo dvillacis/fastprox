@@ -81,22 +81,13 @@ manylinux-aarch64-image = "manylinux_2_28"
 test-requires = ["pytest", "hypothesis"]
 test-command = "pytest -q {project}/tests/python"
 
-[tool.cibuildwheel.macos]
-before-all = "brew install libomp"
-# delocate (the default repair command) bundles libomp into the wheel. It
-# refuses libraries built for a newer macOS than the wheel targets, so the
-# deployment target follows the runners' Homebrew libomp bottles.
-
 [[tool.cibuildwheel.overrides]]
-select = "*-macosx_arm64"
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
-
-[[tool.cibuildwheel.overrides]]
+# C++17 aligned allocation needs macOS 10.14 at run time; arm64 starts at 11.0.
 select = "*-macosx_x86_64"
-environment = { MACOSX_DEPLOYMENT_TARGET = "15.0" }
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
 
 [tool.cibuildwheel.windows]
-# MSVC's OpenMP runtime (vcomp140.dll) is not part of a Python install:
-# bundle it into the wheel, as delocate and auditwheel do on macOS and Linux.
+# Bundle any DLL the extension needs beyond Windows and the CPython install,
+# as delocate and auditwheel do on macOS and Linux.
 before-build = "pip install delvewheel"
 repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"

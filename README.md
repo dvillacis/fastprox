@@ -9,19 +9,19 @@ behind a plain-C API, with Python bindings.
   input, the step and the operator's parameters, for bilevel learning and
   implicit differentiation.
 - **Batched.** Applied along any axis of a float32 or float64 array, with rows
-  processed in parallel by OpenMP and results bit-identical for any number of
-  threads.
+  processed in parallel on fastprox's own threads (no OpenMP runtime to clash
+  with PyTorch or others) and results bit-identical for any number of threads.
 - **Permissive.** MIT licensed; every kernel is written from the papers.
 
 ## Install
 
 ```sh
-pip install --pre fastprox     # 0.1.0rc1, a release candidate
+pip install --pre fastprox     # 0.1.0rc2, a release candidate
 ```
 
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS
-(arm64 from 14.0, x86_64 from 15.0) and Windows (amd64), with the OpenMP
-runtime bundled.
+(arm64 from 11.0, x86_64 from 10.15) and Windows (amd64), and depend on
+nothing but NumPy.
 
 ## Use
 

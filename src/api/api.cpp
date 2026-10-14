@@ -165,7 +165,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
 }
 
 int resolve_threads(const fp_options &o) noexcept {
-    return o.threads > 0 ? o.threads : max_threads();
+    return o.threads > 0 ? o.threads : default_threads();
 }
 
 fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *oa,
@@ -504,12 +504,6 @@ FP_API int fp_abi_version(void) { return FP_ABI_VERSION; }
 
 FP_API const char *fp_version_string(void) { return FASTPROX_VERSION_STRING; }
 
-FP_API int fp_has_openmp(void) {
-#ifdef _OPENMP
-    return 1;
-#else
-    return 0;
-#endif
-}
+FP_API int fp_default_threads(void) { return fp::default_threads(); }
 
 }  // extern "C"

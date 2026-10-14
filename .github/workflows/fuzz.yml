@@ -19,7 +19,7 @@ jobs:
         env: { CC: clang, CXX: clang++ }
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFASTPROX_FUZZ=ON \
-                -DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF
+                -DFASTPROX_SANITIZE=ON -DFASTPROX_THREADS=OFF -DBUILD_SHARED_LIBS=OFF
           cmake --build build --target fuzz_ops
       - name: Fuzz for 20 minutes
         run: |

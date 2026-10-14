@@ -3,7 +3,18 @@
 All notable changes to fastprox. Planned work is in [ROADMAP.md](ROADMAP.md).
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] — 0.1.0rc2
+
+### Fixed
+
+- The macOS wheel of 0.1.0rc1 aborted the process (`OMP: Error #15`) when PyTorch, or any package bundling a recent LLVM OpenMP runtime, was used in the same process: each wheel carried its own libomp, and the copies refuse to coexist.
+
+### Changed
+
+- Rows run on fastprox's own thread pool (`src/core/parallel.cpp`) instead of OpenMP. No OpenMP runtime is linked or bundled on any platform; the wheels depend only on the system and NumPy, and macOS wheels now support macOS 11.0 (arm64) and 10.15 (x86_64). Same results bit for bit; dynamic scheduling as before. Measured against the OpenMP build on Apple M5 in one process: equal on one thread, 1–8% slower at 2–4 threads on small batches, 8–31% faster at 8–15 threads.
+- `threads = 0` means `fp_default_threads()`: `FASTPROX_NUM_THREADS`, else the first number in `OMP_NUM_THREADS`, else the CPUs the process may use (CPU affinity on Linux). Concurrent callers do not oversubscribe: one uses the pool, the others run serially. A child after `fork()` builds its own pool.
+- `fp_has_openmp()` and `fastprox.has_openmp()` are replaced by `fp_default_threads()` and `fastprox.default_threads()`; the CMake option `FASTPROX_OPENMP` is now `FASTPROX_THREADS`.
+- CI: a ThreadSanitizer job; AddressSanitizer and Valgrind now run with threads.
 
 ## [0.1.0rc1] — 2026-10-15
 

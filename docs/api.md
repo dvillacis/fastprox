@@ -81,7 +81,7 @@ fp_status s = fp_op_tv1d(NULL, FP_TV1D_AUTO, &op);   /* unit weights */
 if (s != FP_OK) fprintf(stderr, "%s\n", fp_strerror(s));
 
 fp_options opt;
-fp_options_init(&opt);     /* axis -1, threads 0 (OpenMP default), ... */
+fp_options_init(&opt);     /* axis -1, threads 0 (default count), ... */
 opt.axis = 1;
 
 s = fp_prox(op, 0.5, &x, &z, &opt, NULL, NULL);       /* one-shot */
@@ -142,9 +142,17 @@ row for the others.
 
 ### Threads and determinism
 
-`opt.threads` sets the OpenMP thread count (0 = OpenMP default, 1 = serial).
+`opt.threads` sets the number of threads (0 = `fp_default_threads()`, 1 = serial).
+The default is the environment variable `FASTPROX_NUM_THREADS`, else the first
+number in `OMP_NUM_THREADS`, else the CPUs the process may run on; it is read
+once.
 Results, including parameter gradients, are bit-identical for any thread
-count. `fp_has_openmp()` reports whether the library was built with OpenMP.
+count. Rows run on fastprox's own thread pool, not OpenMP, so no OpenMP
+runtime is linked. The pool's threads spin for about 50 µs after a call before
+sleeping. When several threads call fastprox at once, one call uses the pool
+and the others run serially, which avoids oversubscription; a child process
+after `fork()` builds its own pool. Builds with `FASTPROX_THREADS=OFF` are
+serial and `fp_default_threads()` returns 1.
 
 ### Building and linking
 
@@ -154,7 +162,7 @@ cmake --build build && cmake --install build --prefix /usr/local
 ```
 
 Then `find_package(fastprox)` and link `fastprox::fastprox`, or use
-`pkg-config --cflags --libs fastprox`. Options: `FASTPROX_OPENMP`,
+`pkg-config --cflags --libs fastprox`. Options: `FASTPROX_THREADS`,
 `BUILD_SHARED_LIBS`, `FASTPROX_BUILD_TESTS`, `FASTPROX_SANITIZE`,
 `FASTPROX_FUZZ`.
 
@@ -183,7 +191,7 @@ y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
   `TypeError` unless `copy=True` is passed. Lists are converted to float64.
   Strided and reversed views are used without copying.
 - **Common keywords:** `axis` (default −1), `out` (preallocated output, may
-  be the input), `threads` (0 = OpenMP default).
+  be the input), `threads` (0 = `fp.default_threads()`).
 - **`keep=True`** returns `(z, ctx)`. Pass `ctx=ctx` to a later `prox` call
   with the same shape to reuse its memory. `ctx.info` holds the certificate
   (`gap`, `iters`, `ties`).
