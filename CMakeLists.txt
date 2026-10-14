@@ -20,6 +20,12 @@ endif()
 
 include(GNUInstallDirs)
 
+# Windows finds DLLs next to the executable: keep the library, tests and fuzz
+# drivers in one directory, or every test hangs on a "DLL not found" dialog.
+if(WIN32 AND NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # project() above is the single source of the version (pyproject.toml reads it
 # too); the public header's macros must agree with it.
 file(STRINGS include/fastprox.h _fp_version_lines REGEX "#define FP_VERSION_(MAJOR|MINOR|PATCH) ")

@@ -16,7 +16,7 @@ jobs:
           - { os: ubuntu-latest, cc: clang, cxx: clang++, openmp: ON }
           - { os: ubuntu-latest, cc: gcc, cxx: g++, openmp: OFF }
           - { os: macos-latest, cc: clang, cxx: clang++, openmp: ON }
-          - { os: macos-13, cc: clang, cxx: clang++, openmp: ON }
+          - { os: macos-15-intel, cc: clang, cxx: clang++, openmp: ON }
           - { os: windows-latest, cc: cl, cxx: cl, openmp: ON }
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
         env: { CC: "${{ matrix.cc }}", CXX: "${{ matrix.cxx }}" }
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFASTPROX_OPENMP=${{ matrix.openmp }}
       - run: cmake --build build --config Release
-      - run: ctest --test-dir build -C Release --output-on-failure
+      - run: ctest --test-dir build -C Release --output-on-failure --timeout 300
 
   sanitizers:
     runs-on: ubuntu-latest
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFASTPROX_SANITIZE=ON -DFASTPROX_OPENMP=OFF -DFASTPROX_FUZZ=ON
       - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --output-on-failure --timeout 300
 
   valgrind:
     runs-on: ubuntu-latest
@@ -72,7 +72,7 @@ jobs:
       matrix:
         # macOS runners are pinned: the wheel's minimum macOS is that of the
         # runner's Homebrew libomp, which must match MACOSX_DEPLOYMENT_TARGET.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: pypa/cibuildwheel@v3.1
