@@ -2,7 +2,8 @@
 //
 // Two exact paths:
 //  * L. Condat, "A direct algorithm for 1-D total variation denoising", IEEE
-//    Signal Processing Letters 20(11), 2013, for uniform weights. At the end
+//    Signal Processing Letters 20(11), 2013, generalised here to per-edge
+//    weights (see condat below). At the end
 //    of the signal, a restart after a jump uses the plain post-jump bounds
 //    instead of the paper's tightened ones (measured over 200k signals: same
 //    work, simpler). A budget on rescanned steps bounds the backtracking, which
@@ -10,7 +11,8 @@
 //  * The taut string (P. L. Davies and A. Kovac, Ann. Statist. 29(1), 2001;
 //    weighted form as in A. Barbero and S. Sra, JMLR 19, 2018): the cumulative
 //    sum of z is the shortest path through the tube S_k -+ gamma w_k, found by
-//    a funnel over the upper and lower convex chains in O(n).
+//    a funnel over the upper and lower convex chains in O(n). The segment
+//    representation of the chains follows proxTV (see taut_string below).
 // Zero weights split the row into independent pieces.
 //
 // Saved structure (code[i] for i >= 1, the edge between i-1 and i):
@@ -26,6 +28,7 @@
 #include "core/op.hpp"
 #include "ops/ops.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -53,53 +56,65 @@ inline const double *recip_table() noexcept {
     return t.r;
 }
 
-// Condat's direct algorithm with uniform threshold lam > 0. Returns false
-// when more than `budget` steps had to be rescanned after jumps (the output
-// is then incomplete).
+// Condat's direct algorithm. radius(k) is the threshold of edge k (between
+// samples k and k+1), positive for k < n-1; radius(n-1) may be anything
+// nonnegative (the end condition u_{n-1} = 0 is enforced separately). With
+// per-edge radii the bounds of a new segment after a jump at edge e start
+// from y_k + sigma radius(e) -+ radius(k), sigma = +1 down, -1 up; with a
+// constant radius this is the paper's algorithm. Returns false when more
+// than `budget` steps had to be rescanned after jumps (the output is then
+// incomplete).
 //
 // The bound updates inside a segment are branch-free selects: whether a bound
 // is clamped is close to random on noisy signals, and mispredicted branches
 // cost more than always computing the update. The arithmetic is the same
 // either way, so this changes speed, not results.
-template <class T>
-bool condat(const T *y, T *z, int64_t n, double lam, uint8_t *code, int64_t budget) noexcept {
+template <class T, class R>
+bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
     int64_t k = 0, k0 = 0, km = 0, kp = 0;
-    const double twolam = 2.0 * lam;
-    double vmin = static_cast<double>(y[0]) - lam, vmax = static_cast<double>(y[0]) + lam;
-    double umin = lam, umax = -lam;
+    double lk = radius(0);
+    double vmin = static_cast<double>(y[0]) - lk, vmax = static_cast<double>(y[0]) + lk;
+    double umin = lk, umax = -lk;
     int64_t rescanned = 0;
 
-    auto jump_down = [&]() {
+    auto jump_down = [&]() {  // u_{km} = +radius(km)
         const T v = static_cast<T>(vmin);
         for (int64_t i = k0; i <= km; ++i) z[i] = v;
         if (code) code[km + 1] = kDown;
         rescanned += k - km;
+        const double le = radius(km);
         k = k0 = kp = km = km + 1;
-        vmin = static_cast<double>(y[k]);
-        vmax = vmin + twolam;
-        umin = lam;
-        umax = -lam;
+        lk = radius(k);
+        const double yk = static_cast<double>(y[k]);
+        vmin = yk + (le - lk);
+        vmax = yk + (le + lk);
+        umin = lk;
+        umax = -lk;
     };
-    auto jump_up = [&]() {
+    auto jump_up = [&]() {  // u_{kp} = -radius(kp)
         const T v = static_cast<T>(vmax);
         for (int64_t i = k0; i <= kp; ++i) z[i] = v;
         if (code) code[kp + 1] = kUp;
         rescanned += k - kp;
+        const double le = radius(kp);
         k = k0 = km = kp = kp + 1;
-        vmax = static_cast<double>(y[k]);
-        vmin = vmax - twolam;
-        umin = lam;
-        umax = -lam;
+        lk = radius(k);
+        const double yk = static_cast<double>(y[k]);
+        vmin = yk - (le + lk);
+        vmax = yk - (le - lk);
+        umin = lk;
+        umax = -lk;
     };
 
     for (;;) {
         while (k < n - 1) {
             const double yn = static_cast<double>(y[k + 1]);
-            if (yn + umin < vmin - lam) {
+            const double ln = radius(k + 1);
+            if (yn + umin < vmin - ln) {
                 jump_down();
                 if (rescanned > budget) return false;
-            } else if (yn + umax > vmax + lam) {
+            } else if (yn + umax > vmax + ln) {
                 jump_up();
                 if (rescanned > budget) return false;
             } else {
@@ -108,12 +123,12 @@ bool condat(const T *y, T *z, int64_t n, double lam, uint8_t *code, int64_t budg
                 umax += yn - vmax;
                 const int64_t m = k - k0 + 1;
                 const double r = m < kRecip ? recip[m] : 1.0 / static_cast<double>(m);
-                const bool cm = umin >= lam, cp = umax <= -lam;
-                vmin = cm ? vmin + (umin - lam) * r : vmin;
-                umin = cm ? lam : umin;
+                const bool cm = umin >= ln, cp = umax <= -ln;
+                vmin = cm ? vmin + (umin - ln) * r : vmin;
+                umin = cm ? ln : umin;
                 km = cm ? k : km;
-                vmax = cp ? vmax + (umax + lam) * r : vmax;
-                umax = cp ? -lam : umax;
+                vmax = cp ? vmax + (umax + ln) * r : vmax;
+                umax = cp ? -ln : umax;
                 kp = cp ? k : kp;
             }
         }
@@ -131,122 +146,151 @@ bool condat(const T *y, T *z, int64_t n, double lam, uint8_t *code, int64_t budg
     }
 }
 
-// Tube points carry their height as an unevaluated sum hi + lo: the
-// cumulative sums grow like n |x|, and plain doubles would lose the
-// 10 n eps |x|_inf accuracy the spec asks for on long rows.
-struct Pt {
-    int64_t i;
-    double hi, lo;
+// A radius that edge e can never reach. The prox stays within [min x, max x]
+// (maximum principle), so u_e = sum_{i<=e} (x_i - z_i) = -sum_{i>e} (x_i - z_i)
+// satisfies |u_e| <= j * range with j = min(e + 1, n - 1 - e). Radii above
+// this bound are inactive, and clamping them to twice the bound changes
+// neither the solution nor its structure; it keeps huge weights from adding
+// rounding of order eps * radius to every bound and tube height.
+inline double inactive_radius(int64_t j, double range) noexcept {
+    return 2.0 * static_cast<double>(std::max<int64_t>(j, 1)) * range;
+}
+
+// When no edge can be active the prox is the constant mean. A compensated
+// sum keeps u_{n-1} = sum x - n z at rounding level.
+template <class T>
+void constant_mean(const T *x, T *z, int64_t m) noexcept {
+    double hi = 0.0, lo = 0.0;
+    for (int64_t i = 0; i < m; ++i) {
+        const double v = static_cast<double>(x[i]);
+        const double s = hi + v;
+        const double bb = s - hi;
+        lo += (hi - (s - bb)) + (v - bb);
+        hi = s;
+    }
+    const T mean = static_cast<T>((hi + lo) / static_cast<double>(m));
+    for (int64_t i = 0; i < m; ++i) z[i] = mean;
+}
+
+// Typical signals rescan 0 to 3 steps per sample; ramps and noisy ramps with
+// large gamma rescan 10 to 3000 (quadratic). Past about 3n rescanned steps
+// the taut string is faster.
+inline int64_t condat_budget(int64_t n) noexcept { return 3 * n + 1024; }
+
+// The two chains of the funnel are stored as segments (length, rise, slope)
+// rather than as points, following proxTV's classic taut string (A. Barbero
+// and S. Sra, BSD licence): appending a tube step is a unit segment whose rise
+// is the sample itself plus the change of the tube radius, convexity tests
+// compare cached slopes, and the cumulative sum of the signal is never formed,
+// so slopes come from local sums and stay accurate on long rows. Unlike
+// proxTV, the last explored tube points are also kept relative to the current
+// knot, and the radius may vary per edge.
+struct Seg {
+    int64_t dx;
+    double dy;
+    double slope;
 };
 
-inline void two_sum(double a, double b, double &s, double &e) noexcept {
-    s = a + b;
-    const double bb = s - a;
-    e = (a - (s - bb)) + (b - bb);
-}
+inline size_t taut_scratch(int64_t n) noexcept { return 2 * static_cast<size_t>(n + 1) * sizeof(Seg); }
 
-inline Pt shifted(int64_t i, double shi, double slo, double add) noexcept {
-    Pt p;
-    p.i = i;
-    double e;
-    two_sum(shi, add, p.hi, e);
-    p.lo = slo + e;
-    return p;
-}
-
-inline double rise(const Pt &a, const Pt &b) noexcept { return (b.hi - a.hi) + (b.lo - a.lo); }
-
-// slope(a -> b) <= slope(a -> c), abscissae b.i, c.i > a.i.
-inline bool slope_le(const Pt &a, const Pt &b, const Pt &c) noexcept {
-    return rise(a, b) * static_cast<double>(c.i - a.i) <= rise(a, c) * static_cast<double>(b.i - a.i);
-}
-inline bool slope_ge(const Pt &a, const Pt &b, const Pt &c) noexcept {
-    return rise(a, b) * static_cast<double>(c.i - a.i) >= rise(a, c) * static_cast<double>(b.i - a.i);
-}
-
-inline size_t taut_scratch(int64_t n) noexcept { return 2 * static_cast<size_t>(n + 1) * sizeof(Pt); }
-
-// Taut string on y[0..m) with thresholds gamma * w[e] (w == nullptr: gamma * wu),
-// all positive. Writes z[0..m) and code[1..m).
-template <class T>
-void taut_string(const T *y, T *z, int64_t m, double gamma, const double *w, double wu,
-                 uint8_t *code, void *scr) noexcept {
+// Taut string on y[0..m) with edge radii edge_radius(e), e < m - 1, all
+// positive. Writes z[0..m) and code[1..m).
+//
+// up is the convex minorant of the upper tube boundary (slopes increasing),
+// lo the concave majorant of the lower one (slopes decreasing); both start at
+// the current knot. When the first slope of up falls below that of lo the
+// funnel has closed: the vertex nearest to the knot is the next knot, its
+// segment is final, and the other chain restarts as one segment from it.
+template <class T, class R>
+void taut_string(const T *y, T *z, int64_t m, R edge_radius, uint8_t *code, void *scr) noexcept {
     if (m == 1) {
         z[0] = y[0];
         return;
     }
-    // The upper and lower chains are deques stored as [head, tail) in arrays
-    // of m + 1 points; both heads are the current apex of the funnel.
-    Pt *up = static_cast<Pt *>(scr);
-    Pt *lo = up + (m + 1);
-    int64_t uhd = 0, utl = 1, lhd = 0, ltl = 1;
-    up[0] = lo[0] = Pt{0, 0.0, 0.0};
-
-    auto emit = [&](const Pt &a, const Pt &b, uint8_t c) {
-        const T v = static_cast<T>(rise(a, b) / static_cast<double>(b.i - a.i));
-        for (int64_t i = a.i; i < b.i; ++i) z[i] = v;
-        if (code && b.i < m) code[b.i] = c;
+    Seg *up = static_cast<Seg *>(scr);
+    Seg *lo = up + (m + 1);
+    int64_t uhd = 0, utl = 0, lhd = 0, ltl = 0;  // [head, tail)
+    auto radius = [&](int64_t k) {  // tube radius at cumulative index k (edge k - 1)
+        return (k <= 0 || k >= m) ? 0.0 : edge_radius(k - 1);
     };
 
-    double shi = 0.0, slo = 0.0;  // cumulative sum S_k = shi + slo
-    for (int64_t k = 1; k < m; ++k) {
-        double e;
-        two_sum(shi, static_cast<double>(y[k - 1]), shi, e);
-        slo += e;
-        const double lam = gamma * (w ? w[k - 1] : wu);
-        const Pt U = shifted(k, shi, slo, lam), L = shifted(k, shi, slo, -lam);
+    int64_t pos = 0;           // first sample not yet written
+    int64_t dx = 0;            // last explored index relative to the knot
+    double du = 0.0, dl = 0.0;  // last upper and lower heights relative to the knot
 
-        // Upper tube point: if it falls below the lower chain, the string
-        // wraps over lower points, which become fixed.
-        if (ltl - lhd >= 2 && slope_le(lo[lhd], U, lo[lhd + 1])) {
+    auto emit = [&](const Seg &sg, uint8_t c) {
+        const T v = static_cast<T>(sg.slope);
+        for (int64_t i = 0; i < sg.dx; ++i) z[pos + i] = v;
+        pos += sg.dx;
+        if (code && pos < m) code[pos] = c;
+        dx -= sg.dx;
+    };
+
+    for (int64_t k = 1; k <= m; ++k) {
+        const double yk = static_cast<double>(y[k - 1]);
+        const double dr = radius(k) - radius(k - 1);
+        ++dx;
+        du += yk + dr;
+        dl += yk - dr;
+
+        // Append the unit step to the convex chain under the upper boundary.
+        Seg s{1, yk + dr, yk + dr};
+        if (utl > uhd && s.slope < up[utl - 1].slope) {
             do {
-                emit(lo[lhd], lo[lhd + 1], kDown);
-                ++lhd;
-            } while (ltl - lhd >= 2 && slope_le(lo[lhd], U, lo[lhd + 1]));
-            up[0] = lo[lhd];
-            up[1] = U;
-            uhd = 0;
-            utl = 2;
-        } else {
-            while (utl - uhd >= 2 && slope_le(up[utl - 2], U, up[utl - 1])) --utl;
-            up[utl++] = U;
+                --utl;
+                s.dx += up[utl].dx;
+                s.dy += up[utl].dy;
+            } while (utl > uhd && s.dy < static_cast<double>(s.dx) * up[utl - 1].slope);
+            s.slope = s.dy / static_cast<double>(s.dx);
         }
+        up[utl++] = s;
 
-        // Lower tube point, symmetrically.
-        if (utl - uhd >= 2 && slope_ge(up[uhd], L, up[uhd + 1])) {
+        // And to the concave chain over the lower boundary.
+        s = Seg{1, yk - dr, yk - dr};
+        if (ltl > lhd && s.slope > lo[ltl - 1].slope) {
             do {
-                emit(up[uhd], up[uhd + 1], kUp);
-                ++uhd;
-            } while (utl - uhd >= 2 && slope_ge(up[uhd], L, up[uhd + 1]));
-            lo[0] = up[uhd];
-            lo[1] = L;
-            lhd = 0;
-            ltl = 2;
-        } else {
-            while (ltl - lhd >= 2 && slope_ge(lo[ltl - 2], L, lo[ltl - 1])) --ltl;
-            lo[ltl++] = L;
+                --ltl;
+                s.dx += lo[ltl].dx;
+                s.dy += lo[ltl].dy;
+            } while (ltl > lhd && s.dy > static_cast<double>(s.dx) * lo[ltl - 1].slope);
+            s.slope = s.dy / static_cast<double>(s.dx);
+        }
+        lo[ltl++] = s;
+
+        // Close the funnel while the chains cross at the knot. In exact
+        // arithmetic a knot never reaches the last explored point (the tube
+        // has positive radius inside); at the pinned end point both chains
+        // meet and rounding can make them seem to cross, hence dx > 0.
+        while (dx > 0 && up[uhd].slope < lo[lhd].slope) {
+            if (up[uhd].dx < lo[lhd].dx) {
+                // The knot moves to the upper boundary: z jumps up there.
+                const Seg knot = up[uhd++];
+                emit(knot, kUp);
+                du -= knot.dy;
+                dl -= knot.dy;
+                lo[0] = Seg{dx, dl, dl / static_cast<double>(dx)};
+                lhd = 0;
+                ltl = 1;
+            } else {
+                const Seg knot = lo[lhd++];
+                emit(knot, kDown);
+                du -= knot.dy;
+                dl -= knot.dy;
+                up[0] = Seg{dx, du, du / static_cast<double>(dx)};
+                uhd = 0;
+                utl = 1;
+            }
         }
     }
-    double e;
-    two_sum(shi, static_cast<double>(y[m - 1]), shi, e);
-    const Pt E{m, shi, slo + e};  // the end point is pinned at (m, S_m)
 
-    bool walked = false;
-    while (ltl - lhd >= 2 && slope_le(lo[lhd], E, lo[lhd + 1])) {
-        emit(lo[lhd], lo[lhd + 1], kDown);
-        ++lhd;
-        walked = true;
+    // Both chains end at the pinned end point; the string follows the one
+    // with interior vertices (the other is a single segment).
+    if (dx == 0) return;
+    if (utl - uhd > 1) {
+        for (int64_t j = uhd; j < utl; ++j) emit(up[j], kUp);
+    } else {
+        for (int64_t j = lhd; j < ltl; ++j) emit(lo[j], kDown);
     }
-    if (walked) {
-        up[0] = lo[lhd];
-        uhd = 0;
-        utl = 1;
-    }
-    while (utl - uhd >= 2 && slope_ge(up[uhd], E, up[uhd + 1])) {
-        emit(up[uhd], up[uhd + 1], kUp);
-        ++uhd;
-    }
-    emit(up[uhd], E, kSame);
 }
 
 struct TV1D final : RowOp<TV1D> {
@@ -261,7 +305,9 @@ struct TV1D final : RowOp<TV1D> {
     fp_status check_n(int64_t n) const noexcept override {
         return (w.size() == 1 || static_cast<int64_t>(w.size()) == n - 1) ? FP_OK : FP_ESHAPE;
     }
-    size_t scratch_bytes(int64_t n) const noexcept override { return taut_scratch(n); }
+    size_t scratch_bytes(int64_t n) const noexcept override {
+        return taut_scratch(n) + static_cast<size_t>(n + 1) * sizeof(double);  // chains, radii
+    }
     bool needs_distinct() const noexcept override { return true; }
 
     double we(int64_t e) const noexcept { return w.size() == 1 ? w[0] : w[e]; }
@@ -279,42 +325,77 @@ struct TV1D final : RowOp<TV1D> {
         }
     }
 
+    // One piece of a weighted row (all edge weights positive): Condat's
+    // algorithm with per-edge radii, falling back to the taut string. range
+    // is max x - min x over the row (see inactive_radius). The clamped radii
+    // are computed once into scratch: evaluating them inside the scan costs
+    // as much as the scan itself.
+    template <class T>
+    void solve_weighted(const T *x, T *z, int64_t m, double gamma, const double *we, double range,
+                        uint8_t *code, void *scr) const noexcept {
+        double *rad = reinterpret_cast<double *>(static_cast<char *>(scr) + taut_scratch(m));
+        bool all_inactive = true;
+        for (int64_t e = 0; e + 1 < m; ++e) {
+            const double j = static_cast<double>(std::min(e + 1, m - 1 - e));
+            const double r = gamma * we[e];
+            all_inactive = all_inactive && r >= j * range;
+            rad[e] = std::min(r, 2.0 * j * range);  // inactive_radius
+        }
+        rad[m - 1] = 0.0;  // the end condition u_{m-1} = 0 is enforced separately
+        if (all_inactive) {
+            constant_mean(x, z, m);
+            return;
+        }
+        const double *rp = rad;
+        if (method != FP_TV1D_TAUT_STRING) {
+            const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : condat_budget(m);
+            if (condat(x, z, m, [rp](int64_t k) { return rp[k]; }, code, budget)) return;
+            if (code) std::memset(code + 1, 0, static_cast<size_t>(m - 1));
+        }
+        taut_string(x, z, m, [rp](int64_t e) { return rp[e]; }, code, scr);
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
-        bool nan;
-        if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
-        if (code) std::memset(code, 0, static_cast<size_t>(n));
-        if (nan) {
+        double lo, hi;
+        if (!finite_range(x, n, lo, hi)) {
+            bool nan;
+            if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
+            if (code) std::memset(code, 0, static_cast<size_t>(n));
             fill_nan(z, n);
             return kRowOk;
         }
-        if (gamma == 0.0) {
+        if (code) std::memset(code, 0, static_cast<size_t>(n));
+        const double range = hi - lo;
+        if (gamma == 0.0 || range == 0.0) {  // z = x
             identity(x, z, n, code);
             return kRowOk;
         }
         if (uniform) {
-            const double lam = gamma * w[0];
+            // No edge can be active: |u_e| <= min(e + 1, n - 1 - e) range.
+            if (gamma * w[0] >= static_cast<double>(n / 2) * range) {
+                constant_mean(x, z, n);
+                return kRowOk;
+            }
+            const double lam = std::min(gamma * w[0], inactive_radius(n / 2, range));
             if (lam == 0.0) {
                 identity(x, z, n, code);
                 return kRowOk;
             }
             if (method != FP_TV1D_TAUT_STRING) {
-                // Typical signals rescan 0 to 3 steps per sample; ramps and
-                // noisy ramps with large gamma rescan 10 to 3000 (quadratic).
-                // Past about 3n rescanned steps the taut string is faster.
-                const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : 3 * n + 1024;
-                if (condat(x, z, n, lam, code, budget)) return kRowOk;
+                const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : condat_budget(n);
+                if (condat(x, z, n, [lam](int64_t) { return lam; }, code, budget)) return kRowOk;
                 if (code) std::memset(code, 0, static_cast<size_t>(n));
             }
-            taut_string(x, z, n, gamma, nullptr, w[0], code, scr);
+            taut_string(x, z, n, [lam](int64_t) { return lam; }, code, scr);
             return kRowOk;
         }
         // Weighted: independent pieces between zero-weight edges.
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e == n - 1 || w[e] == 0.0) {
-                taut_string(x + s, z + s, e - s + 1, gamma, w.data() + s, 0.0, code ? code + s : nullptr,
-                            scr);
+                solve_weighted(x + s, z + s, e - s + 1, gamma, w.data() + s, range,
+                               code ? code + s : nullptr, scr);
                 if (code) {
                     if (s > 0) code[s] = kFree;
                     if (e < n - 1) code[e + 1] = kFree;
@@ -392,7 +473,6 @@ fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out) {
         if (!finite_nonneg(v)) return FP_EPARAM;
         uniform = uniform && v == w[0];
     }
-    if (method == FP_TV1D_CONDAT && !uniform) return FP_EPARAM;
     *out = new TV1D(std::move(w), uniform, method);
     return FP_OK;
 }

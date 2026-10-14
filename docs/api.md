@@ -42,11 +42,12 @@ Notes:
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
-  algorithm for uniform weights and falls back to the taut string when
-  Condat's algorithm backtracks too much (more than 4n + 1024 steps);
-  weighted problems use the taut string. `FP_TV1D_CONDAT` forces
-  Condat's algorithm (uniform weights only; quadratic on adversarial inputs
-  such as ramps), `FP_TV1D_TAUT_STRING` forces the taut string.
+  algorithm (generalised to per-edge weights) and falls back to the taut
+  string when it backtracks too much (more than 3n + 1024 rescanned steps,
+  as on ramps). `FP_TV1D_CONDAT` forces Condat's algorithm (quadratic on
+  adversarial inputs), `FP_TV1D_TAUT_STRING` forces the taut string. Zero
+  weights split a row into independent pieces; when no edge can be active
+  the result is the constant mean.
 - **Kinks.** At a point where the prox is not differentiable the derivative
   is that of the structure the forward pass selected: an entry exactly at a
   threshold counts as thresholded, a box entry on a bound as interior, and 1D

@@ -259,6 +259,26 @@ inline bool all_finite(const T *x, int64_t n) noexcept {
     return bad == 0;
 }
 
+// True when every entry is finite; then lo and hi are the smallest and
+// largest entries. One pass, which the compiler vectorises.
+template <class T>
+inline bool finite_range(const T *x, int64_t n, double &lo, double &hi) noexcept {
+    using U = typename FloatBits<T>::U;
+    constexpr U e = FloatBits<T>::exp;
+    U bad = 0;
+    T mn = x[0], mx = x[0];
+    for (int64_t i = 0; i < n; ++i) {
+        U b;
+        std::memcpy(&b, x + i, sizeof b);
+        bad |= static_cast<U>((b & e) == e);
+        mn = x[i] < mn ? x[i] : mn;
+        mx = x[i] > mx ? x[i] : mx;
+    }
+    lo = static_cast<double>(mn);
+    hi = static_cast<double>(mx);
+    return bad == 0;
+}
+
 // Scans a row: returns kRowNonFinite on any infinity and sets has_nan.
 template <class T>
 inline int scan_row(const T *x, int64_t n, bool &has_nan) noexcept {

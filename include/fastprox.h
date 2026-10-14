@@ -70,8 +70,8 @@ typedef enum {
 typedef enum { FP_TIE_NONZERO = 0, FP_TIE_ZERO = 1 } fp_tie;
 
 typedef enum {
-    FP_TV1D_AUTO = 0,       /* Condat for uniform weights, taut string otherwise */
-    FP_TV1D_CONDAT = 1,     /* uniform weights only */
+    FP_TV1D_AUTO = 0,       /* Condat, taut string when Condat backtracks too much */
+    FP_TV1D_CONDAT = 1,     /* Condat only (quadratic on adversarial inputs) */
     FP_TV1D_TAUT_STRING = 2
 } fp_tv1d_method;
 

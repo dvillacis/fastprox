@@ -337,8 +337,8 @@ class Isotonic(Operator):
 class TV1D(Operator):
     """g(z) = sum_i w_i |z_{i+1} - z_i| along the axis (1D total variation).
     ``weights``: scalar or one per edge (axis length - 1). ``method``: "auto"
-    (Condat for uniform weights, taut string otherwise), "condat" or
-    "taut_string". Parameters: weights."""
+    (Condat's algorithm, taut string when it backtracks too much), "condat"
+    or "taut_string". Parameters: weights."""
 
     def __init__(self, weights=None, method="auto"):
         w = _vec(weights)

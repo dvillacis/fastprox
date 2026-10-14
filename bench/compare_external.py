@@ -154,6 +154,21 @@ def tv_solvers():
     return solvers
 
 
+def weighted_tv_solvers():
+    """name -> (f(x, lam_per_edge, out), dtype) for weighted 1D TV."""
+    f64 = np.float64
+    solvers = {"fastprox": (lambda x, lam, out: fp.tv1d(x, 1.0, weights=lam, out=out, threads=1),
+                            f64)}
+    try:
+        ptv = ctypes.CDLL(str(build_proxtv()))
+        ptv.shim_weighted_taut.argtypes = [DBL, DBL, DBL, ctypes.c_int]
+        solvers["proxTV weighted taut string"] = (
+            lambda x, lam, out: ptv.shim_weighted_taut(ptr(x), ptr(lam), ptr(out), x.size), f64)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"proxTV unavailable: {e}", file=sys.stderr)
+    return solvers
+
+
 def simplex_solvers():
     solvers = {"fastprox": lambda x, r, out: fp.project_simplex(x, r, out=out, threads=1)}
     try:
@@ -181,6 +196,7 @@ def signal(kind, n, rng):
 
 def check(solvers, x, arg):
     """Names of solvers whose output differs from fastprox in their precision."""
+    arg = arg(x.size) if callable(arg) else arg
     ref = {}
     bad = []
     for name, (f, dt) in solvers.items():
@@ -209,6 +225,7 @@ def table(solvers, make_input, arg, sizes, quick):
     for n in sizes:
         reps = 3 if quick else max(5, min(30, 10**6 // n))
         rng = np.random.default_rng(n)
+        a = arg(n) if callable(arg) else arg
         times = {k: [] for k in names}
         for r in range(reps + 1):  # the first round warms up
             x64 = make_input(n, rng)
@@ -217,7 +234,7 @@ def table(solvers, make_input, arg, sizes, quick):
                 x = x64.astype(dt)
                 out = np.empty_like(x)
                 t = time.perf_counter()
-                f(x, arg, out)
+                f(x, a, out)
                 if r:
                     times[k].append(time.perf_counter() - t)
         for k in names:
@@ -239,6 +256,13 @@ def main():
         for lam in (0.1, 1.0, 10.0):
             print(f"\n1D TV, {kind}, lambda = {lam}")
             table(tv, lambda n, rng: signal(kind, n, rng), lam, sizes, args.quick)
+
+    wtv = weighted_tv_solvers()
+    for kind in ("blocks", "random walk", "white noise"):
+        for lam in (0.1, 1.0, 10.0):
+            print(f"\nWeighted 1D TV, {kind}, lambda = {lam} times edge weights in [0.5, 1.5]")
+            weights = lambda n, lam=lam: lam * np.random.default_rng(7).uniform(0.5, 1.5, n - 1)
+            table(wtv, lambda n, rng: signal(kind, n, rng), weights, sizes, args.quick)
 
     print("\nSimplex projection, radius 1")
     sx = {k: (f, np.float64) for k, f in simplex_solvers().items()}

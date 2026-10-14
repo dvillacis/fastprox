@@ -111,7 +111,8 @@ def test_tv1d_adversarial_inputs_stay_fast(gamma):
         t = time.perf_counter()
         z = fp.tv1d(x, gamma, threads=1)
         assert time.perf_counter() - t < 0.5  # forced Condat takes seconds
-        assert ref.tv1d_kkt_residual(x, z, gamma, 1.0) < 1e-11
+        # The spec's accuracy bound: 10 n eps, relative to |x|_inf.
+        assert ref.tv1d_kkt_residual(x, z, gamma, 1.0) < 10 * n * np.finfo(float).eps
 
 
 def test_tv1d_weighted_with_zeros():
@@ -124,6 +125,23 @@ def test_tv1d_weighted_with_zeros():
         gamma = rng.uniform(0.01, 5)
         z = fp.tv1d(x, gamma, weights=w)
         assert ref.tv1d_kkt_residual(x, z, gamma, w) < 1e-11
+
+
+@pytest.mark.parametrize("method", ["auto", "condat", "taut_string"])
+def test_tv1d_extreme_weights_within_spec_bound(method):
+    # Radii far above n |x| never bind; they must not cost accuracy either
+    # (spec: optimality residual <= 10 n eps |x|_inf).
+    rng = np.random.default_rng(8)
+    for t in range(3000):
+        n = int(rng.integers(2, 200))
+        x = [rng.normal(size=n), np.cumsum(rng.normal(size=n))][t % 2]
+        gamma = float(np.exp(4 * rng.normal()))
+        w = np.exp(3 * rng.normal(size=n - 1)) * (rng.random(n - 1) > 0.1)
+        bound = 10 * n * np.finfo(float).eps
+        z = fp.tv1d(x, gamma, weights=w, method=method)
+        assert ref.tv1d_kkt_residual(x, z, gamma, w) < bound
+        z = fp.tv1d(x, gamma, method=method)
+        assert ref.tv1d_kkt_residual(x, z, gamma, 1.0) < bound
 
 
 def test_tv1d_gamma_zero_is_identity():
@@ -231,8 +249,11 @@ def test_firm_nonexpansive(name, data):
     op = build(theta)
     z1, z2 = op.prox(x1, gamma), op.prox(x2, gamma)
     d = z1 - z2
+    # Weighted isotonic regression projects in the norm sum_i w_i (.)^2, so
+    # it is firmly nonexpansive in that norm, not the Euclidean one.
+    m = theta if name == "isotonic_w" else np.ones(n)
     tol = 1e-10 * (1 + np.abs(x1).max() + np.abs(x2).max()) ** 2
-    assert d @ d <= d @ (x1 - x2) + tol
+    assert d @ (m * d) <= d @ (m * (x1 - x2)) + tol
 
 
 @settings(max_examples=60, deadline=None)
@@ -323,8 +344,6 @@ def test_errors():
         fp.project_simplex(x, -1.0)
     with pytest.raises(ValueError):
         fp.tv1d(np.array([1.0, np.inf, 2.0]))
-    with pytest.raises(ValueError):
-        fp.TV1D(np.array([1.0, 2.0]), method="condat")
     z = fp.tv1d(np.array([1.0, np.nan, 2.0]))
     assert np.isnan(z).all()
     z = fp.soft_threshold(np.array([np.nan, 3.0]))
