@@ -9,6 +9,7 @@ against proxTV and Condat's C code live in separate scripts that fetch those
 codes; nothing copyleft is vendored here.
 """
 
+import os
 import time
 
 import numpy as np
@@ -81,7 +82,10 @@ def scaling():
     x = np.random.default_rng(3).normal(size=(64, 10**4))
     out = np.empty_like(x)
     t1 = best(lambda: fp.tv1d(x, 1.0, out=out, threads=1))
-    for t in (1, 2, 4, 8, 16):
+    ncpu = os.cpu_count() or 1
+    counts = sorted({t for t in (1, 2, 4, 8, 16, 32, 64) if t <= ncpu} | {ncpu})
+    print(f"  {ncpu} logical CPUs")
+    for t in counts:
         tt = best(lambda: fp.tv1d(x, 1.0, out=out, threads=t))
         print(f"  threads {t:2d}: {tt * 1e3:7.3f} ms  speed-up {t1 / tt:5.2f}  "
               f"efficiency {t1 / tt / t:4.2f}")

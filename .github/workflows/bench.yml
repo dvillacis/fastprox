@@ -1,0 +1,52 @@
+name: bench
+
+# Benchmarks on GitHub's Linux runners: homogeneous cores (unlike a laptop
+# with performance and efficiency cores), but shared VMs, so compare solvers
+# within one run rather than across runs. Started by hand from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "All sizes up to 1e7 (slow) instead of 1e3 and 1e5"
+        type: boolean
+        default: false
+
+jobs:
+  bench:
+    name: bench ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tools for the external codes (proxTV needs LAPACK, Condat's files GSL)
+        run: sudo apt-get update && sudo apt-get install -y liblapack-dev libgsl-dev
+      - run: uv sync --python 3.12
+      - name: Machine
+        run: |
+          {
+            echo "### ${{ matrix.os }}"
+            echo '```'
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket|MHz|L2|L3' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Overhead, throughput and parallel scaling
+        run: uv run python bench/bench_python.py | tee bench_python.txt
+      - name: Against proxTV and Condat's code
+        run: uv run python bench/compare_external.py ${{ inputs.full && ' ' || '--quick' }} | tee compare_external.txt
+      - name: Summary
+        if: always()
+        run: |
+          for f in bench_python.txt compare_external.txt; do
+            [ -f "$f" ] || continue
+            { echo "#### $f"; echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.os }}
+          path: "*.txt"
