@@ -58,23 +58,6 @@ inline const double *recip_table() noexcept {
     return t.r;
 }
 
-// z[a..b] = v for a segment closed by a jump (b < n - 1). Segments are
-// mostly 1 to 3 samples long at small gamma, and a loop over such lengths
-// costs a few mispredicted branches per segment; instead, when 4 slots
-// remain, 4 values are stored unconditionally. The slots past b belong to
-// later segments, which are written afterwards (z never aliases y).
-template <class T>
-inline void fill_segment(T *z, int64_t a, int64_t b, int64_t n, T v) noexcept {
-    if (b - a < 4 && a + 4 <= n) {
-        z[a] = v;
-        z[a + 1] = v;
-        z[a + 2] = v;
-        z[a + 3] = v;
-    } else {
-        for (int64_t i = a; i <= b; ++i) z[i] = v;
-    }
-}
-
 // Condat's direct algorithm. radius(k) is the threshold of edge k (between
 // samples k and k+1), positive for k < n-1; radius(n-1) may be anything
 // nonnegative (the end condition u_{n-1} = 0 is enforced separately). With
@@ -109,7 +92,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
 
     auto jump_down = [&]() {  // u_{km} = +radius(km)
         const T v = static_cast<T>(vmin);
-        fill_segment(z, k0, km, n, v);
+        for (int64_t i = k0; i <= km; ++i) z[i] = v;
         if (code) code[km + 1] = kDown;
         rescanned += k - km;
         const double le = radius(km);
@@ -123,7 +106,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
     };
     auto jump_up = [&]() {  // u_{kp} = -radius(kp)
         const T v = static_cast<T>(vmax);
-        fill_segment(z, k0, kp, n, v);
+        for (int64_t i = k0; i <= kp; ++i) z[i] = v;
         if (code) code[kp + 1] = kUp;
         rescanned += k - kp;
         const double le = radius(kp);
