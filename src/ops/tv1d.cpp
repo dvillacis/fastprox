@@ -79,7 +79,7 @@ inline const double *recip_table() noexcept {
 // vmax). The only value carried from step to step is then the sum, instead
 // of a chain through the clamps; this is 1.3 to 3 times faster in long
 // segments, and the bounds no longer accumulate one rounding per clamp.
-template <int64_t Short = kShort, int64_t Adapt = 0, class T, class R>
+template <int64_t Short = kShort, int64_t Adapt = 0, bool Assoc = false, class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
     auto rcp = [recip](int64_t m) { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
@@ -93,11 +93,11 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
     // Adapt > 0, a segment opened after one longer than Adapt starts in the
     // running-sum form (sh = 1).
     int64_t sh = Short;
-    auto open_form = [&](int64_t prev_len, double yk) {
+    auto open_form = [&](int64_t prev_len, double yk, double c) {  // c = sigma radius(e)
         if constexpr (Adapt > 0) sh = prev_len > Adapt ? 1 : Short;
         if (sh == 1) {
             ref = yk;
-            s = umin + (vmin - ref);
+            s = c;
         }
     };
     int64_t rescanned = 0;
@@ -116,7 +116,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk + (le + lk);
         umin = lk;
         umax = -lk;
-        open_form(prev, yk);
+        open_form(prev, yk, le);
     };
     auto jump_up = [&]() {  // u_{kp} = -radius(kp)
         const T v = static_cast<T>(vmax);
@@ -132,9 +132,9 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk - (le - lk);
         umin = lk;
         umax = -lk;
-        open_form(prev, yk);
+        open_form(prev, yk, -le);
     };
-    open_form(0, static_cast<double>(y[0]));
+    open_form(0, static_cast<double>(y[0]), 0.0);
 
     for (;;) {
         while (k < n - 1) {
@@ -171,9 +171,16 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                     }
                 }
             } else {
-                const double s1 = s + (yn - ref);
+                const double d = yn - ref, s1 = s + d;
                 const double r = rcp(m);
-                const double a = ref + (s1 - ln) * r, b = ref + (s1 + ln) * r;
+                double a, b;
+                if constexpr (Assoc) {  // the radius off the path from s to the tests
+                    a = ref + (s + (d - ln)) * r;
+                    b = ref + (s + (d + ln)) * r;
+                } else {
+                    a = ref + (s1 - ln) * r;
+                    b = ref + (s1 + ln) * r;
+                }
                 if (b < vmin) {
                     jump_down();
                     if (rescanned > budget) return false;
