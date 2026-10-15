@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 
-KERNELS = ("condat", "taut_string", "finite_range", "condat_tau")
+KERNELS = ("condat", "taut_string", "finite_range", "condat_tau", "prox_row")  # prox_row: inlined kernels
 JCC = re.compile(r"^\s+j(?!mp\b)[a-z]+\s")  # x86 conditional jumps
 BCC = re.compile(r"^\s+b\.[a-z]+\s|^\s+c[bt]n?z\s|^\s+tbn?z\s")  # arm64 conditional branches
 SEL = re.compile(r"^\s+(cmov[a-z]*|f?csel|setcc|set[a-z]+)\s")

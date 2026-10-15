@@ -17,6 +17,15 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <type_traits>
+
+// Target of min_nonan / max_nonan (see there).
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define FP_MINMAX_ARM64 1
+#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define FP_MINMAX_SSE2 1
+#include <emmintrin.h>
+#endif
 
 namespace fp {
 
@@ -260,21 +269,36 @@ inline bool all_finite(const T *x, int64_t n) noexcept {
 }
 
 // Minimum and maximum of two values known to be NaN-free (or whose NaN
-// inputs are tested separately). On arm64 fmin/fmax are single instructions
-// (fminnm/fmaxnm) while a compare-select takes two; on x86 the compare-select
-// is minsd/maxsd while fmin needs extra NaN handling.
+// inputs are tested separately), as one instruction and never a branch:
+// fminnm/fmaxnm on arm64 and minsd/maxsd (minss/maxss) on x86-64, where
+// SSE2 is part of the base architecture. Compilers do not reliably turn a
+// compare-select into these: GCC emitted compare-and-branch for both the
+// select and the ternary forms, which mispredict in Condat's bound updates.
+// minsd(v, a) returns v < a ? v : a, so the result is that of the portable
+// form, which other targets use.
+
 template <class T>
 inline T min_nonan(T a, T v) noexcept {
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(FP_MINMAX_ARM64)
     return std::fmin(a, v);
+#elif defined(FP_MINMAX_SSE2)
+    if constexpr (std::is_same_v<T, double>)
+        return _mm_cvtsd_f64(_mm_min_sd(_mm_set_sd(v), _mm_set_sd(a)));
+    else
+        return _mm_cvtss_f32(_mm_min_ss(_mm_set_ss(v), _mm_set_ss(a)));
 #else
     return v < a ? v : a;
 #endif
 }
 template <class T>
 inline T max_nonan(T a, T v) noexcept {
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(FP_MINMAX_ARM64)
     return std::fmax(a, v);
+#elif defined(FP_MINMAX_SSE2)
+    if constexpr (std::is_same_v<T, double>)
+        return _mm_cvtsd_f64(_mm_max_sd(_mm_set_sd(v), _mm_set_sd(a)));
+    else
+        return _mm_cvtss_f32(_mm_max_ss(_mm_set_ss(v), _mm_set_ss(a)));
 #else
     return v > a ? v : a;
 #endif
