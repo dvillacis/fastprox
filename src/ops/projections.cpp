@@ -59,7 +59,14 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
             }
         }
     }
-    // Step 2: recover candidates set aside by the resets.
+    // Step 2: recover candidates set aside by the resets. bmax is the
+    // largest breakpoint a_i / w_i of a candidate left out in steps 2 and 3:
+    // in exact arithmetic the threshold is at least bmax. When an entry sits
+    // within rounding of the pivot and dominates the sums, removing it can
+    // cancel them (s2 = 1 + 1e-126 - 1 = 0) and leave a threshold far below
+    // bmax, with outputs larger than the inputs; clamping to bmax restores
+    // a solution that is correct to rounding (found by fuzzing).
+    double bmax = -HUGE_VAL;
     for (int64_t j = 0; j < nvt; ++j) {
         const int64_t i = vt[j];
         const double ai = a(i), wi = Weighted ? w(i) : 1.0;
@@ -68,6 +75,8 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
             s1 += wi * ai;
             s2 += wi * wi;
             rho = (s1 - r) / s2;
+        } else {
+            bmax = std::max(bmax, ai / wi);
         }
     }
     // Step 3: remove candidates below the pivot until none is left.
@@ -81,6 +90,7 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
             if (ai > rho * wi || nv - (j - m) == 1) {
                 v[m++] = i;
             } else {
+                bmax = std::max(bmax, ai / wi);
                 s1 -= wi * ai;
                 s2 -= wi * wi;
                 rho = (s1 - r) / s2;
@@ -97,7 +107,7 @@ double condat_tau(int64_t n, A a, W w, double r, int64_t *v, int64_t *vt) noexce
         s1 += wi * a(i);
         s2 += wi * wi;
     }
-    return (s1 - r) / s2;
+    return std::max((s1 - r) / s2, bmax);
 }
 
 // The same method with unit weights, keeping candidate values rather than
@@ -122,9 +132,7 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
     if (finite) check(v[0]);
     double s1 = v[0];
     double rho = s1 - r;
-    for (int64_t i = 1; i < n; ++i) {
-        const double ai = a(i);
-        if (finite) check(ai);
+    auto visit = [&](double ai) {
         if (ai > rho) {
             const double t1 = s1 + ai;
             const double rn = (t1 - r) / static_cast<double>(nv + 1);
@@ -140,17 +148,45 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
                 rho = ai - r;
             }
         }
+    };
+    // Entries at or below the running pivot are skipped, and the pivot only
+    // changes on an entry above it, so a block whose maximum is at or below
+    // the pivot can be skipped whole: one compare per block instead of one
+    // per entry, with the same result. Once the pivot has grown, almost every
+    // block is skipped. The block maximum ignores NaN; with `finite` the
+    // result is discarded for such rows anyway.
+    constexpr int64_t kBlock = 8;  // measured: 4 and 16 are slower with one of Clang or GCC
+    int64_t i = 1;
+    for (; i + kBlock <= n; i += kBlock) {
+        double b[kBlock];
+        for (int64_t j = 0; j < kBlock; ++j) {
+            b[j] = a(i + j);
+            if (finite) check(b[j]);
+        }
+        for (int64_t h = kBlock / 2; h > 0; h /= 2)  // pairwise: log2(kBlock) deep
+            for (int64_t j = 0; j < h; ++j) b[j] = max_nonan(b[j], b[j + h]);
+        const double m = b[0];
+        if (m > rho)
+            for (int64_t j = 0; j < kBlock; ++j) visit(a(i + j));
+    }
+    for (; i < n; ++i) {
+        const double ai = a(i);
+        if (finite) check(ai);
+        visit(ai);
     }
     if (finite) {
         *finite = bad == 0;
         if (bad) return 0.0;
     }
+    double bmax = -HUGE_VAL;  // as in condat_tau
     for (int64_t j = 0; j < nvt; ++j) {
         const double ai = vt[j];
         if (ai > rho) {
             v[nv++] = ai;
             s1 += ai;
             rho = (s1 - r) / static_cast<double>(nv);
+        } else {
+            bmax = std::max(bmax, ai);
         }
     }
     bool changed = true;
@@ -162,6 +198,7 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
             if (ai > rho || nv - (j - m) == 1) {
                 v[m++] = ai;
             } else {
+                bmax = std::max(bmax, ai);
                 s1 -= ai;
                 rho = (s1 - r) / static_cast<double>(nv - (j - m) - 1);
                 changed = true;
@@ -171,7 +208,7 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
     }
     s1 = 0.0;
     for (int64_t j = 0; j < nv; ++j) s1 += v[j];
-    return (s1 - r) / static_cast<double>(nv);
+    return std::max((s1 - r) / static_cast<double>(nv), bmax);
 }
 
 inline size_t condat_scratch(int64_t n) noexcept {
@@ -326,9 +363,19 @@ constexpr double kL1Inside = -1.0, kL1Infinite = -2.0, kL1NaN = -3.0;
 template <class T>
 double l1_threshold(const T *x, int64_t n, const Vec &w, double radius, void *scr) noexcept {
     const bool weighted = w.size() > 1;
-    double norm1 = 0.0;
-    for (int64_t i = 0; i < n; ++i)
-        norm1 += (weighted ? w[i] : w[0]) * std::fabs(static_cast<double>(x[i]));
+    // Eight partial sums in a fixed order: one running sum is a chain of
+    // dependent additions (3 to 4 cycles per entry). The norm only decides
+    // whether x is inside the ball and whether the row is finite.
+    constexpr int64_t kLanes = 8;
+    double acc[kLanes] = {};
+    int64_t i = 0;
+    for (; i + kLanes <= n; i += kLanes)
+        for (int64_t j = 0; j < kLanes; ++j)
+            acc[j] += (weighted ? w[i + j] : w[0]) * std::fabs(static_cast<double>(x[i + j]));
+    for (; i < n; ++i) acc[0] += (weighted ? w[i] : w[0]) * std::fabs(static_cast<double>(x[i]));
+    for (int64_t h = kLanes / 2; h > 0; h /= 2)
+        for (int64_t j = 0; j < h; ++j) acc[j] += acc[j + h];
+    const double norm1 = acc[0];
     if (!(norm1 <= 1.7976931348623157e308)) {
         bool nan;
         if (scan_row(x, n, nan) != kRowOk) return kL1Infinite;

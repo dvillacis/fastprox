@@ -158,6 +158,47 @@ def test_l1_ball_tiny_weights():
         fp.L1Ball(1.0, np.r_[1.0, 1e-200])
 
 
+def test_l1_ball_extreme_weight_ratios():
+    # An entry within rounding of the pivot that dominates the running sums
+    # used to cancel them when removed (s2 = 1 + 1e-126 - 1 = 0) and return
+    # z = [5.5e7, 2.4e70] for this input (found by fuzzing).
+    w = np.array([1.8127637189163722e-308, 7.7265702135305315e-246])
+    for dt in (np.float64, np.float32):
+        z = fp.project_l1_ball(np.array([11.0351562, 2.0390625], dt), 1e-300, weights=w)
+        np.testing.assert_allclose(z, [11.0351562, 0.0], rtol=1e-6, atol=1e-30)
+    # Random weights spanning 60 orders of magnitude and tiny radii, against
+    # the projection in exact rational arithmetic (the float reference has
+    # the same cancellation): a projection never grows an entry or flips a
+    # sign, and it is accurate to rounding of x.
+    from fractions import Fraction
+
+    def exact_l1_ball(x, r, w):
+        a = [Fraction(abs(float(v))) for v in x]
+        wf = [Fraction(float(v)) for v in w]
+        order = sorted(range(len(a)), key=lambda i: -a[i] / wf[i])
+        s1 = s2 = Fraction(0)
+        for k, i in enumerate(order):
+            s1 += wf[i] * a[i]
+            s2 += wf[i] * wf[i]
+            tau = (s1 - Fraction(r)) / s2
+            nxt = a[order[k + 1]] / wf[order[k + 1]] if k + 1 < len(a) else Fraction(0)
+            if tau >= nxt:
+                break
+        return np.sign(x) * np.array([float(max(a[i] - tau * wf[i], 0)) for i in range(len(a))])
+
+    rng = np.random.default_rng(11)
+    for _ in range(2000):
+        n = int(rng.integers(2, 12))
+        x = rng.normal(size=n) * 10.0 ** rng.integers(-3, 4)
+        w = 10.0 ** rng.uniform(-60, 0, n)
+        r = float(np.sum(w * np.abs(x))) * 10.0 ** rng.uniform(-60, 0)
+        z = fp.project_l1_ball(x, r, weights=w)
+        assert np.all(np.abs(z) <= np.abs(x) * (1 + 1e-12))
+        assert np.all(z * x >= 0)
+        tol = 10 * n * np.finfo(float).eps * np.abs(x).max()
+        np.testing.assert_allclose(z, exact_l1_ball(x, r, w), rtol=0, atol=tol)
+
+
 def test_tv1d_gamma_zero_is_identity():
     x = np.random.default_rng(0).normal(size=(3, 50))
     np.testing.assert_array_equal(fp.tv1d(x, 0.0), x)

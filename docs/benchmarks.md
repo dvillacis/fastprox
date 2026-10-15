@@ -167,3 +167,35 @@ physical Neoverse-N2 cores (efficiency 0.97–0.98, target 0.7). The x86_64
 runner's 4 vCPUs are 2 cores with 2 hyperthreads each (3.48–3.78×). Python
 call overhead stayed at 1.6–2.8 µs at n = 100.
 
+## 2026-10-15, Apple M5 Pro: simplex and ℓ1 ball
+
+The first pass of Condat's method now tests a block of 8 entries with one
+comparison of its maximum against the running pivot, and visits the entries
+only when the block passes; the ℓ1-ball norm is summed in 8 lanes. Results
+are unchanged (the skipped entries could not have moved the pivot).
+
+**Simplex projection, radius 1, ns per sample** (`bench/compare_external.py`,
+both codes on the same fresh input)
+
+| Input | n | fastprox | Condat `simplexproj_Condat` |
+| --- | --- | --- | --- |
+| Gaussian | 10⁵ | **0.32** | 0.42 |
+| Gaussian | 10⁶ | **0.50** | 0.56 |
+| Gaussian | 10⁷ | **0.48** | 0.52 |
+| uniform | 10⁵ | 1.09 | **1.02** |
+| uniform | 10⁶ | **0.77** | **0.77** |
+| uniform | 10⁷ | **0.59** | 0.65 |
+| one large entry | 10⁵ | **0.32** | 0.47 |
+| one large entry | 10⁶ | **0.48** | 0.60 |
+| one large entry | 10⁷ | **0.47** | 0.55 |
+
+At n = 10³ fastprox is faster on all three inputs (1.2–3.8 against 2.3–5.0).
+In a C++ harness (n = 10⁶, Gaussian input, before → after): simplex
+0.50 → 0.33 with Clang 21 and GCC 16; ℓ1 ball with unit weights
+1.08 → 0.64, with weights in [0.5, 1.5] 1.37 → 1.08 (Clang) and
+1.68 → 1.05 (GCC). Block sizes 4 and 16 were slower with one of the two
+compilers, and testing the block with an OR of the comparisons instead of
+its maximum was 25% slower; in the weighted variant, where a maximum of
+a_i/w_i would not reproduce the test a_i > ρ w_i exactly, the OR test
+brought no gain and is not used.
+
