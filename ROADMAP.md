@@ -40,20 +40,28 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 - [x] Wheels with cibuildwheel (manual dispatch or tags): abi3 for CPython ≥ 3.12 on manylinux_2_28 x86_64/aarch64, macOS arm64 (11.0) and x86_64 (10.15), Windows amd64; built and tested in CI. Since 0.1.0rc2 no OpenMP runtime is bundled; the repair tools (delocate, auditwheel, delvewheel) still run
 - [x] Published 0.1.0rc1 to PyPI (2026-10-15): https://pypi.org/project/fastprox/0.1.0rc1/, 5 abi3 wheels and the sdist, uploaded by trusted publishing from the `v0.1.0rc1` tag after a TestPyPI dry run; the `pypi` environment accepts only `v*` tags and needs approval. The repository is public
 - [x] Published 0.1.0rc2 to PyPI (2026-10-15): thread pool instead of OpenMP, which fixes the abort next to PyTorch on macOS; checked by installing from TestPyPI and PyPI next to PyTorch 2.14 and JAX 0.11
+- [ ] Document the kink choices per operator in `docs/api.md`, with their justification: every choice is an element of the B-subdifferential (Scholtes, *Introduction to Piecewise Differentiable Equations*, Prop. 2.4.3–2.4.5 and 4.3.1; Clason–Valkonen Ex. 14.10, where soft thresholding at |x| = τ admits both 0 and 1), and x, γ and θ derivatives come from one saved structure, so they form a joint B-element and a VJP composed with a smooth loss is a Clarke subgradient. Note that the ℓ∞ prox treats |xᵢ| = τ as unclipped (the Moreau identity flips the ℓ1-ball rule), unlike soft thresholding
 - [ ] Final 0.1.0 once the gate passes (set `FASTPROX_VERSION_SUFFIX` to empty)
 
 **Gate (proposed, from spec Section 10):** all accuracy, determinism, special-value and allocation requirements pass on the full CI matrix; 1D TV, simplex and ℓ1 ball no slower than proxTV and Condat's code on one thread; overhead and scaling targets confirmed or revised; wheels install and pass tests on Linux, macOS (arm64, x86_64) and Windows.
 
 ## 0.2 — images
 
-- [ ] Anisotropic TV in 2D and 3D: parallel Douglas–Rachford or Dykstra over axes with exact 1D TV inside, duality-gap stopping, warm starts
-- [ ] Isotropic TV in 2D and 3D: fast gradient projection on the dual, fused single pass, gap stopping, dual field returned and accepted for warm starts
+- [ ] Anisotropic TV in 2D and 3D: parallel Douglas–Rachford or Dykstra over axes with exact 1D TV inside, duality-gap stopping, warm starts. In 2D, compare with the accelerated dual block method of Beck, *First-Order Methods in Optimization* (2017), §12.5.4 and Thm 12.19: it alternates exact row and column 1D TV at O(1/k²) and is a form of Chambolle–Pock (SMAI J. Comput. Math. 1, 2015); with three blocks (3D) only the O(1/k) version applies (Thms 12.17–12.18)
+- [ ] Isotropic TV in 2D and 3D: fast gradient projection on the dual, fused single pass, gap stopping, dual field returned and accepted for warm starts. From Beck (2017), Ch. 12: step 1/L with L = 8 in 2D (‖∇‖² ≤ 8; 12 in 3D by the same argument), primal from the last dual iterate, not the extrapolated one (12.19); Lemma 12.7 gives ‖x − x*‖ ≤ √(2 · gap) for the denoising problem, so the gap stop certifies the primal error; a monotone variant is MFISTA (Thm 10.40)
 - [ ] 1D TV with ℓ2 of differences: projected Newton on the dual, gap
 - [ ] Nonconvex pointwise maps: ℓ0, ℓ1/2, ℓ2/3, general ℓq (threshold test, safeguarded Newton), SCAD and MCP (`FP_EPARAM` below the concavity bound), log penalty
 - [ ] Tie rule (`fp_options.tie`, nonzero branch by default) and tie counts in `fp_info.ties`
 - [ ] Derivatives for the nonconvex maps (diagonal, support-restricted)
+- [ ] Cheap exact operators found in the literature review of 2026-10-15, each reusing an existing kernel or closed form with a simple Jacobian (pages are the book's printed pages):
+  - prox of max(x) as x − λ P_Δ(x/λ) (Beck Ex. 6.49, p. 162; Parikh and Boyd, *Proximal Algorithms*, §6.4.1, whose bisection interval is right only for λ = 1), and of the sum of the k largest entries or absolute values through the capped simplex (Beck Ex. 6.50–6.51)
+  - projection onto a hyperplane intersected with a box, P_Box(x − μa) with μ a root of a monotone piecewise-linear function (Beck Thm 6.27, pp. 147–148), which contains the simplex and the capped simplex; Jacobian I_F − a_F a_Fᵀ/‖a_F‖² on the free set
+  - projection onto a level set {f ≤ α}, e.g. a 1D TV ball, as prox_{γf} with γ the root of f(prox_{γf}(x)) = α (Beck Thm 6.30), using ∂z/∂γ for Newton steps and the implicit derivative
+  - group Huber, (1 − λ / max(‖x‖, μ + λ)) x (Beck Ex. 6.66), and radial lifting of any scalar prox to a group one (Beck Thm 6.18), e.g. group SCAD and MCP
+  - half-space, hyperplane, second-order cone (Beck Ex. 6.37), −λ Σ log xᵢ as (x + √(x² + 4λ))/2 (Beck Lemma 6.5), ℓ1 over a box (Beck Ex. 6.23)
+  - sparse group lasso and tree-structured group norms by composing soft thresholding and group proxes in tree order (Bach, Jenatton, Mairal and Obozinski, *Optimization with Sparsity-Inducing Penalties*, (3.8))
 - [ ] Python: `fp.lq`, `fp.tv_iso` returning `(z, info)` with `info.gap` and `info.dual`, and the other new operators
-- [ ] Check the citations marked "to check" in the spec (Beck–Teboulle; Xu et al.; Cao, Sun and Xu; Fan–Li; Zhang) before they go into kernel headers
+- [~] Check the citations marked "to check" in the spec (Beck–Teboulle; Xu et al.; Cao, Sun and Xu; Fan–Li; Zhang) before they go into kernel headers. Beck–Teboulle checked (2026-10-15, Beck 2017, Appendix D): "Fast gradient-based algorithms for constrained total variation image denoising and deblurring problems", IEEE Trans. Image Process. 18 (2009) 2419–2434, after Chambolle's dual projection method (JMIV 20, 2004); cite also Beck and Teboulle, Oper. Res. Lett. 42 (2014) 1–6, for the primal convergence analysis
 
 **Gate:** iterative operators meet `gap ≤ tol · ½‖x‖²` with the gap recomputed independently in tests; nonconvex maps verified against a dense grid with refinement, tie flags exact at thresholds.
 
@@ -62,7 +70,7 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 - [ ] Max-flow engine (Boykov–Kolmogorov style, tree reuse between levels), written from the paper (clean room)
 - [ ] Graph TV by parametric max-flow, exact to a user-set precision (Chambolle–Darbon, Hochbaum)
 - [ ] TV on trees and chains (Kolmogorov, Pock and Rolínek)
-- [ ] VJPs for the iterative operators by conjugate gradients on the dual active set, returning the residual
+- [ ] VJPs for the iterative operators by conjugate gradients on the dual active set, returning the residual. Choose the active set from the strict support of the computed primal and handle ties within the tolerance explicitly: picking an index set by rule can give a matrix outside the generalised Jacobian (Outrata, Kočvara and Zowe, *Nonsmooth Approach to Optimization Problems with Equilibrium Constraints*, Ex. 7.3)
 - [ ] PyTorch (`torch.autograd.Function`) and JAX (`custom_vjp` + `pure_callback`) wrappers, checked with `gradcheck`
 
 ## 1.0 — stable
