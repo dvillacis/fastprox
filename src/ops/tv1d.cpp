@@ -79,7 +79,7 @@ inline const double *recip_table() noexcept {
 // vmax). The only value carried from step to step is then the sum, instead
 // of a chain through the clamps; this is 1.3 to 3 times faster in long
 // segments, and the bounds no longer accumulate one rounding per clamp.
-template <class T, class R>
+template <int64_t Short = kShort, class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
     auto rcp = [recip](int64_t m) { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
@@ -88,6 +88,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
     double vmin = static_cast<double>(y[0]) - lk, vmax = static_cast<double>(y[0]) + lk;
     double umin = lk, umax = -lk;  // first kShort samples
     double ref = 0.0, s = 0.0;     // afterwards
+    static_assert(Short >= 1, "the first sample of a segment opens it");
     int64_t rescanned = 0;
 
     auto jump_down = [&]() {  // u_{km} = +radius(km)
@@ -103,6 +104,10 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk + (le + lk);
         umin = lk;
         umax = -lk;
+        if constexpr (Short == 1) {
+            ref = yk;
+            s = umin + (vmin - ref);
+        }
     };
     auto jump_up = [&]() {  // u_{kp} = -radius(kp)
         const T v = static_cast<T>(vmax);
@@ -117,14 +122,22 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk - (le - lk);
         umin = lk;
         umax = -lk;
+        if constexpr (Short == 1) {
+            ref = yk;
+            s = umin + (vmin - ref);
+        }
     };
+    if constexpr (Short == 1) {
+        ref = static_cast<double>(y[0]);
+        s = umin + (vmin - ref);
+    }
 
     for (;;) {
         while (k < n - 1) {
             const double yn = static_cast<double>(y[k + 1]);
             const double ln = radius(k + 1);
             const int64_t m = k - k0 + 2;  // length after this step
-            if (m <= kShort) {
+            if (m <= Short) {
                 if (yn + umin < vmin - ln) {
                     jump_down();
                     if (rescanned > budget) return false;
@@ -148,7 +161,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                     vmax += dp * r;
                     umax = max_nonan(umax, -ln);
                     kp = cp ? k : kp;
-                    if (m == kShort) {  // switch to the running sum
+                    if (m == Short) {  // switch to the running sum
                         ref = static_cast<double>(y[k0]);
                         s = umin + static_cast<double>(m) * (vmin - ref);
                     }
@@ -178,7 +191,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         const int64_t m = k - k0 + 1;
         bool down, up;
         double v;
-        if (m <= kShort) {
+        if (m <= Short) {
             down = umin < 0.0;
             up = umax > 0.0;
             v = vmin + umin / static_cast<double>(m);
