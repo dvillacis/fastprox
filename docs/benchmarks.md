@@ -199,3 +199,26 @@ its maximum was 25% slower; in the weighted variant, where a maximum of
 a_i/w_i would not reproduce the test a_i > ρ w_i exactly, the OR test
 brought no gain and is not used.
 
+## 2026-10-15, GitHub Actions runners: simplex block skip (quick mode, n = 10⁵)
+
+`bench` runs on `master` and on the branch with the block skip, GCC 13.3.
+Simplex projection, fastprox time over Condat's (master → branch):
+
+| Runner | Gaussian | uniform | one large entry |
+| --- | --- | --- | --- |
+| `ubuntu-24.04-arm`, Neoverse-N2 | 1.27 → 0.71 | 1.33 → 1.01 | 1.27 → 0.85 |
+| `ubuntu-latest`, x86_64 | 1.08 → 0.72 | 0.87 → 0.73 | 0.90 → 0.70 |
+
+A first version kept the block in a scratch array and was twice as slow
+as `master` on x86_64 (EPYC 7763: 1.96, 1.77 and 1.96): GCC reloaded the
+array with wider loads than it stored, which the core cannot forward.
+Holding the block in locals fixed it with no change on arm64.
+
+The x86_64 branch run landed on an Intel Xeon Platinum 8573C, the `master`
+run on an AMD EPYC 7763, so only the simplex rows above compare across them
+(1D TV is unchanged on the branch). On that Intel core fastprox's 1D TV
+times were close to those on the EPYC, but proxTV's were lower: fastprox
+was within 2% of the best code in 8 of 30 settings, trailing by 7–24% in
+most uniform and weighted settings at λ ≤ 1. On Neoverse-N2, 23 of 30
+settings were fastest or within 2% (19 on `master`).
+
