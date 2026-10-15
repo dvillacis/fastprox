@@ -79,7 +79,7 @@ inline const double *recip_table() noexcept {
 // vmax). The only value carried from step to step is then the sum, instead
 // of a chain through the clamps; this is 1.3 to 3 times faster in long
 // segments, and the bounds no longer accumulate one rounding per clamp.
-template <int64_t Short = kShort, class T, class R>
+template <int64_t Short = kShort, int64_t Adapt = 0, class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
     auto rcp = [recip](int64_t m) { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
@@ -89,6 +89,17 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
     double umin = lk, umax = -lk;  // first kShort samples
     double ref = 0.0, s = 0.0;     // afterwards
     static_assert(Short >= 1, "the first sample of a segment opens it");
+    // Paper's form for the first sh samples of the current segment. With
+    // Adapt > 0, a segment opened after one longer than Adapt starts in the
+    // running-sum form (sh = 1).
+    int64_t sh = Short;
+    auto open_form = [&](int64_t prev_len, double yk) {
+        if constexpr (Adapt > 0) sh = prev_len > Adapt ? 1 : Short;
+        if (sh == 1) {
+            ref = yk;
+            s = umin + (vmin - ref);
+        }
+    };
     int64_t rescanned = 0;
 
     auto jump_down = [&]() {  // u_{km} = +radius(km)
@@ -96,6 +107,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         for (int64_t i = k0; i <= km; ++i) z[i] = v;
         if (code) code[km + 1] = kDown;
         rescanned += k - km;
+        const int64_t prev = km - k0 + 1;
         const double le = radius(km);
         k = k0 = kp = km = km + 1;
         lk = radius(k);
@@ -104,16 +116,14 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk + (le + lk);
         umin = lk;
         umax = -lk;
-        if constexpr (Short == 1) {
-            ref = yk;
-            s = umin + (vmin - ref);
-        }
+        open_form(prev, yk);
     };
     auto jump_up = [&]() {  // u_{kp} = -radius(kp)
         const T v = static_cast<T>(vmax);
         for (int64_t i = k0; i <= kp; ++i) z[i] = v;
         if (code) code[kp + 1] = kUp;
         rescanned += k - kp;
+        const int64_t prev = kp - k0 + 1;
         const double le = radius(kp);
         k = k0 = km = kp = kp + 1;
         lk = radius(k);
@@ -122,22 +132,16 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         vmax = yk - (le - lk);
         umin = lk;
         umax = -lk;
-        if constexpr (Short == 1) {
-            ref = yk;
-            s = umin + (vmin - ref);
-        }
+        open_form(prev, yk);
     };
-    if constexpr (Short == 1) {
-        ref = static_cast<double>(y[0]);
-        s = umin + (vmin - ref);
-    }
+    open_form(0, static_cast<double>(y[0]));
 
     for (;;) {
         while (k < n - 1) {
             const double yn = static_cast<double>(y[k + 1]);
             const double ln = radius(k + 1);
             const int64_t m = k - k0 + 2;  // length after this step
-            if (m <= Short) {
+            if (m <= sh) {
                 if (yn + umin < vmin - ln) {
                     jump_down();
                     if (rescanned > budget) return false;
@@ -161,7 +165,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                     vmax += dp * r;
                     umax = max_nonan(umax, -ln);
                     kp = cp ? k : kp;
-                    if (m == Short) {  // switch to the running sum
+                    if (m == sh) {  // switch to the running sum
                         ref = static_cast<double>(y[k0]);
                         s = umin + static_cast<double>(m) * (vmin - ref);
                     }
@@ -191,7 +195,7 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         const int64_t m = k - k0 + 1;
         bool down, up;
         double v;
-        if (m <= Short) {
+        if (m <= sh) {
             down = umin < 0.0;
             up = umax > 0.0;
             v = vmin + umin / static_cast<double>(m);

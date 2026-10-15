@@ -39,11 +39,11 @@ using fp::condat_budget;
 // Uniform row with radius lam, or weighted row with radii w[e] (w[n-1] = 0).
 using Kernel = std::function<bool(const double *, double *, int64_t, double, const double *)>;
 
-template <int64_t Short>
+template <int64_t Short, int64_t Adapt = 0>
 Kernel switch_at() {
     return [](const double *x, double *z, int64_t n, double lam, const double *w) {
-        if (w) return condat<Short>(x, z, n, [w](int64_t e) { return w[e]; }, nullptr, condat_budget(n));
-        return condat<Short>(x, z, n, [lam](int64_t) { return lam; }, nullptr, condat_budget(n));
+        if (w) return condat<Short, Adapt>(x, z, n, [w](int64_t e) { return w[e]; }, nullptr, condat_budget(n));
+        return condat<Short, Adapt>(x, z, n, [lam](int64_t) { return lam; }, nullptr, condat_budget(n));
     };
 }
 
@@ -56,9 +56,10 @@ struct Variant {
 const std::vector<Variant> VARIANTS = {
     {"kernel (kShort = 3)", switch_at<fp::kShort>()},
     {"switch at 1", switch_at<1>()},
-    {"switch at 2", switch_at<2>()},
-    {"switch at 4", switch_at<4>()},
-    {"switch at 8", switch_at<8>()},
+    {"3, at 1 after > 3", switch_at<3, 3>()},
+    {"3, at 1 after > 8", switch_at<3, 8>()},
+    {"3, at 1 after > 16", switch_at<3, 16>()},
+    {"2, at 1 after > 8", switch_at<2, 8>()},
 };
 
 void signal(const std::string &kind, std::vector<double> &x, std::mt19937_64 &rng) {
@@ -91,6 +92,7 @@ int main(int argc, char **argv) {
     const int reps = argc > 3 ? std::atoi(argv[3]) : 31;
 
     using Taut = int (*)(double *, int, double, double *);
+    Taut ptv_classic = nullptr;
     using HybridTaut = void (*)(double *, int, double, double *);
     using WTaut = int (*)(double *, double *, double *, int);
     Taut ptv_lin = nullptr;
@@ -98,6 +100,7 @@ int main(int argc, char **argv) {
     WTaut ptv_w = nullptr;
     if (ptv_path) {
         if (void *h = dlopen(ptv_path, RTLD_NOW)) {
+            ptv_classic = reinterpret_cast<Taut>(dlsym(h, "shim_classic_taut"));
             ptv_lin = reinterpret_cast<Taut>(dlsym(h, "shim_linearized_taut"));
             ptv_hyb = reinterpret_cast<HybridTaut>(dlsym(h, "shim_hybrid_taut"));
             ptv_w = reinterpret_cast<WTaut>(dlsym(h, "shim_weighted_taut"));
@@ -132,6 +135,8 @@ int main(int argc, char **argv) {
                                     }, false});
                 if (weighted && ptv_w)
                     rows.push_back({"proxTV weighted taut", [&](double *z) { ptv_w(x.data(), w.data(), z, static_cast<int>(n)); }, true});
+                if (!weighted && ptv_classic)
+                    rows.push_back({"proxTV classic taut", [&](double *z) { ptv_classic(x.data(), static_cast<int>(n), lam, z); }, true});
                 if (!weighted && ptv_lin)
                     rows.push_back({"proxTV linearized taut", [&](double *z) { ptv_lin(x.data(), static_cast<int>(n), lam, z); }, true});
                 if (!weighted && ptv_hyb)
