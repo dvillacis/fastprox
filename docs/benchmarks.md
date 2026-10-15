@@ -222,3 +222,39 @@ was within 2% of the best code in 8 of 30 settings, trailing by 7–24% in
 most uniform and weighted settings at λ ≤ 1. On Neoverse-N2, 23 of 30
 settings were fastest or within 2% (19 on `master`).
 
+
+## 2026-10-15, GitHub Actions x86_64: 1D TV with SSE2 min/max (`profile` workflow, n = 10⁵)
+
+Two `profile` runs, one on `master` (6 jobs) and one on the branch whose
+`min_nonan`/`max_nonan` use `minsd`/`maxsd` on x86-64 (8 jobs). Each job
+lands on a random CPU; none of the VMs exposes hardware counters. GCC 13.3,
+single thread, 31 fresh inputs per setting, solver order rotated. Jobs on the
+same CPU model agree to 0.01 in their ratios, but absolute times differ by up
+to 18% between VMs, so only the ratios compare across runs.
+
+On `master`, GCC compiled `max(u − l, 0)` to `comisd; jbe; pxor` and
+`min(u, l)` to `comisd; ja`: the weighted Condat kernel had 56 conditional
+jumps and no min/max instruction. On the branch it has 4 `minsd`/`maxsd`
+and 52 jumps, and the inlined uniform kernel 65 min/max instructions.
+
+**Settings (of 18: uniform and weighted, three signals, λ = 0.1, 1, 10)
+where fastprox is fastest or within 2% of the best proxTV solver**
+
+| CPU | `master` | branch |
+| --- | --- | --- |
+| Intel Xeon Platinum 8370C | 6 | — |
+| Intel Xeon Platinum 8573C | 3 | 12 |
+| Intel Xeon 6973P-C | — | 13 |
+| AMD EPYC 7763 | 17 | 17 |
+| AMD EPYC 9V74 | 14 | 18 |
+| AMD EPYC 9V45 | — | 17–18 |
+
+Fastprox time over the best proxTV solver on the Xeon 8573C (`master` →
+branch): uniform rows at λ = 1 from 1.01–1.16 to 0.83–1.03 and at λ = 0.1
+from 1.12–1.16 to 1.01–1.07; weighted rows at λ = 1 from 1.08–1.12 to
+0.82–0.93 and at λ = 0.1 from 1.10–1.15 to 1.01–1.08. On the AMD cores the
+same rows went from 0.89–1.04 to 0.72–0.98. Still behind on Intel: random
+walk and white noise at λ = 0.1 (1.02–1.09), uniform random walk at λ = 10
+(1.05–1.09; it got worse, from 1.04 on the 8573C and from 0.90 to 0.95–1.00
+on AMD, as on Neoverse-N2 the branches predicted well there), and weighted
+white noise at λ = 10 (1.12–1.14, 1.00–1.08 on AMD).
