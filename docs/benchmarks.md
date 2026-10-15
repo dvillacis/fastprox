@@ -85,6 +85,36 @@ the segment-based taut string, 0.74–0.83× the time of the double-double
 version; weighted Condat within 10% of uniform Condat; the simplex with its
 finiteness test folded into the pivot pass, 0.81× the previous time.
 
+## 2026-10-15, Apple M5 Pro, n = 10⁶ (range pass and GCC selects)
+
+Same script and machine after two changes to 1D TV: the per-call finiteness
+and range pass runs in 8 independent lanes (it was one dependent chain of
+compare-selects, about 2 cycles per sample), and the branch-free bound
+updates are written as min/max so that GCC keeps them branch-free. Clang's
+kernel code is unchanged, so on this machine only the range pass moved.
+
+| Setting, ns per sample | fastprox | best external code |
+| --- | --- | --- |
+| weighted, white noise, λ = 10 | 5.33 | 4.91 (proxTV) |
+| float32, blocks, λ = 0.1 | 7.14 | 7.10 (Condat) |
+| float32, random walk, λ = 0.1 | 6.80 | 6.61 (Condat) |
+| float32, white noise, λ = 0.1 | 5.63 | 5.36 (Condat) |
+
+All 9 uniform float64 settings and 8 of 9 weighted ones stay fastest or
+within 2%. Weighted white noise at λ = 10 is now 8% behind (was 13%); the
+range pass costs 0.26 ns per sample of it, about what reading the row costs,
+and the kernel alone takes 5.03 ns in a C++ harness. float32 at λ = 0.1 is
+1–5% behind (was 6–12%).
+
+The range pass alone, float64, n = 10⁶, fresh input: 0.48 → 0.25 ns per
+sample with Clang 21 and 0.89 → 0.26 with GCC 16. Whole 1D TV rows with
+GCC 16 on this machine, before → after (float64): uniform white noise at
+λ = 1, 9.54 → 7.71; weighted white noise at λ = 1, 11.35 → 8.33; uniform
+random walk at λ = 10, 8.93 → 10.64. GCC had compiled the short-segment
+selects as branches, which lose at λ ≤ 1 and happened to win at λ = 10.
+After the change the GCC build is within 3% of the Clang build at λ ≤ 1.
+Whether this closes the Neoverse-N2 gap needs a run of the `bench` workflow.
+
 ## 2026-10-14, GitHub Actions runners (`bench` workflow, quick mode, n = 10⁵)
 
 Started by hand from the Actions tab (`.github/workflows/bench.yml`); each

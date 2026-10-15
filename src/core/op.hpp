@@ -259,24 +259,58 @@ inline bool all_finite(const T *x, int64_t n) noexcept {
     return bad == 0;
 }
 
+// Minimum and maximum of two values known to be NaN-free (or whose NaN
+// inputs are tested separately). On arm64 fmin/fmax are single instructions
+// (fminnm/fmaxnm) while a compare-select takes two; on x86 the compare-select
+// is minsd/maxsd while fmin needs extra NaN handling.
+template <class T>
+inline T min_nonan(T a, T v) noexcept {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return std::fmin(a, v);
+#else
+    return v < a ? v : a;
+#endif
+}
+template <class T>
+inline T max_nonan(T a, T v) noexcept {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return std::fmax(a, v);
+#else
+    return v > a ? v : a;
+#endif
+}
+
 // True when every entry is finite; then lo and hi are the smallest and
-// largest entries. One pass, which the compiler vectorises.
+// largest entries. One pass in independent lanes: a single running minimum
+// is a chain of dependent operations (2 to 4 cycles per entry), which the
+// compiler may not reorder without fast-math. On finite input the order of
+// the comparisons changes at most the sign of a zero extreme.
 template <class T>
 inline bool finite_range(const T *x, int64_t n, double &lo, double &hi) noexcept {
     using U = typename FloatBits<T>::U;
     constexpr U e = FloatBits<T>::exp;
-    U bad = 0;
-    T mn = x[0], mx = x[0];
-    for (int64_t i = 0; i < n; ++i) {
-        U b;
-        std::memcpy(&b, x + i, sizeof b);
-        bad |= static_cast<U>((b & e) == e);
-        mn = x[i] < mn ? x[i] : mn;
-        mx = x[i] > mx ? x[i] : mx;
+    constexpr int64_t kLanes = 8;  // measured: 4 to 16 are close; 1 is twice as slow
+    U bad[kLanes];
+    T mn[kLanes], mx[kLanes];
+    for (int64_t j = 0; j < kLanes; ++j) {
+        bad[j] = 0;
+        mn[j] = mx[j] = x[0];
     }
-    lo = static_cast<double>(mn);
-    hi = static_cast<double>(mx);
-    return bad == 0;
+    auto step = [&](int64_t j, T v) {
+        U b;
+        std::memcpy(&b, &v, sizeof b);
+        bad[j] |= static_cast<U>((b & e) == e);
+        mn[j] = min_nonan(mn[j], v);
+        mx[j] = max_nonan(mx[j], v);
+    };
+    int64_t i = 0;
+    for (; i + kLanes <= n; i += kLanes)
+        for (int64_t j = 0; j < kLanes; ++j) step(j, x[i + j]);
+    for (; i < n; ++i) step(0, x[i]);
+    for (int64_t j = 1; j < kLanes; ++j) step(0, mn[j]), step(0, mx[j]), bad[0] |= bad[j];
+    lo = static_cast<double>(mn[0]);
+    hi = static_cast<double>(mx[0]);
+    return bad[0] == 0;
 }
 
 // Scans a row: returns kRowNonFinite on any infinity and sets has_nan.

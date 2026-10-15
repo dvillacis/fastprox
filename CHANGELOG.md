@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- 1D TV: the per-call finiteness and range pass runs in 8 independent lanes with `fminnm`/`fmaxnm` on arm64 (compare-selects elsewhere) instead of one dependent chain: 0.25 instead of 0.48 ns per sample with Clang and 0.89 with GCC on Apple M5 (float64, n = 10⁶). Weighted rows on white noise at λ = 10 went from 5.52 to 5.29 ns per sample, and float32 rows at λ = 0.1 are now 1–5% behind Condat's single-precision code (were 6–12%).
+- 1D TV: the branch-free bound updates in short segments of Condat's algorithm are written as min/max of the excess instead of selects on a comparison, which GCC compiled back into branches. Same arithmetic up to the sign of zero. With GCC 16 on Apple M5, 4–12% faster at λ = 0.1 and 5–27% faster at λ = 1 (uniform and weighted), within 3% of the Clang build at λ ≤ 1; at λ = 10, uniform rows lose 1–19% under GCC (random walk most), where the branches it emitted happened to predict well, and weighted rows gain up to 10%. Clang's code is unchanged.
+
 ## [0.1.0rc2] — 2026-10-15
 
 ### Fixed
