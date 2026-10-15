@@ -29,6 +29,7 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 - [x] Single source for the version (`project()` in CMakeLists.txt; header macros checked at configure time)
 - [x] `fastprox` is free on conda-forge (no package, feedstock or staged-recipes PR, 2026-10-14) and on PyPI
 - [x] API reference: [docs/api.md](docs/api.md)
+- [x] Examples in `examples/` (2026-10-15), run by the Python tests
 
 **Open**
 

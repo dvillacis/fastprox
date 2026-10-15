@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Documentation
 
+- `examples/`: basic usage, 1D TV denoising, proximal gradient (lasso and batched simplex least squares), derivatives checked against finite differences, and bilevel learning of TV weights through the VJP. `tests/python/test_examples.py` runs them all; matplotlib for the plot is in the `examples` dependency group.
 - `docs/api.md` lists, for every operator, which Jacobian the derivatives use at kinks and ties. It explains why each choice is an element of the B-subdifferential, and that the x, γ and parameter derivatives together form one. The ℓ∞ prox and conjugate proxes reverse the thresholding rule through the Moreau identity.
 
 ### Changed
