@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `profile` workflow (manual dispatch): several identical jobs on GitHub's x86_64 runner, each labelled with the CPU it landed on. Each job profiles single-thread 1D TV against proxTV with `bench/profile_kernels.cpp`, which records hardware counters where the VM exposes them and rotates the solver order so that none benefits from branch history. It also summarises GCC's assembly of the kernels (conditional jumps against selects) with `bench/asm_summary.py`.
+
 ### Documentation
 
 - `examples/`: basic usage, 1D TV denoising, proximal gradient (lasso and batched simplex least squares), derivatives checked against finite differences, and bilevel learning of TV weights through the VJP. `tests/python/test_examples.py` runs them all; matplotlib for the plot is in the `examples` dependency group.

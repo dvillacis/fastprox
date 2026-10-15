@@ -1,0 +1,99 @@
+name: profile
+
+# Single-thread profile of 1D TV on GitHub's x86_64 runner, fastprox against
+# proxTV, with hardware counters where the VM exposes them and GCC's assembly
+# of the kernels. `ubuntu-latest` lands on an Intel or an AMD CPU at random,
+# so this starts several identical jobs and labels each artifact with the CPU
+# it got. Started by hand from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Identical jobs to start (each lands on a random CPU), 1 to 12"
+        type: string
+        default: "6"
+      n:
+        description: "Samples per row"
+        type: string
+        default: "100000"
+      reps:
+        description: "Repetitions per setting (fresh input each)"
+        type: string
+        default: "31"
+
+jobs:
+  slots:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - id: s
+        env: { JOBS: "${{ inputs.jobs }}" }
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          k = max(1, min(12, int(os.environ["JOBS"])))
+          print("list=" + json.dumps(list(range(1, k + 1))))
+          EOF
+
+  profile:
+    name: profile ${{ matrix.slot }}
+    needs: slots
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.slots.outputs.list) }}
+    env: { N: "${{ inputs.n }}", REPS: "${{ inputs.reps }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Machine
+        id: machine
+        run: |
+          {
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket|MHz|L2|L3' || true
+            c++ --version | head -1
+          } | tee machine.txt
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          case "$model" in
+            *Intel*|*INTEL*) vendor=intel ;;
+            *AMD*) vendor=amd ;;
+            *) vendor=other ;;
+          esac
+          echo "vendor=$vendor" >> "$GITHUB_OUTPUT"
+          echo "### profile ${{ matrix.slot }}: $model" >> "$GITHUB_STEP_SUMMARY"
+      - name: Allow hardware counters for this user
+        run: sudo sysctl -w kernel.perf_event_paranoid=1 || true
+      - name: Build fastprox
+        run: |
+          cmake -S . -B build/c -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/c --target fastprox -j 4
+      - name: Build proxTV (fetched at run time, never vendored)
+        run: |
+          sudo apt-get update && sudo apt-get install -y liblapack-dev
+          uv sync --python 3.12
+          uv run python -c "import sys; sys.path.insert(0, 'bench'); import compare_external as c; print(c.build_proxtv())"
+      - name: Profile
+        run: |
+          c++ -O2 -std=c++17 bench/profile_kernels.cpp -Iinclude -Lbuild/c -lfastprox -ldl \
+              -Wl,-rpath,"$PWD/build/c" -o profile_kernels
+          ./profile_kernels build/external/libproxtv_tv1.so "$N" "$REPS" | tee profile.txt
+          { echo '```'; cat profile.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Assembly of the kernels (same flags as the library)
+        run: |
+          for f in tv1d projections; do
+            c++ -std=c++17 -O3 -DNDEBUG -fno-fast-math -Iinclude -Isrc -S "src/ops/$f.cpp" -o "$f.s"
+          done
+          python3 bench/asm_summary.py tv1d.s projections.s | tee asm_summary.txt
+          { echo '```'; cat asm_summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profile-${{ matrix.slot }}-${{ steps.machine.outputs.vendor }}
+          path: |
+            machine.txt
+            profile.txt
+            asm_summary.txt
+            tv1d.s
+            projections.s
