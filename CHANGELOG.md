@@ -5,10 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- `examples/`: basic usage, 1D TV denoising, proximal gradient (lasso and batched simplex least squares), derivatives checked against finite differences, and bilevel learning of TV weights through the VJP. `tests/python/test_examples.py` runs them all; matplotlib for the plot is in the `examples` dependency group.
+- `docs/api.md` lists, for every operator, which Jacobian the derivatives use at kinks and ties. It explains why each choice is an element of the B-subdifferential, and that the x, γ and parameter derivatives together form one. The ℓ∞ prox and conjugate proxes reverse the thresholding rule through the Moreau identity.
+
 ### Changed
 
 - 1D TV: the per-call finiteness and range pass runs in 8 independent lanes with `fminnm`/`fmaxnm` on arm64 (compare-selects elsewhere) instead of one dependent chain: 0.25 instead of 0.48 ns per sample with Clang and 0.89 with GCC on Apple M5 (float64, n = 10⁶). Weighted rows on white noise at λ = 10 went from 5.52 to 5.29 ns per sample, and float32 rows at λ = 0.1 are now 1–5% behind Condat's single-precision code (were 6–12%).
 - 1D TV: the branch-free bound updates in short segments of Condat's algorithm are written as min/max of the excess instead of selects on a comparison, which GCC compiled back into branches. Same arithmetic up to the sign of zero. With GCC 16 on Apple M5, 4–12% faster at λ = 0.1 and 5–27% faster at λ = 1 (uniform and weighted), within 3% of the Clang build at λ ≤ 1; at λ = 10, uniform rows lose 1–19% under GCC (random walk most), where the branches it emitted happened to predict well, and weighted rows gain up to 10%. Clang's code is unchanged.
+- Simplex and ℓ1 ball: the first pass of Condat's method skips blocks of 8 entries whose maximum is at or below the running pivot (the pivot can only change on an entry above it, so results are bit-identical). The ℓ1 norm that decides whether x is inside the ball is summed in 8 lanes instead of one dependent chain. On Apple M5 at n = 10⁶: simplex projection 0.50 instead of 0.60 ns per sample on Gaussian input, now faster than Condat's code (0.56); unweighted ℓ1 ball 0.64 instead of 1.08, weighted 1.08 instead of 1.37 (Clang) and 1.05 instead of 1.68 (GCC). The ℓ∞ prox shares the ℓ1-ball kernel.
+
+### Fixed
+
+- Weighted ℓ1-ball projection with weights spanning many orders of magnitude could return outputs far larger than the input (z = [5.5e7, 2.4e70] for x = [11.0, 2.0], weights [1.8e-308, 7.7e-246] and radius 1e-300; found by fuzzing). Removing an entry within rounding of the pivot that dominated the running sums cancelled them. The threshold is now kept at least at the largest breakpoint left out of the support, as it is in exact arithmetic. The same guard is in the unweighted kernel.
 
 ## [0.1.0rc2] — 2026-10-15
 

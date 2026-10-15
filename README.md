@@ -53,6 +53,7 @@ conjugate prox through the Moreau identity.
 ## Documentation
 
 - [API reference](https://github.com/dvillacis/fastprox/blob/master/docs/api.md) (C and Python)
+- [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, proximal gradient, derivatives, bilevel learning
 - [Benchmarks](https://github.com/dvillacis/fastprox/blob/master/docs/benchmarks.md) against proxTV and Condat's C code
 - [Design specification](https://github.com/dvillacis/fastprox/blob/master/docs/spec.md)
 - [Roadmap](https://github.com/dvillacis/fastprox/blob/master/ROADMAP.md) and [changelog](https://github.com/dvillacis/fastprox/blob/master/CHANGELOG.md)
