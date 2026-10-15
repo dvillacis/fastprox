@@ -51,9 +51,53 @@ Notes:
   weights split a row into independent pieces; when no edge can be active
   the result is the constant mean.
 - **Kinks.** At a point where the prox is not differentiable the derivative
-  is that of the structure the forward pass selected: an entry exactly at a
-  threshold counts as thresholded, a box entry on a bound as interior, and 1D
-  TV and isotonic regression average over the segments and blocks they found.
+  is that of the structure the forward pass selected (see "Derivatives at
+  kinks" below).
+
+### Derivatives at kinks
+
+Every operator is piecewise smooth. At a point where two pieces meet,
+`fp_jvp` and `fp_vjp` use the Jacobian of one of them, chosen as follows:
+
+| Operator | At the kink | Jacobian used |
+| --- | --- | --- |
+| soft thresholding, elastic net | \|xᵢ\| equal to the threshold | thresholded: 0 |
+| Huber | \|xᵢ\| = δ + γλ | inner (quadratic) branch: δ/(δ + γλ) |
+| box, nonnegative orthant | xᵢ on a bound | interior: 1 |
+| group ℓ2, ℓ2 norm | ‖x_g‖ equal to the threshold | group set to zero: 0 |
+| ℓ2 ball | ‖x‖ = r | inside: identity |
+| simplex, ℓ1 ball | xᵢ (or \|xᵢ\|/wᵢ) equal to the threshold τ | entry off the support |
+| ℓ1 ball | weighted ℓ1 norm of x equal to r | inside: identity |
+| ℓ∞ norm | \|xᵢ\| = τ | entry not clipped: 1 |
+| ℓ∞ norm | ‖x‖₁ = γλ | z = 0: 0 |
+| isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
+| 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
+
+The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
+x − γλ P(x/(γλ)), with P the projection onto the ℓ1 ball, so an entry kept
+off the support of P is left unclipped. `fp_prox_conj` flips its operator's
+rule in the same way.
+
+**Why these are valid derivatives.** Every choice in the table is the
+Jacobian of one of the smooth pieces that meet at the point. So it belongs
+to the B-subdifferential, the set of limits of nearby Jacobians, and hence
+to Clarke's generalised Jacobian:
+- S. Scholtes, *Introduction to Piecewise Differentiable Equations*,
+  Springer 2012, Prop. 4.3.1, and Prop. 2.4.3–2.4.5 for projections onto
+  polyhedra (simplex, ℓ1 ball, monotone cone, and 1D TV through the Moreau
+  identity).
+- C. Clason and T. Valkonen, *Introduction to Nonsmooth Analysis and
+  Optimization*, Ex. 14.10. For soft thresholding at |x| = τ, both 0 and 1
+  are such limits, and neither is canonical.
+
+The derivatives in x, γ and the parameters θ all come from the same saved
+structure. Together they are therefore the Jacobian of one piece in the
+joint variables (x, γ, θ). As a result, a VJP through a smooth outer loss
+is a Clarke subgradient of the composition.
+
+At a kink, the JVP is not the one-sided directional derivative for
+directions that leave the chosen piece. Finite-difference tests therefore
+avoid kinks.
 
 ## C API
 

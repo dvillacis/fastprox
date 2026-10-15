@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- `docs/api.md` lists, for every operator, which Jacobian the derivatives use at kinks and ties. It explains why each choice is an element of the B-subdifferential, and that the x, γ and parameter derivatives together form one. The ℓ∞ prox and conjugate proxes reverse the thresholding rule through the Moreau identity.
+
 ### Changed
 
 - 1D TV: the per-call finiteness and range pass runs in 8 independent lanes with `fminnm`/`fmaxnm` on arm64 (compare-selects elsewhere) instead of one dependent chain: 0.25 instead of 0.48 ns per sample with Clang and 0.89 with GCC on Apple M5 (float64, n = 10⁶). Weighted rows on white noise at λ = 10 went from 5.52 to 5.29 ns per sample, and float32 rows at λ = 0.1 are now 1–5% behind Condat's single-precision code (were 6–12%).
