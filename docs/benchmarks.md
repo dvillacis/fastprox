@@ -322,3 +322,29 @@ Accuracy: on 3000 random rows (n up to 3000, offsets up to 10⁶, λ from 10⁻�
 to 10², uniform and weighted) the structure is identical to the previous
 kernel, and the error against segment values recomputed from that
 structure with compensated sums is at most 52 ε ‖x‖∞, as before.
+
+## 2026-10-15, GitHub Actions runners: running-sum Condat (GCC 13.3, n = 10⁵)
+
+`profile` on the branch (8 jobs: 3 Intel, 5 AMD), compared with the run on
+`master` (`profile` run 38805817290), and `bench` (quick mode) on the branch
+and on `master`, started together. Fastprox time over the best proxTV solver:
+
+| Setting | Intel Xeon (8573C, 6973P-C) | AMD EPYC (7763, 9V74, 9V45) | Neoverse-N2 (`bench`) |
+| --- | --- | --- | --- |
+| weighted white noise, λ = 10 | 1.12–1.14 → 0.73–0.78 | 1.00–1.08 → 0.55–0.62 | 1.22 → 0.92 |
+| uniform random walk, λ = 10 | 1.05–1.09 → 0.83–0.84 | 0.95–1.00 → 0.69–0.70 | 1.19 → 1.06 |
+| uniform, λ = 1 | 0.81–1.03 → 0.55–0.97 | 0.75–0.92 → 0.48–0.91 | 0.77–0.93 → 0.62–0.93 |
+| weighted, λ = 1 | 0.81–0.93 → 0.58–0.91 | 0.72–0.84 → 0.48–0.84 | 0.79–0.89 → 0.65–0.90 |
+| uniform, λ = 0.1 | 1.00–1.09 → 1.01–1.09 | 0.92–0.98 → 0.95–1.00 | 1.01–1.12 → 1.04–1.12 |
+| weighted, λ = 0.1 | 1.00–1.08 → 1.04–1.12 | 0.89–0.98 → 0.92–0.99 | 1.03–1.09 → 1.03–1.11 |
+
+Settings (of 18) fastest or within 2% in `profile`: Intel 12–13 → 13, AMD
+17–18 → 18. The weighted Condat kernel compiles with 6 min/max instructions
+(was 4). What remains behind proxTV: λ = 0.1 on Intel and Neoverse-N2 (it
+was before, and the weighted rows lost about 3% on Intel), and uniform random
+walk at λ = 10 on Neoverse-N2.
+
+In the same `bench` runs, the simplex with the SSE2 block maximum on x86_64
+took 0.82–0.99 of Condat's time on an EPYC 7763 and 0.90–1.06 on an EPYC
+9V45 (Gaussian, uniform, one large entry; uniform input is the slowest), and
+0.87–0.92 on Neoverse-N2.
