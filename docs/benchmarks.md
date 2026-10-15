@@ -380,3 +380,46 @@ code; they are recorded so that they are not retried as they were.
 Apple M5 is a poor guide in this regime: the gap is on Neoverse-N2 and Intel,
 and variants are best compared there, several in one binary on the same
 runner.
+
+## 2026-10-16, uniform random walk at λ = 10 on Neoverse-N2 (`variants` workflow)
+
+`bench` had fastprox at 1.04–1.06 of proxTV's time here. The best proxTV
+solver in this setting on Neoverse-N2 is its **classic** taut string
+(12.19 ns per sample at n = 10⁵, against 15.14–17.05 for the linearized
+and hybrid ones and 12.65 for fastprox): a single pass, where Condat's
+algorithm visits each sample about 3 times (2.2 rescanned steps per sample).
+Rotating the solver order in `compare_external.py` did not change the
+ratio (1.04 on the same runner type).
+
+Kernel alone (`bench/tv_variants.cpp`, n = 10⁵, 31 fresh inputs), time over
+the best proxTV solver (classic, linearized or hybrid taut string; weighted
+taut string for weighted rows). The kernel uses the paper's update for the
+first 3 samples of a segment; the variant starts the running sum at the
+first sample, opened at s = ±λₑ:
+
+| Setting | Neoverse-N2, kernel | Neoverse-N2, running sum at once | AMD EPYC 7763, kernel | AMD EPYC 7763, running sum at once |
+| --- | --- | --- | --- | --- |
+| uniform random walk, λ = 10 | 0.95–0.96 | 0.82 | 0.68–0.69 | 0.61–0.62 |
+| uniform, λ = 1 | 0.54–0.86 | 0.46–0.74 | 0.44–0.82 | 0.39–0.70 |
+| uniform, λ = 0.1 | 0.93–0.99 | 1.06–1.17 | 0.87–0.90 | 1.05–1.16 |
+| weighted, λ = 0.1 | 0.87–0.91 | 1.03–1.11 | 0.83–0.85 | 0.97–1.05 |
+
+Starting the running sum at once is up to 15% faster at λ ≥ 1 and 13–29%
+slower at λ = 0.1. Switching after 2 samples lies in between, after 4 is
+close to 3 (a first run, against the linearized and hybrid solvers only).
+No variant tried kept both:
+
+- the running sum at once only after a segment longer than 3, 8 or 16
+  samples: 0.92–0.96 here, no gain (and with GCC on x86 the weighted
+  instantiations came out 1.2–1.6× proxTV's time);
+- the radius moved off the path from the sum to the jump tests
+  (s + (d ± λ) instead of (s + d) ± λ): slightly slower everywhere;
+- opening the running sum at s = ±λₑ instead of u + (v − ref): with the
+  running sum at once, λ = 0.1 went from 1.10–1.22 to 1.06–1.17 of proxTV's
+  time on Neoverse-N2, not enough.
+
+The kernel stays at 3. With the library's range pass (about 2%) the setting
+is about even with proxTV's classic taut string on Neoverse-N2 (0.97 from
+the kernel timings, 1.04–1.06 in `bench`), and ahead elsewhere: 0.64 on
+Apple M5 and 0.73–0.74 on AMD EPYC 9V74 against all proxTV solvers, 0.80–0.84
+on Intel against the linearized and hybrid ones.

@@ -39,11 +39,11 @@ using fp::condat_budget;
 // Uniform row with radius lam, or weighted row with radii w[e] (w[n-1] = 0).
 using Kernel = std::function<bool(const double *, double *, int64_t, double, const double *)>;
 
-template <int64_t Short, int64_t Adapt = 0, bool Assoc = false>
+template <int64_t Short>
 Kernel switch_at() {
     return [](const double *x, double *z, int64_t n, double lam, const double *w) {
-        if (w) return condat<Short, Adapt, Assoc>(x, z, n, [w](int64_t e) { return w[e]; }, nullptr, condat_budget(n));
-        return condat<Short, Adapt, Assoc>(x, z, n, [lam](int64_t) { return lam; }, nullptr, condat_budget(n));
+        if (w) return condat<Short>(x, z, n, [w](int64_t e) { return w[e]; }, nullptr, condat_budget(n));
+        return condat<Short>(x, z, n, [lam](int64_t) { return lam; }, nullptr, condat_budget(n));
     };
 }
 
@@ -56,9 +56,8 @@ struct Variant {
 const std::vector<Variant> VARIANTS = {
     {"kernel (kShort = 3)", switch_at<fp::kShort>()},
     {"switch at 1", switch_at<1>()},
-    {"switch at 1, assoc", switch_at<1, 0, true>()},
-    {"switch at 2, assoc", switch_at<2, 0, true>()},
-    {"switch at 3, assoc", switch_at<3, 0, true>()},
+    {"switch at 2", switch_at<2>()},
+    {"switch at 4", switch_at<4>()},
 };
 
 void signal(const std::string &kind, std::vector<double> &x, std::mt19937_64 &rng) {
