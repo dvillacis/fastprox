@@ -348,3 +348,35 @@ In the same `bench` runs, the simplex with the SSE2 block maximum on x86_64
 took 0.82–0.99 of Condat's time on an EPYC 7763 and 0.90–1.06 on an EPYC
 9V45 (Gaussian, uniform, one large entry; uniform input is the slowest), and
 0.87–0.92 on Neoverse-N2.
+
+## 2026-10-16, 1D TV at λ = 0.1: two attempts that did not hold
+
+At λ = 0.1 most segments are 1 to 3 samples long and there are about 0.9
+jumps per sample, so the time goes to the jumps. Neither of these is in the
+code; they are recorded so that they are not retried as they were.
+
+- **One branch for both jump directions** (`down | up`, the direction then
+  chosen with selects in a single routine): on Apple M5 1.65–2.1× proxTV's
+  time at λ = 0.1 with Clang (was 0.93–1.00) and slower with GCC 16 too.
+  The restart of the next segment then waits for the direction.
+- **Short segments written with 4 unconditional stores** (the slots past the
+  segment belong to later segments), instead of the fill loop whose
+  vectorised prologue and remainder branch on the length. On Apple M5 it
+  helped: λ = 0.1 from 0.93–1.00 to 0.90–0.95 of proxTV's time (Clang) and
+  from 0.94–1.02 to 0.90–1.00 (GCC 16). On GitHub's runners (GCC 13.3,
+  n = 10⁵) it made λ = 0.1 slower, `master` → branch:
+
+  | Runner | uniform | weighted |
+  | --- | --- | --- |
+  | Neoverse-N2 (`bench`) | 1.03–1.09 → 1.08–1.16 | 1.04–1.13 → 1.05–1.14 |
+  | AMD EPYC 9V74 (`bench`, same CPU both runs) | 0.96–1.00 → 1.00–1.04 | 0.94–0.97 → 0.98–1.04 |
+  | AMD EPYC 7763 (`profile`) | 0.95–0.99 → 0.99–1.10 | 0.92–0.97 → 0.98–1.04 |
+  | Intel Xeon 8573C (`profile`) | 1.01–1.09 → 1.04–1.07 | 1.05–1.12 → 1.04–1.13 |
+
+  λ = 1 gained a few percent and λ = 10 was unchanged. The stores per jump
+  roughly triple, often as overlapping unaligned 16-byte writes, which the
+  M5 absorbs and Neoverse-N2 and the x86 cores do not.
+
+Apple M5 is a poor guide in this regime: the gap is on Neoverse-N2 and Intel,
+and variants are best compared there, several in one binary on the same
+runner.
