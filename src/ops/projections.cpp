@@ -155,19 +155,24 @@ double condat_tau_unit(int64_t n, A a, double r, double *v, double *vt,
     // per entry, with the same result. Once the pivot has grown, almost every
     // block is skipped. The block maximum ignores NaN; with `finite` the
     // result is discarded for such rows anyway.
-    constexpr int64_t kBlock = 8;  // measured: 4 and 16 are slower with one of Clang or GCC
+    // Blocks of 8 (4 and 16 were slower with one of Clang or GCC), held in
+    // locals: a scratch array made GCC on x86_64 reload the values with
+    // wider loads than it stored them, which stalls, and doubled the time.
+    constexpr int64_t kBlock = 8;
     int64_t i = 1;
     for (; i + kBlock <= n; i += kBlock) {
-        double b[kBlock];
-        for (int64_t j = 0; j < kBlock; ++j) {
-            b[j] = a(i + j);
-            if (finite) check(b[j]);
+        const double a0 = a(i), a1 = a(i + 1), a2 = a(i + 2), a3 = a(i + 3);
+        const double a4 = a(i + 4), a5 = a(i + 5), a6 = a(i + 6), a7 = a(i + 7);
+        if (finite) {
+            check(a0), check(a1), check(a2), check(a3);
+            check(a4), check(a5), check(a6), check(a7);
         }
-        for (int64_t h = kBlock / 2; h > 0; h /= 2)  // pairwise: log2(kBlock) deep
-            for (int64_t j = 0; j < h; ++j) b[j] = max_nonan(b[j], b[j + h]);
-        const double m = b[0];
-        if (m > rho)
-            for (int64_t j = 0; j < kBlock; ++j) visit(a(i + j));
+        const double m = max_nonan(max_nonan(max_nonan(a0, a1), max_nonan(a2, a3)),
+                                   max_nonan(max_nonan(a4, a5), max_nonan(a6, a7)));
+        if (m > rho) {
+            visit(a0), visit(a1), visit(a2), visit(a3);
+            visit(a4), visit(a5), visit(a6), visit(a7);
+        }
     }
     for (; i < n; ++i) {
         const double ai = a(i);
