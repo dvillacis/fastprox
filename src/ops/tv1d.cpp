@@ -71,7 +71,8 @@ inline const double *recip_table() noexcept {
 // branch-free selects: there, whether a bound is clamped is close to random
 // and mispredicted branches cost more than always computing the update. In
 // longer segments the bounds settle and branches predict well. The arithmetic
-// is the same either way, so this changes speed, not results.
+// is the same either way (up to the sign of a zero), so this changes speed,
+// not results.
 template <class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
@@ -126,13 +127,18 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                 umax += yn - vmax;
                 const int64_t m = k - k0 + 1;
                 if (m < kBranchFree) {
+                    // The clamps as min/max rather than selects on a
+                    // comparison, which GCC turns back into branches (the
+                    // input is finite here). The excesses dm and dp are
+                    // exactly 0 when no clamp happens.
                     const double r = recip[m];
                     const bool cm = umin >= ln, cp = umax <= -ln;
-                    vmin = cm ? vmin + (umin - ln) * r : vmin;
-                    umin = cm ? ln : umin;
+                    const double dm = max_nonan(umin - ln, 0.0), dp = min_nonan(umax + ln, 0.0);
+                    vmin += dm * r;
+                    umin = min_nonan(umin, ln);
                     km = cm ? k : km;
-                    vmax = cp ? vmax + (umax + ln) * r : vmax;
-                    umax = cp ? -ln : umax;
+                    vmax += dp * r;
+                    umax = max_nonan(umax, -ln);
                     kp = cp ? k : kp;
                 } else {
                     // Clamps are rare here: fetch 1/m only when one happens.

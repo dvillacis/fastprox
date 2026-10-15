@@ -85,6 +85,36 @@ the segment-based taut string, 0.74–0.83× the time of the double-double
 version; weighted Condat within 10% of uniform Condat; the simplex with its
 finiteness test folded into the pivot pass, 0.81× the previous time.
 
+## 2026-10-15, Apple M5 Pro, n = 10⁶ (range pass and GCC selects)
+
+Same script and machine after two changes to 1D TV: the per-call finiteness
+and range pass runs in 8 independent lanes (it was one dependent chain of
+compare-selects, about 2 cycles per sample), and the branch-free bound
+updates are written as min/max so that GCC keeps them branch-free. Clang's
+kernel code is unchanged, so on this machine only the range pass moved.
+
+| Setting, ns per sample | fastprox | best external code |
+| --- | --- | --- |
+| weighted, white noise, λ = 10 | 5.33 | 4.91 (proxTV) |
+| float32, blocks, λ = 0.1 | 7.14 | 7.10 (Condat) |
+| float32, random walk, λ = 0.1 | 6.80 | 6.61 (Condat) |
+| float32, white noise, λ = 0.1 | 5.63 | 5.36 (Condat) |
+
+All 9 uniform float64 settings and 8 of 9 weighted ones stay fastest or
+within 2%. Weighted white noise at λ = 10 is now 8% behind (was 13%); the
+range pass costs 0.26 ns per sample of it, about what reading the row costs,
+and the kernel alone takes 5.03 ns in a C++ harness. float32 at λ = 0.1 is
+1–5% behind (was 6–12%).
+
+The range pass alone, float64, n = 10⁶, fresh input: 0.48 → 0.25 ns per
+sample with Clang 21 and 0.89 → 0.26 with GCC 16. Whole 1D TV rows with
+GCC 16 on this machine, before → after (float64): uniform white noise at
+λ = 1, 9.54 → 7.71; weighted white noise at λ = 1, 11.35 → 8.33; uniform
+random walk at λ = 10, 8.93 → 10.64. GCC had compiled the short-segment
+selects as branches, which lose at λ ≤ 1 and happened to win at λ = 10.
+After the change the GCC build is within 3% of the Clang build at λ ≤ 1.
+See the 2026-10-15 runner results below for Neoverse-N2.
+
 ## 2026-10-14, GitHub Actions runners (`bench` workflow, quick mode, n = 10⁵)
 
 Started by hand from the Actions tab (`.github/workflows/bench.yml`); each
@@ -109,3 +139,31 @@ Python call overhead was 2.0–3.4 µs at n = 100 on both runners (target:
 under 5 µs). Parallel scaling on the arm64 runner's two physical cores: 1.96×
 at 2 threads (efficiency 0.98; target 0.7). The x86_64 runner's two vCPUs are
 hyperthreads of one core, so its 2-thread figure says nothing about scaling.
+
+## 2026-10-15, GitHub Actions runners, before and after the GCC fix (quick mode, n = 10⁵)
+
+Two `bench` runs started together, one on `master` and one on the branch
+with the range pass and GCC changes. The repository is public now, so the
+runners have 4 vCPUs. Both arm64 runs had Neoverse-N2 and GCC 13.3; the two
+x86_64 runs landed on different CPUs (EPYC 9V74 and EPYC 7763), so only
+their ratios to the external codes compare.
+
+| Runner | fastprox fastest or within 2% of 30, master → branch |
+| --- | --- |
+| `ubuntu-24.04-arm`, Neoverse-N2, 4 cores | 10 → 20 |
+| `ubuntu-latest`, EPYC, 2 cores with 2 hyperthreads | 24 → 24 |
+
+On Neoverse-N2 (fastprox time over the best external code, master → branch):
+1D TV at λ = 1 went from 0.92–1.06 to 0.76–0.92 and at λ = 0.1 from
+1.07–1.20 to 0.96–1.08; weighted TV at λ = 1 from 1.00–1.04 to 0.79–0.90.
+Still behind: weighted white noise at λ = 10 (1.25), uniform random walk at
+λ = 10 (1.20, worse than 1.13 on master: the branches GCC emitted predicted
+well there), float32 white noise at λ = 10 (1.11), white noise and random
+walk at λ = 0.1 (1.06–1.09), and the simplex on Gaussian input and with one
+large entry (1.22–1.23; tied on uniform input).
+
+Parallel scaling, 64 rows of 10⁴, 1D TV: 3.90× at 4 threads on the four
+physical Neoverse-N2 cores (efficiency 0.97–0.98, target 0.7). The x86_64
+runner's 4 vCPUs are 2 cores with 2 hyperthreads each (3.48–3.78×). Python
+call overhead stayed at 1.6–2.8 µs at n = 100.
+
