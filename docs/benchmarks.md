@@ -258,3 +258,67 @@ walk and white noise at λ = 0.1 (1.02–1.09), uniform random walk at λ = 10
 (1.05–1.09; it got worse, from 1.04 on the 8573C and from 0.90 to 0.95–1.00
 on AMD, as on Neoverse-N2 the branches predicted well there), and weighted
 white noise at λ = 10 (1.12–1.14, 1.00–1.08 on AMD).
+
+## 2026-10-15, Apple M5 Pro: 1D TV, long segments by their running sum
+
+Profiling weighted white noise at λ = 10, the one setting where fastprox
+trailed proxTV on every machine. No hardware counters are available here
+(Command Line Tools only, no Instruments), so the profile combines timings
+with counts from an instrumented copy of the kernel:
+
+- At λ = 10 Condat's kernel visits each sample 1.9–2.0 times (0.91–0.99
+  rescanned steps per sample, rescans of 16–1000 steps) and never falls back
+  to the taut string; weighted rows do no more work than uniform ones.
+- proxTV's weighted taut string is the same kind of scan (it restarts after
+  the last break point too) with branches for the clamps, and the bare
+  kernels tied: 4.90 against 4.89 ns per sample. fastprox's call added
+  0.2 ns of range pass (`finite_range`) and 0.05 ns of dispatch.
+- The time per step, 11–12 cycles for about 10 flops, came from the bound
+  updates: every clamp moved `vmin` by the excess of `umin`, and the next
+  step's `umin` depended on that `vmin`.
+
+Since u = s − m (v − ref) with s the running sum of the segment, a clamp of
+`vmin` sets it to the candidate ref + (s − λₖ)/m, so `vmin` is the running
+maximum of these candidates (and `vmax` the running minimum of
+ref + (s + λₖ)/m). Only the sum is carried from step to step. In the first
+3 samples of a segment, where jumps are frequent, the paper's update stays
+(it resolves the jump test one add after the load).
+
+**Kernel alone, ns per sample** (n = 10⁵, 41 fresh inputs, solver order
+rotated; weights λ·[0.5, 1.5])
+
+| Signal, λ | uniform, before | uniform, after | weighted, before | weighted, after | proxTV weighted |
+| --- | --- | --- | --- | --- | --- |
+| white noise, 0.1 | 4.98 | 5.03 | 5.56 | 5.60 | 6.23 |
+| white noise, 1 | 7.38 | 5.84 | 7.73 | 6.44 | 11.24 |
+| white noise, 10 | 5.05 | 1.73 | 4.90 | 1.89 | 4.85 |
+| random walk, 0.1 | 6.16 | 6.25 | 6.83 | 6.78 | 7.58 |
+| random walk, 1 | 8.70 | 7.91 | 8.85 | 8.26 | 11.18 |
+| random walk, 10 | 9.97 | 6.34 | 10.28 | 4.66 | 13.00 |
+| blocks, 1 | 7.79 | 4.14 | 7.92 | 4.59 | 11.09 |
+| blocks, 10 | 6.76 | 2.65 | 7.99 | 2.82 | 9.39 |
+
+The running sum alone, from the first sample of a segment, was faster still
+at λ ≥ 1 (1.67 at white noise λ = 10) but 3–12% slower at λ = 0.1; switching
+after 2 to 4 samples was close, after 8 up to a third slower at λ ≥ 1.
+
+**Through the library, fastprox time over the best proxTV solver**
+(`bench/profile_kernels.cpp`, n = 10⁵, before → after)
+
+| Build | uniform, λ = 1 | uniform, λ = 10 | weighted, λ = 1 | weighted, λ = 10 | λ = 0.1 |
+| --- | --- | --- | --- | --- | --- |
+| Clang 21 | 0.71–0.88 → 0.41–0.80 | 0.74–0.99 → 0.30–0.64 | 0.73–0.84 → 0.45–0.79 | 0.84–1.08 → 0.34–0.43 | 0.92–0.99 → 0.94–1.00 |
+| GCC 16 | 0.72–0.87 → 0.46–0.83 | 0.77–1.04 → 0.39–0.73 | 0.75–0.86 → 0.50–0.83 | 0.86–1.14 → 0.40–0.60 | 0.93–0.98 → 0.94–1.02 |
+
+`bench/compare_external.py` (n = 10³ to 10⁷) agrees: weighted white noise at
+λ = 10 went from 1.03–1.09 to 0.43–0.45 of proxTV's time, uniform random walk
+at λ = 10 from 0.99–1.22 to 0.64–0.86, float32 rows at λ ≥ 1 from 0.60–0.97
+to 0.23–0.86 of Condat's single-precision code. At λ = 0.1 the ratios moved
+by −0.13 to +0.05, mostly within the ±4% that two runs of the same build
+differ by at n = 10⁶; float32 at λ = 0.1 stays within 7% of Condat's code
+(8% before).
+
+Accuracy: on 3000 random rows (n up to 3000, offsets up to 10⁶, λ from 10⁻²
+to 10², uniform and weighted) the structure is identical to the previous
+kernel, and the error against segment values recomputed from that
+structure with compensated sums is at most 52 ε ‖x‖∞, as before.

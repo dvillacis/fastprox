@@ -51,7 +51,7 @@ struct RecipTable {
     }
 };
 
-constexpr int64_t kBranchFree = 8;  // measured: 8 to 16 is best across signals
+constexpr int64_t kShort = 3;  // measured: 2 to 4 are close; 8 is up to a third slower at gamma >= 1
 
 inline const double *recip_table() noexcept {
     static const RecipTable t;
@@ -67,19 +67,27 @@ inline const double *recip_table() noexcept {
 // than `budget` steps had to be rescanned after jumps (the output is then
 // incomplete).
 //
-// In the first kBranchFree samples of a segment the bound updates are
-// branch-free selects: there, whether a bound is clamped is close to random
-// and mispredicted branches cost more than always computing the update. In
-// longer segments the bounds settle and branches predict well. The arithmetic
-// is the same either way (up to the sign of a zero), so this changes speed,
-// not results.
+// The bounds are updated in two equivalent forms. In the first kShort samples
+// of a segment, as in the paper: u += y - v, then v moves by the excess of u
+// over the radius divided by the length m, with min/max instead of branches
+// (whether a bound is clamped there is close to random). From then on the
+// segment is tracked by its running sum s = sum_{k0..k} (y_i - ref) + sigma
+// radius(e), ref = y_{k0}: since u = s - m (v - ref), a clamp of vmin at k sets
+// it to ref + (s_k - radius(k)) / m_k, so vmin is the running maximum of these
+// candidates and vmax the running minimum of ref + (s_k + radius(k)) / m_k, and
+// a jump down (up) is the upper (lower) candidate passing below vmin (above
+// vmax). The only value carried from step to step is then the sum, instead
+// of a chain through the clamps; this is 1.3 to 3 times faster in long
+// segments, and the bounds no longer accumulate one rounding per clamp.
 template <class T, class R>
 bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget) noexcept {
     const double *recip = recip_table();
+    auto rcp = [recip](int64_t m) { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
     int64_t k = 0, k0 = 0, km = 0, kp = 0;
     double lk = radius(0);
     double vmin = static_cast<double>(y[0]) - lk, vmax = static_cast<double>(y[0]) + lk;
-    double umin = lk, umax = -lk;
+    double umin = lk, umax = -lk;  // first kShort samples
+    double ref = 0.0, s = 0.0;     // afterwards
     int64_t rescanned = 0;
 
     auto jump_down = [&]() {  // u_{km} = +radius(km)
@@ -115,18 +123,18 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
         while (k < n - 1) {
             const double yn = static_cast<double>(y[k + 1]);
             const double ln = radius(k + 1);
-            if (yn + umin < vmin - ln) {
-                jump_down();
-                if (rescanned > budget) return false;
-            } else if (yn + umax > vmax + ln) {
-                jump_up();
-                if (rescanned > budget) return false;
-            } else {
-                ++k;
-                umin += yn - vmin;
-                umax += yn - vmax;
-                const int64_t m = k - k0 + 1;
-                if (m < kBranchFree) {
+            const int64_t m = k - k0 + 2;  // length after this step
+            if (m <= kShort) {
+                if (yn + umin < vmin - ln) {
+                    jump_down();
+                    if (rescanned > budget) return false;
+                } else if (yn + umax > vmax + ln) {
+                    jump_up();
+                    if (rescanned > budget) return false;
+                } else {
+                    ++k;
+                    umin += yn - vmin;
+                    umax += yn - vmax;
                     // The clamps as min/max rather than selects on a
                     // comparison, which GCC turns back into branches (the
                     // input is finite here). The excesses dm and dp are
@@ -140,30 +148,55 @@ bool condat(const T *y, T *z, int64_t n, R radius, uint8_t *code, int64_t budget
                     vmax += dp * r;
                     umax = max_nonan(umax, -ln);
                     kp = cp ? k : kp;
+                    if (m == kShort) {  // switch to the running sum
+                        ref = static_cast<double>(y[k0]);
+                        s = umin + static_cast<double>(m) * (vmin - ref);
+                    }
+                }
+            } else {
+                const double s1 = s + (yn - ref);
+                const double r = rcp(m);
+                const double a = ref + (s1 - ln) * r, b = ref + (s1 + ln) * r;
+                if (b < vmin) {
+                    jump_down();
+                    if (rescanned > budget) return false;
+                } else if (a > vmax) {
+                    jump_up();
+                    if (rescanned > budget) return false;
                 } else {
-                    // Clamps are rare here: fetch 1/m only when one happens.
-                    auto rcp = [&] { return m < kRecip ? recip[m] : 1.0 / static_cast<double>(m); };
-                    if (umin >= ln) {
-                        vmin += (umin - ln) * rcp();
-                        umin = ln;
-                        km = k;
-                    }
-                    if (umax <= -ln) {
-                        vmax += (umax + ln) * rcp();
-                        umax = -ln;
-                        kp = k;
-                    }
+                    ++k;
+                    s = s1;
+                    km = a >= vmin ? k : km;
+                    vmin = max_nonan(vmin, a);
+                    kp = b <= vmax ? k : kp;
+                    vmax = min_nonan(vmax, b);
                 }
             }
         }
-        // End of the signal: the last segment must close with u_{n-1} = 0.
-        if (umin < 0.0) {
+        // End of the signal: the last segment must close with u_{n-1} = 0,
+        // tested in the form its bounds were last updated in.
+        const int64_t m = k - k0 + 1;
+        bool down, up;
+        double v;
+        if (m <= kShort) {
+            down = umin < 0.0;
+            up = umax > 0.0;
+            v = vmin + umin / static_cast<double>(m);
+        } else {
+            // With the reciprocal the candidates used, the mean is at least
+            // the last lower candidate and at most the last upper one (rounding
+            // is monotone), so neither jump can start past the last sample.
+            v = ref + s * rcp(m);
+            down = v < vmin;
+            up = v > vmax;
+        }
+        if (down) {
             jump_down();
-        } else if (umax > 0.0) {
+        } else if (up) {
             jump_up();
         } else {
-            const T v = static_cast<T>(vmin + umin / static_cast<double>(k - k0 + 1));
-            for (int64_t i = k0; i < n; ++i) z[i] = v;
+            const T vt = static_cast<T>(v);
+            for (int64_t i = k0; i < n; ++i) z[i] = vt;
             return true;
         }
         if (rescanned > budget) return false;
