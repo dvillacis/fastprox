@@ -16,7 +16,7 @@ behind a plain-C API, with Python bindings.
 ## Install
 
 ```sh
-pip install --pre fastprox     # 0.1.0rc2, a release candidate
+pip install fastprox
 ```
 
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS

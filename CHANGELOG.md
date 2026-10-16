@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-10-16
+
+First release. Changes since 0.1.0rc2:
+
 ### Added
 
 - `variants` workflow and `bench/tv_variants.cpp`: variants of the 1D TV kernel side by side against proxTV (classic, linearized, hybrid and weighted taut string), compiled into one binary and timed on the same inputs with the order rotated, on the arm64 runner and on x86_64 jobs. It runs on pushes to `variants/*` branches or by hand. `condat` takes the length of its first, paper-form phase as a template parameter (`kShort` by default) so variants need no copy of the kernel.
