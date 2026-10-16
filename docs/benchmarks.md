@@ -585,3 +585,33 @@ ns per entry, one row of normal entries; groups of 16 consecutive entries).
 - **Single-row norms** (the cone, Huber of the norm) are bound by the
   sequential sum of squares: one dependent addition per entry, which the
   compiler may not reorder without fast-math (as for the ℓ2 ball).
+
+## 2026-10-16, Apple M5 Pro: tree-structured groups and the 1D TV ball
+
+Single thread, as in the previous sections (best of 15 calls through Python,
+ns per entry, one row; normal entries, or a Gaussian random walk where
+marked).
+
+| Operator | n = 10⁴ | n = 10⁶ |
+| --- | --- | --- |
+| sparse group lasso, groups of 16 | 2.44 | 1.04 |
+| tree, 4-ary from groups of 16 (depth 5 and 8) | 11.6 | 8.08 |
+| 1D TV prox, γ = 0.5 (for scale) | 6.70 | 7.01 |
+| TV ball, noise, α = 0.01 TV(x) | 71.5 | 69.0 |
+| TV ball, noise, α = 0.3 TV(x) | 64.0 | 111 |
+| TV ball, noise, α = 0.9 TV(x) | 42.1 | 55.1 |
+| TV ball, random walk, α = 0.01 TV(x) | 92.2 | 124 |
+| TV ball, random walk, α = 0.3 TV(x) | 90.9 | 134 |
+| TV ball, random walk, α = 0.9 TV(x) | 45.8 | 96.0 |
+
+- **The tree norm** reads each group once, so its cost is the total size of
+  the groups: depth times n for a full tree, through index lists.
+- **The TV ball** solves 1D TV problems at trial steps. Counts at n = 10⁵:
+  - plain Newton from γ = 0⁺ took 4–17 solves (17 at α = 10⁻⁴ TV(x) on a random
+    walk), approaching the root from the left at about 2.5× per step while far;
+  - a Newton step on log TV against log γ took 6–18;
+  - the hybrid kept (log–log while TV(z) > 2α, Newton after) took 4–14.
+
+  The first version started from the secant through γ_max. It landed right of
+  the root and bisected down over several orders of magnitude, taking 13–27
+  solves (80–460 ns per entry).

@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 28;
+    const int kind = b.u8() % 30;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -215,6 +215,28 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
                 case 1: return fp_op_group_scad(lam, 1.0 + p, len, g, G, &a0, &c.op);
                 default: return fp_op_group_mcp(lam, p, len, g, G, &a0, &c.op);
             }
+        }
+        case 27: {  // tree norm: random intervals, nested or not (then FP_EPARAM)
+            static std::vector<int64_t> ptr, idx;
+            ptr.assign(1, 0);
+            idx.clear();
+            const int64_t G = b.u8() % 6, len = n > 0 ? n : 1;
+            for (int64_t g = 0; g < G; ++g) {
+                const int64_t lo = b.u8() % len, hi = lo + 1 + b.u8() % (len - lo + (b.u8() % 8 == 0));
+                for (int64_t i = lo; i < hi; ++i) idx.push_back(i);  // hi may pass the axis
+                ptr.push_back(static_cast<int64_t>(idx.size()));
+            }
+            fill(c.params[0], b.u8() % 2 ? G : 1);
+            a0 = vec(c.params[0]);
+            return fp_op_tree_l2(b.param(), G, ptr.data(), idx.data(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 28: {
+            fill(c.params[0], pick == 1 ? 1 : n - 1);
+            if (b.u8() % 4 == 0)
+                for (auto &w : c.params[0])
+                    if (b.u8() % 3 == 0) w = 0.0;
+            a0 = vec(c.params[0]);
+            return fp_op_tv1d_ball(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);

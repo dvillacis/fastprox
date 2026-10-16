@@ -122,6 +122,17 @@ FP_API fp_status fp_op_group_l2(double lambda, int64_t n, const int64_t *groups,
                                 int64_t ngroups, const fp_array *group_weights,
                                 fp_op **out);
 
+/* g(z) = l1 ||z||_1 + sum_g eta_g ||z_g||_2 along the axis for groups that are
+ * pairwise nested or disjoint (since 0.2); the sparse group lasso is a
+ * partition. Group g holds the entries group_idx[group_ptr[g] ..
+ * group_ptr[g+1]), in any order of the groups; ngroups >= 0, group_ptr has
+ * ngroups + 1 entries from 0, indices >= 0 and below the axis length, none
+ * repeated in a group. FP_EPARAM when two groups overlap without nesting.
+ * group_weights: NULL (eta = 1), length 1, or ngroups. theta = (l1, eta...). */
+FP_API fp_status fp_op_tree_l2(double l1, int64_t ngroups, const int64_t *group_ptr,
+                               const int64_t *group_idx, const fp_array *group_weights,
+                               fp_op **out);
+
 /* Projection onto lo <= z <= hi. lower/upper: NULL to use the scalar, or an
  * array of length 1 or the axis length; infinite bounds allowed.
  * theta = (lower..., upper...). */
@@ -188,6 +199,12 @@ FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op *
  * length 1, or axis length - 1, all >= 0. theta = w. */
 FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
                             fp_op **out);
+
+/* Projection onto { z : sum_i w_i |z_{i+1} - z_i| <= alpha } along the axis
+ * (since 0.2), alpha >= 0: x when inside, else the 1D TV prox at the step
+ * where the TV equals alpha, found by safeguarded Newton steps (exact on the
+ * final structure). edge_weights as fp_op_tv1d. theta = (alpha, w...). */
+FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_op **out);
 
 /* Nonconvex pointwise maps (elementwise). The prox can be set-valued at a
  * threshold: fp_options.tie picks the nonzero branch (FP_TIE_NONZERO, the

@@ -21,6 +21,8 @@ GROUPS = np.arange(N) * 7 % 3
 AV = _rng.uniform(0.5, 1.5, N) * np.where(np.arange(N) % 3 == 1, -1.0, 1.0)
 AV[4] = 0.0  # an entry outside the constraint
 UNBOUNDED = np.array([-np.inf, np.inf])
+# A tree over the axis: leaves, a subtree, a singleton, and the root.
+TREE = [[0, 1], [2, 3, 4], [0, 1, 2, 3, 4], [5], [6, 7, 8, 9], list(range(N))]
 
 
 # name: (build(theta) -> Operator, theta0, reference, gamma[, convex]).
@@ -106,6 +108,17 @@ CASES = {
                   np.array([1.0, 3.0, 0.8, 1.0, 1.2]),
                   lambda x, g, t: ref.group_radial(x, g, fp.MCP(t[0], t[1]), GROUPS, t[2:]), 0.8,
                   False),
+    # theta = (l1, eta...).
+    "tree_l2": (lambda t: fp.TreeL2(TREE, t[1:], t[0]), np.array([0.2, 0.5, 0.3, 0.8, 0.2, 0.6, 0.4]),
+                lambda x, g, t: ref.tree_l2(x, g, t[0], TREE, t[1:]), 0.9),
+    "sparse_group": (lambda t: fp.TreeL2.sparse_group(t[0], 1.0, GROUPS, t[1:]),
+                     np.array([0.3, 0.8, 1.0, 1.2]),
+                     lambda x, g, t: ref.group_l2(ref.soft(x, g * t[0]), g, 1.0, GROUPS, t[1:]), 0.9),
+    # theta = (alpha, weights...).
+    "tv1d_ball": (lambda t: fp.TV1DBall(t[0], t[1:]), np.array([2.0, 1.0]),
+                  lambda x, g, t: ref.tv1d_ball(x, t[0], t[1]), 1.0),
+    "tv1d_ball_w": (lambda t: fp.TV1DBall(t[0], t[1:]), np.concatenate([[1.5], WE]),
+                    lambda x, g, t: ref.tv1d_ball(x, t[0], t[1:]), 1.0),
     "l0": (lambda t: fp.L0(0.3, t), W,
            ("objective", lambda t: lambda z: 0.3 * t[0] * (z != 0)), 0.8, False),
     "lq_half": (lambda t: fp.Lq(0.4, 0.5, t), W,
