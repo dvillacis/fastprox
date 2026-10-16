@@ -189,3 +189,37 @@ def prox_sum_largest(x, c, k, absolute=False):
 def sum_largest(z, k, absolute=False):
     v = np.abs(z) if absolute else z
     return np.sort(v)[::-1][:k].sum()
+
+
+def log_barrier(x, c):
+    """prox of -c sum log z (Beck, Lemma 6.5)."""
+    return (x + np.sqrt(x * x + 4 * c)) / 2
+
+
+def l1_box(x, tau, lo, hi):
+    return np.clip(soft(x, tau), lo, hi)
+
+
+def soc(x):
+    """Projection onto {(t, y) : ||y|| <= t}, t = x[0] (Beck, Example 6.37)."""
+    t, y = x[0], x[1:]
+    s = np.linalg.norm(y)
+    if s <= t:
+        return x.copy()
+    if s <= -t:
+        return np.zeros_like(x)
+    a = (s + t) / 2
+    return np.concatenate([[a], a * y / s])
+
+
+def group_radial(x, gamma, scalar, groups, c):
+    """Norm composition: each group scaled by phi(||x_g||) / ||x_g||, phi the
+    scalar operator's prox at step gamma c_g."""
+    z = np.zeros_like(x)
+    groups = np.zeros(x.size, int) if groups is None else groups
+    for g in np.unique(groups):
+        m = groups == g
+        s = np.linalg.norm(x[m])
+        if s > 0:
+            z[m] = scalar.prox(np.array([s]), gamma * c[g if c.size > 1 else 0])[0] / s * x[m]
+    return z

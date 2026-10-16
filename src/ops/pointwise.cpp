@@ -1,5 +1,17 @@
-// Separable convex maps: soft thresholding, elastic net, Huber, box and
-// nonnegative orthant. All closed form; derivatives are diagonal.
+// Separable convex maps: soft thresholding, elastic net, Huber, box,
+// nonnegative orthant, the log barrier and l1 over a box. All closed form;
+// derivatives are diagonal.
+//
+// Log barrier, g(z) = -lambda sum_i log z_i (A. Beck, First-Order Methods in
+// Optimization, SIAM 2017, Lemma 6.5, p. 133): z = (x + r) / 2 with
+// r = sqrt(x^2 + 4 gamma lambda), evaluated as 2 gamma lambda / (r - x) for
+// x < 0, where the sum cancels. dz/dx = z / r, dz/dgamma = lambda / r.
+//
+// l1 over a box, g(z) = lambda sum_i w_i |z_i| + indicator(lo <= z <= hi)
+// (Beck, Example 6.23, pp. 145-146, for the symmetric box -alpha <= z <= alpha):
+// z = clamp(soft(x, gamma lambda w), lo, hi). The same holds for any interval,
+// since a strictly convex function of one variable is minimised over an
+// interval at the projection of its unconstrained minimiser.
 //
 // Kink convention (spec Section 7): an entry exactly at a threshold or bound
 // takes the Jacobian of the branch that contains the boundary, i.e. soft
@@ -188,6 +200,103 @@ struct NonNeg final : ElemOp<NonNeg> {
     }
 };
 
+// g(z) = -lambda sum_i log z_i. theta = (lambda).
+struct LogBarrier final : ElemOp<LogBarrier> {
+    double lambda;
+    explicit LogBarrier(double l) : lambda(l) {}
+
+    const char *name() const noexcept override { return "log_barrier"; }
+    int64_t nparams() const noexcept override { return 1; }
+    fp_status check_n(int64_t) const noexcept override { return FP_OK; }
+
+    // r = sqrt(x^2 + 4 gamma lambda), through hypot where the square overflows.
+    static double root(double x, double gl) noexcept {
+        const double r = std::sqrt(x * x + 4.0 * gl);
+        return r == HUGE_VAL ? std::hypot(x, 2.0 * std::sqrt(gl)) : r;
+    }
+    static double value(double x, double r, double gl) noexcept {
+        // NaN fails x < 0 and stays NaN; -inf gives 0, +inf stays inf.
+        return x < 0.0 ? gl / (0.5 * (r - x)) : 0.5 * x + 0.5 * r;
+    }
+
+    template <class T>
+    T prox1(T x, double gamma, int64_t) const noexcept {
+        const double xd = static_cast<double>(x), gl = gamma * lambda;
+        return static_cast<T>(value(xd, root(xd, gl), gl));
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
+        ElemDeriv e;
+        const double gl = gamma * lambda, r = root(x, gl);
+        e.np = 1;
+        e.pi[0] = 0;
+        if (r > 0.0) {
+            e.j = value(x, r, gl) / r;
+            e.dg = lambda / r;
+            e.pv[0] = gamma / r;
+        } else {
+            // gamma = 0 and x = 0: the nonnegative projection's rule (the
+            // derivatives in gamma and lambda are infinite there).
+            e.j = 1.0;
+        }
+        return e;
+    }
+};
+
+// g(z) = lambda sum_i w_i |z_i| + indicator(lo <= z <= hi).
+// theta = (w..., lo..., hi...).
+struct L1Box final : ElemOp<L1Box> {
+    double lambda;
+    Vec w, lo, hi;
+    L1Box(double l, Vec ww, Vec a, Vec b)
+        : lambda(l), w(std::move(ww)), lo(std::move(a)), hi(std::move(b)) {}
+
+    const char *name() const noexcept override { return "l1_box"; }
+    int64_t nparams() const noexcept override {
+        return static_cast<int64_t>(w.size() + lo.size() + hi.size());
+    }
+    bool axis_params() const noexcept override {
+        return w.size() > 1 || lo.size() > 1 || hi.size() > 1;
+    }
+    fp_status check_n(int64_t n) const noexcept override {
+        auto fits = [n](const Vec &v) { return v.size() == 1 || static_cast<int64_t>(v.size()) == n; };
+        return fits(w) && fits(lo) && fits(hi) ? FP_OK : FP_ESHAPE;
+    }
+    static int64_t at(const Vec &v, int64_t i) noexcept { return v.size() == 1 ? 0 : i; }
+
+    template <class T>
+    T prox1(T x, double gamma, int64_t i) const noexcept {
+        const double xd = static_cast<double>(x);
+        // tau as its own statement, as in Soft and deriv1: a compiler may
+        // contract a - b * c into one rounding within an expression.
+        const double tau = gamma * lambda * w[at(w, i)];
+        const double y = std::copysign(pos(std::fabs(xd) - tau), xd);
+        const double l = lo[at(lo, i)], h = hi[at(hi, i)];
+        return static_cast<T>(y < l ? l : (y > h ? h : y));
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        ElemDeriv e;
+        const int64_t k = at(w, i), a = at(lo, i), b = at(hi, i);
+        const double tau = gamma * lambda * w[k];
+        const double y = std::copysign(pos(std::fabs(x) - tau), x);
+        e.np = 1;
+        e.pv[0] = 1.0;
+        if (y < lo[a]) {
+            e.pi[0] = static_cast<int64_t>(w.size()) + a;
+        } else if (y > hi[b]) {
+            e.pi[0] = static_cast<int64_t>(w.size() + lo.size()) + b;
+        } else if (std::fabs(x) > tau) {
+            const double s = sgn(x);
+            e.j = 1.0;
+            e.dg = -s * lambda * w[k];
+            e.pi[0] = k;
+            e.pv[0] = -s * gamma * lambda;
+        } else {
+            e.np = 0;
+        }
+        return e;
+    }
+};
+
 template <class Op, class... A>
 fp_status emit(fp_op **out, A &&...a) {
     *out = new Op(std::forward<A>(a)...);
@@ -231,5 +340,22 @@ fp_status make_box(Vec lo, Vec hi, fp_op **out) {
 }
 
 fp_status make_nonneg(fp_op **out) { return emit<NonNeg>(out); }
+
+fp_status make_log_barrier(double lambda, fp_op **out) {
+    if (!finite_nonneg(lambda) || lambda == 0.0) return FP_EPARAM;
+    return emit<LogBarrier>(out, lambda);
+}
+
+fp_status make_l1_box(double lambda, Vec w, Vec lo, Vec hi, fp_op **out) {
+    if (!finite_nonneg(lambda)) return FP_EPARAM;
+    if (w.empty()) w.assign(1, 1.0);
+    for (double v : w)
+        if (!finite_nonneg(v)) return FP_EPARAM;
+    // The box rules of make_box: shapes, bounds, lo <= hi.
+    fp_op *box = nullptr;
+    if (fp_status s = make_box(lo, hi, &box)) return s;
+    delete box;
+    return emit<L1Box>(out, lambda, std::move(w), std::move(lo), std::move(hi));
+}
 
 }  // namespace fp

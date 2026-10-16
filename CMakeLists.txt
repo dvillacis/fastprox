@@ -51,6 +51,7 @@ add_library(fastprox
   src/ops/pointwise.cpp
   src/ops/group.cpp
   src/ops/projections.cpp
+  src/ops/radial.cpp
   src/ops/isotonic.cpp
   src/ops/nonconvex.cpp
   src/ops/hyperplane.cpp
