@@ -27,3 +27,33 @@ def test_bilevel_finds_the_jumps():
         sys.path.pop(0)
     w = ex.main()
     assert sorted(int(i) + 1 for i in w.argsort()[:len(ex.JUMPS)]) == ex.JUMPS
+
+
+def _load(name):
+    sys.path.insert(0, str(DIR))
+    try:
+        return __import__(name)
+    finally:
+        sys.path.pop(0)
+
+
+def test_image_denoising_learns_gamma():
+    learned, best = _load("image_denoising").main(plot=False)
+    assert abs(learned / best - 1) < 0.05        # grid spacing is 10%
+
+
+def test_nonconvex_penalties_find_the_support():
+    res = _load("sparse_recovery").main()
+    l1_exact, l1_err = res["l1"]
+    for name in ("MCP", "SCAD"):
+        exact, err = res[name]
+        assert exact == 1.0 and err < 0.5 * l1_err
+    assert l1_exact < 0.5
+
+
+def test_group_penalties_select_the_groups():
+    res = _load("group_sparsity").main()
+    for name in ("group MCP", "group SCAD"):
+        extra_groups, _, err = res[name]
+        assert extra_groups == 0 and err < res["lasso"][2]
+    assert res["sparse group lasso"][1] < res["group lasso"][1]   # fewer extra features

@@ -36,6 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - errors.
 
   The new operators are also in `CASES`, the C derivative cases and the fuzzer.
+- Examples for 0.2, run by the Python tests: `examples/image_denoising.py` (isotropic and anisotropic TV of images, gap certificates, warm starts on a γ sweep, a batch, and learning γ through `TVIso.vjp`) and `examples/sparse_recovery.py` (proximal gradient with ℓ1 against MCP, SCAD, ℓ0, ℓ1/2 and the log penalty on 64 recovery problems at once, against the oracle, and the tie rule), and `examples/group_sparsity.py` (lasso, group lasso, sparse group lasso, group MCP and SCAD on grouped regression with λ chosen on a validation set, and hierarchical sparsity with `tree_soft_threshold`).
 
 ## [0.1.0] — 2026-10-16
 
