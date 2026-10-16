@@ -53,6 +53,7 @@ add_library(fastprox
   src/ops/projections.cpp
   src/ops/isotonic.cpp
   src/ops/nonconvex.cpp
+  src/ops/hyperplane.cpp
   src/ops/tv1d.cpp
   src/ops/tv_aniso.cpp
   src/ops/tv_iso.cpp

@@ -29,6 +29,11 @@ fp_status make_l2_ball(double radius, fp_op **out);
 fp_status make_simplex(double radius, fp_op **out);
 fp_status make_l1_ball(double radius, Vec w, fp_op **out);
 fp_status make_linf(double lambda, fp_op **out);
+fp_status make_max(double lambda, fp_op **out);
+
+// hyperplane.cpp
+fp_status make_hyperplane(Vec a, double b, Vec lo, Vec hi, bool inequality, fp_op **out);
+fp_status make_sum_largest(double lambda, int64_t k, bool absolute, fp_op **out);
 
 // isotonic.cpp
 fp_status make_isotonic(Vec w, bool increasing, fp_op **out);

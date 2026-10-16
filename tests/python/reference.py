@@ -143,3 +143,49 @@ def mcp_psi(lam, b):
         t = np.abs(z)
         return np.where(t <= b * lam, lam * t - t * t / (2 * b), b * lam * lam / 2)
     return psi
+
+
+def hyperplane_box(x, a, b, lo=-np.inf, hi=np.inf, inequality=False):
+    """Projection onto {a^T z = b (or <= b), lo <= z <= hi} by bisection on the
+    multiplier mu of z = clip(x - mu a), down to adjacent doubles."""
+    a, lo, hi = (np.broadcast_to(np.asarray(v, np.float64), x.shape) for v in (a, lo, hi))
+    z0 = np.clip(x, lo, hi)
+    if inequality and a @ z0 <= b:
+        return z0
+
+    def phi(mu):
+        return a @ np.clip(x - mu * a, lo, hi) - b
+
+    l, h = -1.0, 1.0
+    while phi(l) < 0:
+        l *= 2
+    while phi(h) > 0:
+        h *= 2
+    while True:
+        m = 0.5 * (l + h)
+        if not l < m < h:
+            break
+        if phi(m) > 0:
+            l = m
+        else:
+            h = m
+    mu = l if abs(phi(l)) <= abs(phi(h)) else h
+    return np.clip(x - mu * a, lo, hi)
+
+
+def prox_max(x, c):
+    """Beck, Example 6.49: x - c P_simplex(x / c)."""
+    return x - c * simplex(x / c, 1.0)
+
+
+def prox_sum_largest(x, c, k, absolute=False):
+    """Beck, Examples 6.50 and 6.51: x - c P_C(x / c)."""
+    y = x / c
+    if absolute:
+        return x - c * np.sign(y) * hyperplane_box(np.abs(y), 1.0, k, 0.0, 1.0, inequality=True)
+    return x - c * hyperplane_box(y, 1.0, k, 0.0, 1.0)
+
+
+def sum_largest(z, k, absolute=False):
+    v = np.abs(z) if absolute else z
+    return np.sort(v)[::-1][:k].sum()

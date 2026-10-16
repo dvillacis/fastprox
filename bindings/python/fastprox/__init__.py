@@ -20,6 +20,7 @@ differentiation::
 
 from __future__ import annotations
 
+import operator
 from typing import NamedTuple
 
 import numpy as np
@@ -36,6 +37,8 @@ __all__ = [
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
     "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
+    "Max", "SumLargest", "Hyperplane", "HalfSpace", "prox_max", "prox_sum_largest",
+    "project_hyperplane", "project_halfspace",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -357,6 +360,54 @@ class LInf(Operator):
         super().__init__(_C.linf(float(lam)))
 
 
+class Max(Operator):
+    """g(z) = lam * max_i z_i along the axis: z = min(x, tau) by the Moreau
+    identity with the simplex. Parameters: lam."""
+
+    _layout = [("lam", 1, True)]
+
+    def __init__(self, lam=1.0):
+        super().__init__(_C.max(float(lam)))
+
+
+class SumLargest(Operator):
+    """g(z) = lam * (sum of the k largest z_i) along the axis, k at most the
+    axis length; with absolute=True the k largest |z_i| (any k; k >= n is
+    lam * ||z||_1). Parameters: lam."""
+
+    _layout = [("lam", 1, True)]
+
+    def __init__(self, lam=1.0, k=1, absolute=False):
+        super().__init__(_C.sum_largest(float(lam), operator.index(k), bool(absolute)))
+
+
+class Hyperplane(Operator):
+    """Projection onto {a^T z = b, lower <= z <= upper} along the axis (Beck,
+    Theorem 6.27): a is a scalar or one entry per element (None: all ones),
+    the box as in Box (unbounded by default). Raises ValueError when the set
+    is empty for the axis length. Parameters: b, a, lower, upper."""
+
+    _inequality = False
+
+    def __init__(self, a=None, b=0.0, lower=-np.inf, upper=np.inf):
+        av = None if a is None else np.atleast_1d(np.asarray(a, np.float64))
+        lo = np.atleast_1d(np.asarray(lower, np.float64))
+        hi = np.atleast_1d(np.asarray(upper, np.float64))
+        super().__init__(_C.hyperplane(_vec(av), float(b), _vec(lo), _vec(hi), self._inequality))
+        self._layout = [("b", 1, True),
+                        ("a", 1 if av is None else av.size, a is None or np.ndim(a) == 0),
+                        ("lower", lo.size, np.ndim(lower) == 0),
+                        ("upper", hi.size, np.ndim(upper) == 0)]
+
+
+class HalfSpace(Hyperplane):
+    """Projection onto {a^T z <= b, lower <= z <= upper} along the axis; the
+    box projection when it satisfies the constraint, else as Hyperplane.
+    Parameters: b, a, lower, upper."""
+
+    _inequality = True
+
+
 class Isotonic(Operator):
     """Projection onto the monotone cone along the axis (pool-adjacent-
     violators), minimising sum_i w_i (z_i - x_i)^2. Parameters: weights."""
@@ -648,6 +699,29 @@ def project_l1_ball(x, radius=1.0, *, weights=None, axis=-1, out=None, threads=0
 def prox_linf(x, lam=1.0, gamma=1.0, *, axis=-1, out=None, threads=0, copy=False):
     """prox of gamma * lam * ||z||_inf along the axis."""
     return _once(_C.linf(float(lam)), x, gamma, axis, out, threads, copy)
+
+
+def prox_max(x, lam=1.0, gamma=1.0, *, axis=-1, out=None, threads=0, copy=False):
+    """prox of gamma * lam * max_i z_i along the axis."""
+    return _once(_C.max(float(lam)), x, gamma, axis, out, threads, copy)
+
+
+def prox_sum_largest(x, lam=1.0, k=1, gamma=1.0, *, absolute=False, axis=-1, out=None, threads=0,
+                     copy=False):
+    """prox of gamma * lam * (sum of the k largest z_i, or |z_i|) along the axis."""
+    return _once(SumLargest(lam, k, absolute)._op, x, gamma, axis, out, threads, copy)
+
+
+def project_hyperplane(x, a=None, b=0.0, lower=-np.inf, upper=np.inf, *, axis=-1, out=None,
+                       threads=0, copy=False):
+    """Projection onto {a^T z = b, lower <= z <= upper} along the axis."""
+    return _once(Hyperplane(a, b, lower, upper)._op, x, 1.0, axis, out, threads, copy)
+
+
+def project_halfspace(x, a=None, b=0.0, lower=-np.inf, upper=np.inf, *, axis=-1, out=None,
+                      threads=0, copy=False):
+    """Projection onto {a^T z <= b, lower <= z <= upper} along the axis."""
+    return _once(HalfSpace(a, b, lower, upper)._op, x, 1.0, axis, out, threads, copy)
 
 
 def isotonic(x, *, weights=None, increasing=True, axis=-1, out=None, threads=0, copy=False):

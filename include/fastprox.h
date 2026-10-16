@@ -145,6 +145,26 @@ FP_API fp_status fp_op_l1_ball(double radius, const fp_array *weights, fp_op **o
  * theta = (lambda). */
 FP_API fp_status fp_op_linf(double lambda, fp_op **out);
 
+/* g(z) = lambda max_i z_i along the axis (since 0.2): z = min(x, tau), with tau
+ * the threshold of the projection onto the simplex of radius gamma lambda
+ * (Moreau). theta = (lambda). */
+FP_API fp_status fp_op_max(double lambda, fp_op **out);
+
+/* g(z) = lambda * (sum of the k largest z_i) along the axis (since 0.2), k >= 1
+ * and at most the axis length (else FP_EPARAM). absolute != 0: the k largest
+ * |z_i|, for any k >= 1 (k >= the axis length gives lambda ||z||_1).
+ * theta = (lambda). */
+FP_API fp_status fp_op_sum_largest(double lambda, int64_t k, int absolute, fp_op **out);
+
+/* Projection onto { a^T z = b, lo <= z <= hi } along the axis (since 0.2);
+ * inequality != 0: a^T z <= b. a: NULL (a = 1), length 1 or the axis length,
+ * finite, not all zero, with nonzero |a_i| / max |a| >= 1e-100. lower/upper
+ * as fp_op_box (-INFINITY and INFINITY for no box). FP_EPARAM when the set is
+ * empty for the axis length. theta = (b, a..., lower..., upper...). */
+FP_API fp_status fp_op_hyperplane(const fp_array *a, double b, double lo, double hi,
+                                  const fp_array *lower, const fp_array *upper, int inequality,
+                                  fp_op **out);
+
 /* Projection onto the monotone cone (isotonic regression by PAVA), minimising
  * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0.
  * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL). */
