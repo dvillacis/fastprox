@@ -12,7 +12,9 @@ Timing uses a fresh input for every repetition, shared by all solvers in turn:
 repeating one input lets the branch predictor learn it and makes the direct
 algorithms look several times faster, and interleaving the solvers keeps the
 drift of a laptop (frequency, migration between core types) out of the
-comparison.
+comparison. The order of the solvers rotates with every repetition, so that
+none always runs first (on an input just written) or right after a solver
+with the same branches.
 Every external result is checked against fastprox before it is timed.
 """
 
@@ -228,20 +230,21 @@ def table(solvers, make_input, arg, sizes, quick):
     """One row per solver. For every size, each repetition draws a fresh
     input and runs every solver on it in turn, so drift of the machine
     (frequency, core migration) affects all solvers alike; the median over
-    repetitions is reported."""
+    repetitions is reported; the order of the solvers rotates per repetition."""
     bad = check(solvers, make_input(2000, np.random.default_rng(0)), arg)
     if bad:
         print(f"  disagree with fastprox (excluded): {', '.join(bad)}")
     names = [k for k in solvers if k not in bad]
     best = {k: [] for k in names}
     for n in sizes:
-        reps = 3 if quick else max(5, min(30, 10**6 // n))
+        reps = 7 if quick else max(5, min(30, 10**6 // n))
         rng = np.random.default_rng(n)
         a = arg(n) if callable(arg) else arg
         times = {k: [] for k in names}
         for r in range(reps + 1):  # the first round warms up
             x64 = make_input(n, rng)
-            for k in names:
+            j = r % len(names)
+            for k in names[j:] + names[:j]:
                 f, dt = solvers[k]
                 x = x64.astype(dt)
                 out = np.empty_like(x)

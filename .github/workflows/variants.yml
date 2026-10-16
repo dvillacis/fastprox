@@ -1,0 +1,89 @@
+name: variants
+
+# Variants of the 1D TV kernel side by side against proxTV, in one binary per
+# job (bench/tv_variants.cpp), on GitHub's arm64 runner (Neoverse-N2) and on
+# x86_64 jobs that land on random Intel or AMD CPUs. Comparing within a job
+# keeps the CPU out of the comparison. Runs on every push to a branch named
+# variants/<topic>, or by hand from the Actions tab.
+on:
+  push:
+    branches: ["variants/**"]
+  workflow_dispatch:
+    inputs:
+      x86_jobs:
+        description: "x86_64 jobs (each lands on a random CPU), 0 to 8"
+        type: string
+        default: "3"
+      n:
+        description: "Samples per row"
+        type: string
+        default: "100000"
+      reps:
+        description: "Repetitions per setting (fresh input each)"
+        type: string
+        default: "31"
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.m.outputs.include }}
+    steps:
+      - id: m
+        env: { X86: "${{ inputs.x86_jobs || '3' }}" }
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          k = max(0, min(8, int(os.environ["X86"])))
+          jobs = [{"os": "ubuntu-24.04-arm", "slot": 0}] + [{"os": "ubuntu-latest", "slot": i} for i in range(1, k + 1)]
+          print("include=" + json.dumps(jobs))
+          EOF
+
+  variants:
+    name: variants ${{ matrix.os }} ${{ matrix.slot }}
+    needs: matrix
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    env: { N: "${{ inputs.n || '100000' }}", REPS: "${{ inputs.reps || '31' }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Machine
+        id: machine
+        run: |
+          {
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket|MHz|L2|L3' || true
+            c++ --version | head -1
+          } | tee machine.txt
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          case "$model" in
+            *Intel*|*INTEL*) cpu=intel ;;
+            *AMD*) cpu=amd ;;
+            *Neoverse*) cpu=neoverse ;;
+            *) cpu=other ;;
+          esac
+          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+          echo "### variants ${{ matrix.slot }}: $model" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build proxTV (fetched at run time, never vendored)
+        run: |
+          sudo apt-get update && sudo apt-get install -y liblapack-dev
+          uv sync --python 3.12
+          uv run python -c "import sys; sys.path.insert(0, 'bench'); import compare_external as c; print(c.build_proxtv())"
+      - name: Variants
+        run: |
+          c++ -std=c++17 -O3 -DNDEBUG -fno-fast-math -Iinclude -Isrc bench/tv_variants.cpp \
+              src/api/api.cpp src/core/parallel.cpp src/ops/pointwise.cpp src/ops/group.cpp \
+              src/ops/projections.cpp src/ops/isotonic.cpp -DFASTPROX_BUILDING \
+              -DFASTPROX_VERSION_STRING='"variants"' -ldl -lpthread -o tv_variants
+          ./tv_variants build/external/libproxtv_tv1.so "$N" "$REPS" | tee variants.txt
+          { echo '```'; cat variants.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: variants-${{ matrix.slot }}-${{ steps.machine.outputs.cpu }}
+          path: |
+            machine.txt
+            variants.txt
