@@ -440,3 +440,49 @@ Speed-up over one thread, efficiency in parentheses. The dip at 12 threads
 on 64 rows is the split: 64 rows over 12 threads leave the slowest with 6,
 which bounds efficiency at 0.89. Python call overhead at n = 100 was
 1.4–1.8 µs (target 5 µs).
+
+## 2026-10-16, Apple M5 Pro: anisotropic TV in 2D and 3D
+
+`bench/compare_tv_aniso.py`, single thread, piecewise-constant blocks plus
+Gaussian noise (σ = 0.3), equal weights on every axis. The solvers stop on
+different criteria, so each is run with a range of settings (fastprox: the
+gap tolerance from 1e-2 to 1e-12; proxTV: iteration caps from 1 to 1024) and
+the table gives the fastest run that reached each error |z − z*| / |z*|
+against a reference solved to a gap of 1e-15. "–": no run reached it.
+
+**ms to reach the error, 2D**
+
+| Image, λ | Solver | 1e-2 | 1e-3 | 1e-4 | 1e-6 |
+| --- | --- | --- | --- | --- | --- |
+| 256², 0.1 | fastprox (ADBPG) | 6.13 | **11.14** | 40.71 | **88.14** |
+|  | proxTV DR2 (alternating reflections) | **4.13** | 11.98 | **38.35** | 492.29 |
+|  | proxTV Kolmogorov2 / Yang2 / parallel Dykstra | 12.41 | 47.38 | 240.21 | 272.47 |
+| 256², 0.5 | fastprox (ADBPG) | **4.01** | **17.54** | **42.80** | **193.01** |
+|  | proxTV DR2 | 8.31 | 28.96 | 82.48 | 934.73 |
+|  | best other proxTV | 13.59 | 50.24 | 152.43 | 587.45 |
+| 512², 0.1 | fastprox (ADBPG) | 25.92 | **46.96** | **87.15** | **429.61** |
+|  | proxTV DR2 | **17.97** | 52.92 | 182.91 | 2633.00 |
+|  | best other proxTV | 53.60 | 208.98 | 1234.82 | 1307.63 |
+| 512², 0.5 | fastprox (ADBPG) | **16.00** | **90.94** | **255.08** | **1239.12** |
+|  | proxTV DR2 | 20.13 | 132.49 | 419.19 | 4581.20 |
+|  | best other proxTV | 57.29 | 447.99 | 748.70 | 5793.85 |
+
+**ms to reach the error, 3D (64³)**
+
+| λ | Solver | 1e-2 | 1e-3 | 1e-4 | 1e-6 |
+| --- | --- | --- | --- | --- | --- |
+| 0.1 | fastprox (FDPG, 3 blocks) | **71.91** | **392.98** | **744.34** | 10461.08 |
+|  | proxTV Yang3 (ADMM) | 1023.79 | 2107.65 | 2107.65 | **4243.72** |
+|  | proxTV parallel Dykstra | 171.13 | 1360.30 | – | – |
+| 0.5 | fastprox (FDPG, 3 blocks) | **96.49** | **209.86** | **608.86** | 4332.43 |
+|  | proxTV Yang3 (ADMM) | 1077.48 | 2005.35 | 2005.35 | **3880.73** |
+|  | proxTV parallel Dykstra | 151.43 | 2536.11 | – | – |
+
+proxTV's parallel Douglas–Rachford (`PDR_TV`) did not reach 1e-2 within
+1024 iterations in any setting. In 2D, fastprox is fastest from 1e-3 on
+(tied at 1e-4 on 256², λ = 0.1) and at 1e-6 3.0–3.7× faster than the best proxTV solver (3.7–6.1× faster than DR2);
+DR2, which converges fast to medium accuracy as Barbero and Sra report, is
+quicker to 1e-2 at λ = 0.1. In 3D the three-block method, with its step of
+1/3, is 1.6–9.6× faster than the best proxTV solver up to 1e-4 but slower
+than Yang's ADMM at 1e-6 (2.5× at λ = 0.1, 1.1× at λ = 0.5); parallel proximal Dykstra, the other candidate for three
+blocks, is slower than both at every accuracy.

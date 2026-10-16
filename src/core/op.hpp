@@ -42,6 +42,31 @@ struct ElemDeriv {
 // Status returned by row kernels.
 enum RowStatus : int { kRowOk = 0, kRowNonFinite = 1 };
 
+// One image handed to an image operator's prox (see fp_op::image_ndim). The
+// image is contiguous in C order. The kernel may spread its own work over nt
+// threads (thread scratch t at thread_base + t * thread_bytes), and must give
+// the same result for any nt.
+struct ImageCall {
+    const int64_t *shape = nullptr;  // image_ndim() extents
+    int64_t numel = 0;
+    double gamma = 0.0;
+    double tol = 0.0;  // stop when gap <= tol * ||x||^2 / 2
+    int max_iter = 0;
+    int nt = 1;
+    char *work = nullptr;  // image_bytes(shape)
+    char *thread_base = nullptr;
+    size_t thread_bytes = 0;
+    double *dual = nullptr;  // image_ndim() * numel: read when warm, always written
+    bool warm = false;
+    char *save = nullptr;  // structure for jvp/vjp (struct_bytes), null unless kept
+    // Results.
+    double gap = 0.0;
+    int iters = 0;
+    bool converged = true;
+
+    char *thread_scratch(int t) const noexcept { return thread_base + static_cast<size_t>(t) * thread_bytes; }
+};
+
 }  // namespace fp
 
 // Global namespace: this is the type the C header declares as opaque.
@@ -103,6 +128,31 @@ struct fp_op {
                          int64_t, double, double *, void *) const noexcept {}
     virtual void vjp_row(const double *, const double *, const uint8_t *, const double *,
                          double *, int64_t, double, double *, void *) const noexcept {}
+
+    // ---- image interface -------------------------------------------------
+    // Image operators (multi-dimensional TV) act on the last image_ndim() axes
+    // and are batched over the others; 0 for every other operator.
+    virtual int image_ndim() const noexcept { return 0; }
+    virtual fp_status check_image(const int64_t *) const noexcept { return FP_OK; }
+    // Bytes of the working set of one image, of the per-thread scratch used
+    // inside one image, and of the structure saved for derivatives.
+    virtual size_t image_bytes(const int64_t *) const noexcept { return 0; }
+    virtual size_t image_thread_bytes(const int64_t *) const noexcept { return 0; }
+    virtual size_t struct_bytes(const int64_t *) const noexcept { return 0; }
+    // Returns a RowStatus. Fills c.gap, c.iters, c.converged.
+    virtual int prox_image(const float *, float *, fp::ImageCall &) const noexcept { return fp::kRowOk; }
+    virtual int prox_image(const double *, double *, fp::ImageCall &) const noexcept { return fp::kRowOk; }
+    // Derivatives at the structure saved by prox_image. dx is never null;
+    // dparams may be null. work: image_bytes(shape) of scratch.
+    virtual void jvp_image(const char *, const float *, float *, const int64_t *, double, double,
+                           const double *, char *) const noexcept {}
+    virtual void jvp_image(const char *, const double *, double *, const int64_t *, double, double,
+                           const double *, char *) const noexcept {}
+    // gx = J^T g; acc[0..P) += (dz/dtheta)^T g, acc[P] += <dz/dgamma, g>.
+    virtual void vjp_image(const char *, const float *, float *, const int64_t *, double, double *,
+                           char *) const noexcept {}
+    virtual void vjp_image(const char *, const double *, double *, const int64_t *, double, double *,
+                           char *) const noexcept {}
 };
 
 namespace fp {
@@ -236,6 +286,31 @@ struct RowOp : fp_op {
     FP_ROW_FORWARD(float)
     FP_ROW_FORWARD(double)
 #undef FP_ROW_FORWARD
+};
+
+// CRTP base for image operators. D provides templates prox_img, jvp_img and
+// vjp_img with the signatures of prox_image, jvp_image and vjp_image.
+template <class D>
+struct ImageOp : fp_op {
+    bool elementwise() const noexcept override { return false; }
+    fp_status check_n(int64_t) const noexcept override { return FP_OK; }
+
+#define FP_IMAGE_FORWARD(T)                                                                      \
+    int prox_image(const T *x, T *z, ImageCall &c) const noexcept override {                     \
+        return static_cast<const D *>(this)->template prox_img<T>(x, z, c);                      \
+    }                                                                                            \
+    void jvp_image(const char *save, const T *dx, T *dz, const int64_t *shape, double gamma,     \
+                   double dgamma, const double *dparams, char *work) const noexcept override {   \
+        static_cast<const D *>(this)->template jvp_img<T>(save, dx, dz, shape, gamma, dgamma,    \
+                                                          dparams, work);                        \
+    }                                                                                            \
+    void vjp_image(const char *save, const T *g, T *gx, const int64_t *shape, double gamma,      \
+                   double *acc, char *work) const noexcept override {                            \
+        static_cast<const D *>(this)->template vjp_img<T>(save, g, gx, shape, gamma, acc, work); \
+    }
+    FP_IMAGE_FORWARD(float)
+    FP_IMAGE_FORWARD(double)
+#undef FP_IMAGE_FORWARD
 };
 
 // Bit layout of the exponent field, to test finiteness without branches.

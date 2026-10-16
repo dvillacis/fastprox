@@ -91,20 +91,25 @@ Op *make(F &&f) {
     return op.release();
 }
 
-fp_options options(int axis, int threads, bool keep) {
+fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_iter = 1000) {
     fp_options o;
     fp_options_init(&o);
     o.axis = axis;
     o.threads = threads;
     o.keep_structure = keep ? 1 : 0;
+    o.tol = tol;
+    o.max_iter = max_iter;
     return o;
 }
 
-std::tuple<double, int, int64_t> prox(const Op &op, double step, const InArr &x, OutArr &out,
-                                      int axis, int threads, bool keep, Workspace *ws, bool conj) {
+// (gap, iters, ties, converged). FP_ENOTCONV is not an error here: the last
+// iterate is written and converged is false.
+std::tuple<double, int, int64_t, bool> prox(const Op &op, double step, const InArr &x, OutArr &out,
+                                            int axis, int threads, bool keep, Workspace *ws, bool conj,
+                                            double tol, int max_iter) {
     const fp_array xa = view(x);
     fp_array oa = view(out);
-    const fp_options o = options(axis, threads, keep);
+    const fp_options o = options(axis, threads, keep, tol, max_iter);
     fp_info info{0.0, 0, 0};
     fp_status s;
     {
@@ -112,11 +117,12 @@ std::tuple<double, int, int64_t> prox(const Op &op, double step, const InArr &x,
         s = conj ? fp_prox_conj(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info)
                  : fp_prox(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info);
     }
-    check(s);
-    return {info.gap, info.iters, info.ties};
+    if (s != FP_ENOTCONV) check(s);
+    return {info.gap, info.iters, info.ties, s == FP_OK};
 }
 
 Workspace *workspace(const Op &op, const InArr &like, int axis, int threads, bool keep) {
+    // tol and max_iter are per call; the workspace does not depend on them.
     auto ws = std::make_unique<Workspace>();
     const fp_array la = view(like);
     const fp_options o = options(axis, threads, keep);
@@ -211,8 +217,23 @@ NB_MODULE(_fastprox, m) {
         });
     }, "weights"_a.none(), "method"_a);
 
+    m.def("tv_aniso", [](int ndim, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_tv_aniso(ndim, pw.get(), o); });
+    }, "ndim"_a, "weights"_a.none());
+
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
-          "ws"_a.none(), "conj"_a);
+          "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000);
+    m.def("get_dual", [](const Workspace &ws, OutArr &out) {
+        fp_array oa = view(out);
+        check(fp_workspace_get_dual(ws.p, &oa));
+    }, "ws"_a, "out"_a);
+    m.def("set_dual", [](Workspace &ws, const InArr &dual) {
+        const fp_array da = view(dual);
+        check(fp_workspace_set_dual(ws.p, &da));
+    }, "ws"_a, "dual"_a);
+    m.def("set_warm", [](Workspace &ws, bool on) { check(fp_workspace_set_warm(ws.p, on ? 1 : 0)); },
+          "ws"_a, "on"_a);
     m.def("workspace", &workspace, "op"_a, "like"_a, "axis"_a, "threads"_a, "keep"_a,
           nb::keep_alive<0, 1>());
     m.def("jvp", &jvp, "op"_a, "ws"_a, "dx"_a.none(), "dgamma"_a, "dparams"_a.none(), "dout"_a);

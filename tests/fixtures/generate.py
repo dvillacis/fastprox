@@ -1,12 +1,13 @@
 """Regenerate the CVXPY + Clarabel reference fixtures (offline).
 
-    uv run --group ref python tests/fixtures/generate.py
+    uv run --group ref python tests/fixtures/generate.py [rows|images]
 
 Writes tests/fixtures/reference.npz: for every case in
 tests/python/fixture_cases.py, every row length in SIZES and every input
 scale in SCALES, the input x, the step gamma, the parameters and the
 solver's solution z. The fixtures are checked into the repository so the
-test suite does not need CVXPY.
+test suite does not need CVXPY. Image operators (IMAGE_CASES) go to
+tests/fixtures/reference_images.npz; "rows" or "images" regenerates one file.
 """
 
 import pathlib
@@ -18,7 +19,7 @@ import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "python"))
 
-from fixture_cases import CASES, SCALES, SIZES  # noqa: E402
+from fixture_cases import CASES, IMAGE_CASES, IMAGE_SHAPES, SCALES, SIZES  # noqa: E402
 
 # Clarabel at one tolerance is not reliably accurate to 1e-10 on every
 # problem: tight tolerances sometimes stop "optimal_inaccurate", loose ones
@@ -55,6 +56,33 @@ def solve(problem, x, gamma, params):
     return best[1], best[2]
 
 
+def main_images():
+    rng = np.random.default_rng(20261016)
+    data = {}
+    k = 0
+    for name, (sample, _, term) in IMAGE_CASES.items():
+        for shape in IMAGE_SHAPES[name]:
+            for scale in SCALES:
+                x = rng.normal(scale=scale, size=shape)
+                x += scale * (np.indices(shape).sum(axis=0) // 3 % 2)  # blocks
+                gamma = float(rng.uniform(0.2, 2.0))
+                params = sample(rng, shape)
+                problem = lambda cp_, z, xf, g, p, shape=shape: (term(cp_, z, g, p, shape), [])
+                z, status = solve(problem, x.ravel(), gamma, params)
+                key = f"{k:04d}"
+                data[f"{key}/case"] = np.array(name)
+                data[f"{key}/x"] = x
+                data[f"{key}/gamma"] = np.array(gamma)
+                data[f"{key}/z"] = z.reshape(shape)
+                for pk, pv in params.items():
+                    data[f"{key}/param/{pk}"] = pv
+                if status != "optimal":
+                    print(f"{key} {name} {shape}: {status}")
+                k += 1
+    np.savez_compressed(HERE / "reference_images.npz", **data)
+    print(f"wrote {k} problems to {HERE / 'reference_images.npz'}")
+
+
 def main():
     rng = np.random.default_rng(20261014)
     data = {}
@@ -81,4 +109,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which in ("all", "rows"):
+        main()
+    if which in ("all", "images"):
+        main_images()

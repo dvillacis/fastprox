@@ -71,11 +71,36 @@ struct fp_workspace {
     fp::Buffer<double> dparams;  // dparams converted to double
     int64_t nblocks = 1;
 
+    // Image operators: images of image_numel entries (the last image_ndim axes),
+    // `rows` of them. Working sets for up to image_sets images at once, thread
+    // scratch inside an image, saved structure per image, and the dual of the
+    // last call: per image, image_ndim blocks of image_numel doubles.
+    int image_ndim = 0;
+    int64_t image_numel = 0;
+    int image_sets = 0;
+    size_t image_bytes = 0, image_thread_bytes = 0, struct_bytes = 0;
+    fp::Buffer<double> image_work, image_thread, structure, dual;
+    fp::Buffer<double> image_gaps, image_iters;  // per image results of the last call
+    bool dual_valid = false;  // dual holds the result of a call or a seed
+    bool warm = false;        // fp_workspace_set_warm: every call starts from dual
+    bool seeded = false;      // fp_workspace_set_dual: the next call starts from dual
+
     // State of the last prox call.
     bool valid = false;
     bool conj = false;
     double gamma = 0.0;  // step used by the kernel (1/sigma in conjugate mode)
     double sigma = 0.0;
+
+    char *image_set(int k) const noexcept {
+        return reinterpret_cast<char *>(image_work.data()) + static_cast<size_t>(k) * image_bytes;
+    }
+    char *image_threads(int k, int nt_inner) const noexcept {
+        return reinterpret_cast<char *>(image_thread.data()) +
+               static_cast<size_t>(k) * static_cast<size_t>(nt_inner) * image_thread_bytes;
+    }
+    char *image_struct(int64_t r) const noexcept {
+        return reinterpret_cast<char *>(structure.data()) + static_cast<size_t>(r) * struct_bytes;
+    }
 
     void *thread_scratch(int t) const noexcept {
         return reinterpret_cast<char *>(scratch.data()) + static_cast<size_t>(t) * thread_bytes;

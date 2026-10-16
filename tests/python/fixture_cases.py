@@ -115,3 +115,43 @@ CASES = {
 
 SIZES = (2, 5, 17, 60, 200)
 SCALES = (0.1, 1.0, 10.0)
+
+
+# Image operators: name -> (sample(rng, shape) -> params, make(params) -> Operator,
+# problem(cp, z, x, gamma, params, shape) -> g term), z the flattened image.
+def _diff(shape, axis):
+    """Sparse forward differences along `axis` of a C-ordered image."""
+    import scipy.sparse as sp
+
+    idx = np.arange(int(np.prod(shape))).reshape(shape)
+    a = np.take(idx, range(shape[axis] - 1), axis=axis).ravel()
+    b = np.take(idx, range(1, shape[axis]), axis=axis).ravel()
+    m = a.size
+    rows = np.concatenate([np.arange(m), np.arange(m)])
+    return sp.csr_matrix((np.r_[-np.ones(m), np.ones(m)], (rows, np.r_[a, b])),
+                         shape=(m, idx.size))
+
+
+def _aniso_term(cp, z, g, p, shape):
+    k = len(shape)
+    return g * sum(p["weights"][a] * cp.norm1(_diff(shape, a) @ z)
+                   for a in range(k) if shape[a] > 1)
+
+
+IMAGE_CASES = {
+    "tv_aniso_2d": (
+        lambda rng, shape: {"weights": _pos(rng, 2, 0.0, 2.0)},
+        lambda p: fp.TVAniso(2, p["weights"]),
+        _aniso_term,
+    ),
+    "tv_aniso_3d": (
+        lambda rng, shape: {"weights": _pos(rng, 3, 0.0, 2.0)},
+        lambda p: fp.TVAniso(3, p["weights"]),
+        _aniso_term,
+    ),
+}
+
+IMAGE_SHAPES = {
+    "tv_aniso_2d": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
+    "tv_aniso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
+}
