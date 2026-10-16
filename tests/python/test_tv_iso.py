@@ -65,6 +65,20 @@ def test_threads_bitwise_and_batching(shape, k):
             assert np.array_equal(op.prox(x[b], 0.4, tol=1e-8, max_iter=100000), outs[0][b])
 
 
+def test_restarts_tight_tolerance():
+    # Noise at a large step: plain FISTA took 25 600-28 500 iterations to 1e-10
+    # here, with restarts 1 480-1 850. Restarts fire, so check that they keep
+    # the result bitwise across threads and the gap certified.
+    x = np.random.default_rng(1).normal(size=(64, 64))
+    runs = [fp.tv_iso(x, 3.0, tol=1e-10, max_iter=50000, threads=t) for t in (1, 3, 8)]
+    z, info = runs[0]
+    assert info.converged and info.iters <= 4000
+    assert all(np.array_equal(z, zt) and it.iters == info.iters for zt, it in runs[1:])
+    gap, feas, resid = certificate(x, z, info.dual, 3.0, 1.0, 2)
+    assert feas <= 1e-12 and resid <= 1e-12 * (1 + np.abs(x).max())
+    assert 0 <= gap + 1e-14 and gap <= 1e-10 * 0.5 * (x ** 2).sum() * (1 + 1e-6)
+
+
 def test_strided_float32_and_special_cases():
     op = fp.TVIso(2)
     big = image((30, 80), 2)

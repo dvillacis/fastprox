@@ -660,3 +660,83 @@ stops at an internal tolerance and an iteration cap.
   bisection took over for up to 40 iterations after convergence. The version kept stops once a step is below 10⁻⁷·μ, after taking it: the next error is
   below rounding at Newton's quadratic rate. Against a 50-digit mpmath
   bisection, the error stayed below 4.3·10⁻¹⁶ relative to max |x|.
+
+## 2026-10-17, Apple M5 Pro: isotropic TV with restarts and a Jacobi-preconditioned derivative
+
+**FISTA iterations to the gap tolerance**, plain against restarted, with the
+O'Donoghue–Candès gradient test, run every 4th iteration, and an interval
+between restarts that may not shrink. The images are 128² (blocks as in
+`bench/compare_tv_iso.py`, pure noise, a noisy ramp) and 32³ blocks; "w"
+marks axis weights (1, 0.3) or (1, 1, 0.3). The cap is 20 000 iterations.
+
+| Image, γ | 1e-6 | 1e-8 | 1e-10 |
+| --- | --- | --- | --- |
+| blocks, 0.3 | 448 → 448 | 3012 → 1548 | > 20 000 → 11 476 |
+| blocks, 1.0 | 1684 → 1536 | 10 952 → 10 572 | > 20 000 → > 20 000 |
+| blocks, 1.0, w | 1560 → 1180 | 11 872 → 9060 | > 20 000 → > 20 000 |
+| blocks, 3.0 | 5244 → 2236 | > 20 000 → > 20 000 | – |
+| noise, 1.0 | 2356 → 1604 | 17 664 → 9436 | > 20 000 → > 20 000 |
+| noise, 3.0 | 6212 → 1156 | > 20 000 → 1952 | > 20 000 → 3120 |
+| ramp, 0.3, w | 220 → 220 | 1428 → 732 | 7248 → 4348 |
+| ramp, 1.0 | 552 → 552 | 3216 → 1508 | 17 464 → 12 508 |
+| ramp, 1.0, w | 664 → 664 | 3736 → 2232 | 17 940 → 17 748 |
+| blocks 32³, 0.3 | 244 → 244 | 1620 → 692 | 8948 → 2600 |
+| blocks 32³, 1.0 | 1384 → 1044 | 10 160 → 6812 | > 20 000 → > 20 000 |
+| blocks 32³, 3.0, w | 2140 → 600 | 7780 → 1024 | > 20 000 → 1412 |
+
+- **Where restarts help.** At γ ≤ 0.3 they first fire near a gap of 1e-6,
+  so looser solves are unchanged; at γ = 3 they already take 1.4–1.8× fewer
+  iterations to 1e-4. From 1e-8 on, they take 1.04× to over 10× fewer
+  iterations, and 15× fewer on 64² noise at γ = 3 to 1e-10 (about 26 000 →
+  1 500, now a test).
+- **Interval rule.** Restarting at every positive test was slower in places:
+  blocks at γ = 1 took 16 096 iterations to 1e-8 against 10 952 without
+  restarts. Requiring the interval since the last restart not to shrink
+  removed that loss and saved 6% overall. A minimum interval of 10 or 50
+  iterations changed nothing.
+- **Cost.** The test adds a dot product to the update pass. Run every
+  iteration it cost 5% per iteration in 2D and 13–15% in 3D; every 4th
+  iteration, compiled as a separate pass, 1–4%.
+- **What is still slow.** The dual is degenerate, so the rate does not
+  become linear. At γ ≥ 1 most images still need over 20 000 iterations to 1e-10.
+- **A polish that did not work.** At every iteration count, 94% or more of
+  the gap was the primal part P(z(u)) − P*, and the dual part D* − D(u) was
+  14–160× smaller. So I tried to replace z(u) by a Newton polish: the
+  minimiser over images constant on the flat regions found in z(u)
+  (prototype with sparse direct solves, 256², γ = 0.3 and 1). It was never
+  better than z(u). The best threshold gave P(z_pol) − P* = 1.8·10⁻⁸ after 1600 iterations, where z(u) already had a gap
+  of 8.5·10⁻⁸, and larger thresholds were far worse (up to 10⁻⁴). Unlike
+  anisotropic TV, isotropic solutions have many pixels with small nonzero
+  gradients, which any threshold merges wrongly.
+
+**Derivative CG iterations to a relative residual of 1e-10** (VJP, the same
+128² and 32³ images), with the previous preconditioner |C| against the
+diagonal of the reduced system (|C| plus the H_p terms on each region's
+boundary, one O(Nk²) pass). The gradients agree to all printed digits.
+
+| Image, γ, prox tol | \|C\| | Jacobi |
+| --- | --- | --- |
+| blocks, 0.05, 1e-10 | 147 | 204 |
+| blocks, 0.3, 1e-10 | 954 | 512 |
+| blocks, 1.0, 1e-10 | 712 | 366 |
+| noise, 0.3, 1e-10 | 315 | 359 |
+| noise, 1.0, 1e-10 | 777 | 367 |
+| ramp, 0.3, 1e-10 | 694 | 411 |
+| ramp, 1.0, 1e-10 | 1103 | 553 |
+| blocks 32³, 0.3, 1e-10 | 995 (343 ms) | 498 (172 ms) |
+| blocks 32³, 1.0, 1e-10 | 1261 (420 ms) | 426 (146 ms) |
+
+The Jacobi preconditioner takes 1.4–3× fewer iterations in the expensive
+solves (γ ≥ 0.3 at a tight prox tolerance), except noise at γ = 0.3 (14%
+more). At γ = 0.05, where CG is cheap (tens of milliseconds at most), it
+takes 8–40% more.
+
+**Against scikit-image** (`bench/compare_tv_iso.py`, as in the 2026-10-16
+section, ms to reach the error). Up to 1e-4 the times match that run, since at
+these γ restarts first fire near a gap of 1e-6. At 1e-6 they now save 12–32%.
+
+| Image, γ | fastprox 1e-6, before | fastprox 1e-6, with restarts | scikit-image |
+| --- | --- | --- | --- |
+| 256², 0.1 | 141.42 | 124.38 | – |
+| 256², 0.3 | 1080.47 | 868.04 | – |
+| 64³, 0.1 | 824.43 | 562.33 | – |

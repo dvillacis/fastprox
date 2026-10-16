@@ -15,6 +15,18 @@
 // 12 in 3D), and the primal z(u) from the last dual iterate, not the
 // extrapolated one (Beck, (12.19)).
 //
+// Restarts: when <v - u+, u+ - u> > 0 (the gradient mapping (v - u+) / tau and
+// the step disagree: the momentum points uphill) the iteration restarts from
+// u+ with t = 1, the gradient scheme of B. O'Donoghue and E. Candes, "Adaptive
+// restart for accelerated gradient schemes", Found. Comput. Math. 15 (2015)
+// 715-732. The dual is degenerate, so restarts do not make the method
+// linearly convergent here, but they cut the iterations to tolerances of
+// 1e-8 and below by up to 15x; at gamma <= 0.3 they first fire near a gap of
+// 1e-6, so looser solves are unchanged. The test runs
+// every kCheck-th pass (1-4% per iteration), and the interval since the last
+// restart must not shrink: restarting at every opportunity slowed some
+// images down (blocks at gamma = 1 by 1.5x to 1e-8).
+//
 // Certificate: for feasible u, the duality gap of the prox problem at z(u) is
 //     sum_p ( gamma |g_p| - <g_p, u_p> ),   g = W D z(u),
 // every term >= 0, and |z - z*|^2 <= 2 gap (Beck, Lemma 12.7).
@@ -26,7 +38,10 @@
 // elsewhere u_p moves along the tangent of the sphere, du_p = H_p (W D dz)_p
 // with H_p = gamma / |g_p| (I - n_p n_p^T), n_p = g_p / |g_p|. Then
 //     (I + G_A^T H G_A) dz = rhs  on that space  (G = W D, A the non-flat set),
-// a symmetric positive definite system solved by conjugate gradients.
+// a symmetric positive definite system solved by conjugate gradients,
+// preconditioned with its diagonal (|C| plus the H_p terms of the boundary
+// entries of each region; 1.4-3x fewer iterations than |C| alone in most
+// expensive solves, up to 40% more in cheap ones at small gamma).
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -40,6 +55,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <type_traits>
 #include <utility>
 
 namespace fp {
@@ -66,12 +82,12 @@ struct TVIso final : ImageOp<TVIso> {
     }
 
     // prox: d, z (N), u, v (k N), per-row sums; derivatives: the gradient of z
-    // and a scratch field (k N each), then seven vectors of N (image, rhs and
-    // the CG vectors in region space).
+    // and a scratch field (k N each), then eight vectors of N (image, rhs, the
+    // CG vectors and the preconditioner in region space).
     size_t image_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N), K = static_cast<size_t>(k);
-        return (std::max((2 + 2 * K) * N, (7 + 2 * K) * N) + static_cast<size_t>(g.rows()) + 8) * sizeof(double);
+        return (std::max((2 + 2 * K) * N, (8 + 2 * K) * N) + static_cast<size_t>(g.rows()) + 8) * sizeof(double);
     }
     size_t image_thread_bytes(const int64_t *shape) const noexcept override {
         return fiber_thread_bytes(*tv, Geom(k, shape));
@@ -295,14 +311,18 @@ struct TVIso final : ImageOp<TVIso> {
             return gap(g, c, wa, gamma, z, u, part);
         };
         double t = 1.0;
-        int it = 0;
+        int it = 0, since = 0, last = 0;
         double gp = c.warm ? primal() : std::numeric_limits<double>::infinity();
         while (!(gp <= target) && it < c.max_iter) {
             divergence(g, c, wa, d, v, z);
             const double tn = fista_t(t);
             const double beta = (t - 1.0) / tn;
             t = tn;
-            row_for(g, c, [&](int64_t r) {
+            // Every kCheck-th pass also returns <v - u+, u+ - u>, the
+            // gradient-mapping restart test, in fixed row blocks.
+            const bool test = it % kCheck == 0;
+            auto update = [&](int64_t r, auto with_test) {
+                double s = 0.0;
                 grad_rows(g, wa, z, r, [&](int64_t p, const double *gv) {
                     double cv[3], nn = 0.0;
                     // v is zero past the last entry along each axis and gv is
@@ -316,11 +336,27 @@ struct TVIso final : ImageOp<TVIso> {
                     for (int a = 0; a < k; ++a) {
                         const double un = cv[a] * sc;
                         double &ua = u[a * N + p];
-                        v[a * N + p] = un + beta * (un - ua);
+                        double &va = v[a * N + p];
+                        if constexpr (decltype(with_test)::value) s += (va - un) * (un - ua);
+                        va = un + beta * (un - ua);
                         ua = un;
                     }
                 });
-            });
+                return s;
+            };
+            double up = 0.0;
+            if (test) up = row_sum(g, c, part, [&](int64_t r) { return update(r, std::true_type{}); });
+            else row_for(g, c, [&](int64_t r) { update(r, std::false_type{}); });
+            // Momentum pointing uphill: restart from u+ (O'Donoghue and Candes),
+            // but never sooner after the last restart than that one came after
+            // its predecessor.
+            ++since;
+            if (test && up > 0.0 && since >= last) {
+                std::memcpy(v, u, static_cast<size_t>(k * N) * sizeof(double));
+                t = 1.0;
+                last = since;
+                since = 0;
+            }
             ++it;
             if (it % kCheck == 0 || it == c.max_iter) gp = primal();
         }
@@ -441,6 +477,42 @@ struct TVIso final : ImageOp<TVIso> {
                 }
             }
         }
+        // 1 / diag(M^T (I + G^T H G) M): |C| plus, for every non-flat entry p,
+        // h^T H_p h with h = (G 1_C)_p, which is nonzero only for the regions of
+        // p and of its forward neighbours.
+        void jacobi(double *dinv) const {
+            const int64_t N = g.N;
+            for (int64_t C = 0; C < nc; ++C) dinv[C] = 1.0 / s.inv[C];
+            for (int64_t p = 0; p < N; ++p) {
+                if (s.flat[p]) continue;
+                double nn = 0.0;
+                for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
+                const double nr = std::sqrt(nn), hs = gamma / nr;
+                int64_t lab[4];
+                bool has[3];
+                lab[0] = s.label[p];
+                for (int a = 0; a < op.k; ++a) {
+                    has[a] = wa[a] != 0.0 && g.has_next(p, a);
+                    lab[a + 1] = has[a] ? s.label[p + g.S[a]] : -1;
+                }
+                for (int c = 0; c <= op.k; ++c) {
+                    const int64_t C = lab[c];
+                    if (C < 0) continue;
+                    bool seen = false;
+                    for (int e = 0; e < c; ++e) seen = seen || lab[e] == C;
+                    if (seen) continue;
+                    double hh = 0.0, nh = 0.0;
+                    for (int a = 0; a < op.k; ++a) {
+                        if (!has[a]) continue;
+                        const double h = wa[a] * ((lab[a + 1] == C ? 1.0 : 0.0) - (lab[0] == C ? 1.0 : 0.0));
+                        hh += h * h;
+                        nh += h * gz[a * N + p] / nr;
+                    }
+                    dinv[C] += hs * (hh - nh * nh);
+                }
+            }
+            for (int64_t C = 0; C < nc; ++C) dinv[C] = 1.0 / dinv[C];
+        }
         // out = M^T (I + G^T H G) M c (component space).
         void apply(const double *cv, double *out) const {
             const int64_t N = g.N;
@@ -455,9 +527,13 @@ struct TVIso final : ImageOp<TVIso> {
         }
     };
 
-    // Solves S c = b by CG, preconditioned with |C| (the diagonal of M^T M).
-    static void cg(const Sys &S, const double *b, double *x, double *r, double *pv, double *qv, DerivCtl &dc) {
+    // Solves S c = b by CG with the Jacobi preconditioner (dinv, the inverse
+    // diagonal of S); the residual is reported relative to b in the norm
+    // weighted by 1/|C|, the pixel-space norm of a region residual.
+    static void cg(const Sys &S, const double *b, double *x, double *r, double *pv, double *qv, double *dinv,
+                   DerivCtl &dc) {
         const int64_t nc = S.nc;
+        S.jacobi(dinv);
         double bn = 0.0;
         for (int64_t C = 0; C < nc; ++C) bn += b[C] * b[C] * S.s.inv[C];
         std::fill(x, x + nc, 0.0);
@@ -469,28 +545,29 @@ struct TVIso final : ImageOp<TVIso> {
         std::memcpy(r, b, static_cast<size_t>(nc) * sizeof(double));
         double rz = 0.0;
         for (int64_t C = 0; C < nc; ++C) {
-            pv[C] = r[C] * S.s.inv[C];
+            pv[C] = r[C] * dinv[C];
             rz += r[C] * pv[C];
         }
         int it = 0;
-        double res = std::sqrt(rz / bn);
+        double res = 1.0;
         while (res > dc.tol && it < dc.max_iter) {
             S.apply(pv, qv);
             double pq = 0.0;
             for (int64_t C = 0; C < nc; ++C) pq += pv[C] * qv[C];
             if (!(pq > 0.0)) break;
             const double alpha = rz / pq;
-            double rzn = 0.0;
+            double rzn = 0.0, rn = 0.0;
             for (int64_t C = 0; C < nc; ++C) {
                 x[C] += alpha * pv[C];
                 r[C] -= alpha * qv[C];
-                rzn += r[C] * r[C] * S.s.inv[C];
+                rzn += r[C] * r[C] * dinv[C];
+                rn += r[C] * r[C] * S.s.inv[C];
             }
             const double beta = rzn / rz;
             rz = rzn;
-            for (int64_t C = 0; C < nc; ++C) pv[C] = r[C] * S.s.inv[C] + beta * pv[C];
+            for (int64_t C = 0; C < nc; ++C) pv[C] = r[C] * dinv[C] + beta * pv[C];
             ++it;
-            res = std::sqrt(rz / bn);
+            res = std::sqrt(rn / bn);
         }
         dc.residual = res;
         dc.iters = it;
@@ -514,7 +591,7 @@ struct TVIso final : ImageOp<TVIso> {
         const Geom g(k, shape);
         const int64_t N = g.N;
         Sys S = system(save, g, gamma, work);
-        double *rhs = S.pix + N, *cb = rhs + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N;
+        double *rhs = S.pix + N, *cb = rhs + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         // rhs = dx + sum_a dw_a (u_a[p] - u_a[p - e_a]) - G_A^T c_A,
         // c_p = H_p (dW D z)_p + dgamma n_p on non-flat entries.
         for (int64_t p = 0; p < N; ++p) rhs[p] = static_cast<double>(dx[p]);
@@ -544,7 +621,7 @@ struct TVIso final : ImageOp<TVIso> {
         S.sub_gradT(cA, rhs);  // rhs -= G^T c
         std::fill(cb, cb + S.nc, 0.0);
         for (int64_t p = 0; p < N; ++p) cb[S.s.label[p]] += rhs[p];
-        cg(S, cb, x, r, pv, q2, dc);
+        cg(S, cb, x, r, pv, q2, dg, dc);
         for (int64_t p = 0; p < N; ++p) dz[p] = static_cast<T>(x[S.s.label[p]]);
     }
 
@@ -554,10 +631,10 @@ struct TVIso final : ImageOp<TVIso> {
         const Geom g(k, shape);
         const int64_t N = g.N;
         Sys S = system(save, g, gamma, work);
-        double *cb = S.pix + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N;
+        double *cb = S.pix + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         std::fill(cb, cb + S.nc, 0.0);
         for (int64_t p = 0; p < N; ++p) cb[S.s.label[p]] += static_cast<double>(gin[p]);
-        cg(S, cb, x, r, pv, q2, dc);
+        cg(S, cb, x, r, pv, q2, dg, dc);
         double *vpix = S.pix;
         for (int64_t p = 0; p < N; ++p) {
             vpix[p] = x[S.s.label[p]];

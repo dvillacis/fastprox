@@ -40,6 +40,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The new operators are also in `CASES`, the C derivative cases and the fuzzer.
 - Examples for 0.2, run by the Python tests: `examples/image_denoising.py` (isotropic and anisotropic TV of images, gap certificates, warm starts on a γ sweep, a batch, and learning γ through `TVIso.vjp`) and `examples/sparse_recovery.py` (proximal gradient with ℓ1 against MCP, SCAD, ℓ0, ℓ1/2 and the log penalty on 64 recovery problems at once, against the oracle, and the tie rule), and `examples/group_sparsity.py` (lasso, group lasso, sparse group lasso, group MCP and SCAD on grouped regression with λ chosen on a validation set, and hierarchical sparsity with `tree_soft_threshold`).
 
+### Changed
+
+- Isotropic TV restarts FISTA when the momentum points uphill (the gradient test of O'Donoghue and Candès 2015), checked every 4th iteration and never at a shorter interval than the previous restart. Solves to a gap of 1e-8 and below take up to 15× fewer iterations (64² noise at γ = 3 to 1e-10: about 26 000 → 1 500). At γ ≤ 0.3, looser solves are unchanged, while at γ = 3 they gain from 1e-4 on. Each iteration costs 1–4% more. Results stay bit-identical for any thread count.
+- The derivative CG of isotropic TV is preconditioned with the diagonal of the reduced system instead of the region sizes: 1.4–3× fewer iterations in the expensive solves (γ ≥ 0.3, tight tolerances), up to 40% more in cheap ones at small γ. The reported residual keeps its meaning, so `deriv_tol` behaves as before.
+
 ## [0.1.0] — 2026-10-16
 
 First release, on PyPI (`pip install fastprox`). Changes since 0.1.0rc2:
