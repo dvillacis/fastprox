@@ -486,3 +486,35 @@ quicker to 1e-2 at λ = 0.1. In 3D the three-block method, with its step of
 1/3, is 1.6–9.6× faster than the best proxTV solver up to 1e-4 but slower
 than Yang's ADMM at 1e-6 (2.5× at λ = 0.1, 1.1× at λ = 0.5); parallel proximal Dykstra, the other candidate for three
 blocks, is slower than both at every accuracy.
+
+## 2026-10-16, Apple M5 Pro: isotropic TV in 2D and 3D
+
+`bench/compare_tv_iso.py`, single thread, the same piecewise-constant images
+as for anisotropic TV. Each solver is run with a range of settings (fastprox:
+the gap tolerance from 1e-2 to 1e-12; scikit-image 0.26's
+`denoise_tv_chambolle`, Chambolle's 2004 projection algorithm in NumPy, with
+its own stopping off: iteration caps from 1 to 4096), and the table gives the
+fastest run that reached each error |z − z*| / |z*| against a reference
+solved to a gap of 1e-15. scikit-image solves the same problem (its `weight`
+is γ): at 100 000 iterations it agrees with fastprox to 3.5e-5. It is
+vectorised NumPy, not compiled code, so this is a baseline rather than a
+like-for-like comparison. "–": no run reached it.
+
+**ms to reach the error**
+
+| Image, γ | Solver | 1e-2 | 1e-3 | 1e-4 | 1e-6 |
+| --- | --- | --- | --- | --- | --- |
+| 256², 0.1 | fastprox (FDPG) | 3.43 | **7.61** | **16.05** | **141.42** |
+|  | scikit-image | **2.36** | 19.54 | 156.61 | – |
+| 256², 0.3 | fastprox (FDPG) | **6.62** | **54.99** | **145.65** | **1080.47** |
+|  | scikit-image | 38.95 | 626.44 | – | – |
+| 64³, 0.1 | fastprox (FDPG) | 15.51 | **37.69** | **80.45** | **824.43** |
+|  | scikit-image | **12.45** | 101.98 | 820.66 | – |
+
+fastprox is 2.6–11× faster from 1e-3 on and alone reaches 1e-6;
+scikit-image's cheap first iterations are 25–45% faster to 1e-2 at
+γ = 0.1. The run was stopped before 64³ at γ = 0.3 (scikit-image's sweep to
+4096 iterations on 262 144 voxels, three repetitions each, made the full run
+take over 50 minutes); the 512² images of the anisotropic benchmark were
+left out for the same reason. At 128² and 32³ (`--quick`), fastprox was 2.7–18×
+faster from 1e-3 on, and scikit-image 1.3× faster to 1e-2 at 128², γ = 0.1.

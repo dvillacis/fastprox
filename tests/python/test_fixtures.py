@@ -68,7 +68,7 @@ def test_image_operators_match_generic_solver(case):
     worst = 0.0
     for p in probs:
         op = IMAGE_CASES[case][1](p["param"])
-        z, info = op.solve(p["x"], float(p["gamma"]), tol=1e-14, max_iter=100000)
+        z, info = op.solve(p["x"], float(p["gamma"]), tol=1e-14, max_iter=3_000_000)
         assert info.converged
         worst = max(worst, np.abs(z - p["z"]).max() / (1 + np.abs(p["x"]).max()))
     assert worst < 1e-7

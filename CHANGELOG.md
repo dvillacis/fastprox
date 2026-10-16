@@ -13,6 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `fp_options.tol` and `max_iter` are now used (by the iterative operators), and the Python `prox` binding takes them.
 - CVXPY reference fixtures for images (`tests/fixtures/reference_images.npz`, `generate.py images`), Python tests (`tests/python/test_tv_aniso.py`), C tests with an independently recomputed certificate, and fuzzing of the new operator.
 - `bench/compare_tv_aniso.py`: time to reach a given accuracy against proxTV's 2D and 3D solvers.
+- Isotropic TV of 2D and 3D images (`fp_op_tv_iso`, `fastprox.TVIso`, `fastprox.tv_iso`): the prox of γ Σ_p ‖(wₐ Dₐ z)_p‖₂ with forward differences on the last 2 or 3 axes, the weights scaling each axis inside the norm. FISTA on the dual (Beck and Teboulle 2009; Beck 2017, §12.4.4) with a certified gap, warm starts (a dual for another γ is projected onto the new ball) and an exact 1D path for one active axis; rescaled internally so extreme weights and steps stay finite (found by fuzzing: 4w² underflowed to 0 for a denormal weight). JVP and VJP by implicit differentiation, one unknown per flat region, solved by conjugate gradients.
+- `fp_workspace_set_deriv_tol` and `fp_workspace_deriv_info`: tolerance and iteration cap of the derivative solves, and the residual and iterations of the last one; in Python, `tol` and `max_iter` on `TVIso.jvp`/`vjp` and `ctx.deriv`.
+- `bench/compare_tv_iso.py`: time to reach a given accuracy against scikit-image's `denoise_tv_chambolle`. CVXPY fixtures for isotropic TV, `tests/python/test_tv_iso.py`, C tests with an independent certificate, and fuzzing.
+- `src/ops/image_util.hpp`: the fiber passes, geometry and fixed-order row sums shared by the image operators.
 
 ## [0.1.0] — 2026-10-16
 

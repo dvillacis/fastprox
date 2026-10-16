@@ -81,6 +81,13 @@ struct fp_workspace {
     size_t image_bytes = 0, image_thread_bytes = 0, struct_bytes = 0;
     fp::Buffer<double> image_work, image_thread, structure, dual;
     fp::Buffer<double> image_gaps, image_iters;  // per image results of the last call
+    // Derivative solves (conjugate gradients) of image operators: settings,
+    // per image results, and the worst of the last jvp/vjp.
+    double deriv_tol = 1e-10;
+    int deriv_max_iter = 10000;
+    fp::Buffer<double> deriv_res, deriv_its;
+    mutable double deriv_residual = 0.0;
+    mutable int deriv_iters = 0;
     bool dual_valid = false;  // dual holds the result of a call or a seed
     bool warm = false;        // fp_workspace_set_warm: every call starts from dual
     bool seeded = false;      // fp_workspace_set_dual: the next call starts from dual

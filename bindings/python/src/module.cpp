@@ -222,6 +222,20 @@ NB_MODULE(_fastprox, m) {
         return make([&](fp_op **o) { return fp_op_tv_aniso(ndim, pw.get(), o); });
     }, "ndim"_a, "weights"_a.none());
 
+    m.def("tv_iso", [](int ndim, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_tv_iso(ndim, pw.get(), o); });
+    }, "ndim"_a, "weights"_a.none());
+    m.def("set_deriv_tol", [](Workspace &ws, double tol, int max_iter) {
+        check(fp_workspace_set_deriv_tol(ws.p, tol, max_iter));
+    }, "ws"_a, "tol"_a, "max_iter"_a);
+    m.def("deriv_info", [](const Workspace &ws) {
+        double r = 0.0;
+        int it = 0;
+        check(fp_workspace_deriv_info(ws.p, &r, &it));
+        return std::make_tuple(r, it);
+    }, "ws"_a);
+
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
           "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000);
     m.def("get_dual", [](const Workspace &ws, OutArr &out) {

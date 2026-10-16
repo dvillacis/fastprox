@@ -37,6 +37,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
+| Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
 
 Notes:
 
@@ -59,8 +60,11 @@ Notes:
 
 ### Image operators (*since 0.2*)
 
-Anisotropic TV acts on the **last** 2 or 3 axes of the array, an image or a
-volume, and is batched over the leading axes; `fp_options.axis` is ignored.
+Anisotropic and isotropic TV act on the **last** 2 or 3 axes of the array, an
+image or a volume, and are batched over the leading axes; `fp_options.axis`
+is ignored. What follows describes anisotropic TV; isotropic TV, which shares
+the gap stopping, `FP_ENOTCONV`, warm starts and special values, is
+described after it.
 Each image is solved independently, so a batch gives the same result as
 image-by-image calls, for any thread count.
 
@@ -100,6 +104,35 @@ image-by-image calls, for any thread count.
   (the rest of the batch is unaffected); ±Inf is rejected with `FP_EINVAL`.
   Images are limited to 2³¹ − 1 entries.
 
+**Isotropic TV.** The weights scale each axis inside the norm (for example
+voxel spacing); differences past the last entry are zero, as in Beck's
+TV_I.
+- **Algorithm.** The fast dual proximal gradient method, that is FISTA on the
+  dual (Beck and Teboulle, IEEE TIP 18, 2009; Beck 2017, §12.4.4): each
+  iteration is a divergence, a gradient and a pixelwise projection onto the
+  ball of radius γ, with step 1/L, L = 4 Σₐ wₐ² (8 in 2D, 12 in 3D), and the
+  primal taken from the last dual iterate. A single active axis is the exact
+  1D TV. It is rescaled internally by the largest weight, so tiny or huge
+  weights and steps stay finite, and an axis whose weight is below 1e-100 of
+  the largest drops out.
+- **Dual.** u of shape `(ndim, *x.shape)` with ‖u_p‖₂ ≤ γ, zero past the last
+  entry along each axis, and z = x − Σₐ wₐ Dₐᵀuₐ. A warm start projects the
+  given dual onto the current ball, so a dual from another γ can be reused.
+  The gap is Σ_p (γ‖g_p‖ − ⟨g_p, u_p⟩) with g = W D z, each term ≥ 0.
+- **Derivatives** come from implicit differentiation of the optimality
+  conditions. Entries with a vanishing gradient (below a threshold set by
+  the certified error) keep z constant across their edges, which reduces the
+  unknowns to one per flat region; elsewhere the dual turns on the sphere
+  (H_p = γ/‖g_p‖ (I − n nᵀ)). The resulting symmetric positive definite system
+  is solved by conjugate gradients, to a relative residual of 1e-10 by
+  default: `fp_workspace_set_deriv_tol(ws, tol, max_iter)` changes it and
+  `fp_workspace_deriv_info(ws, &residual, &iters)` reports the last solve
+  (in Python, `jvp`/`vjp` take `tol` and `max_iter`, and `ctx.deriv` holds
+  the residual and iterations). No polish: isotropic regions have no
+  closed-form values.
+- FISTA converges like 1/k² in the dual, so very tight tolerances take
+  many iterations (about 1/√tol); the default `tol` of 1e-6 is cheap.
+
 ### Derivatives at kinks
 
 Every operator is piecewise smooth. At a point where two pieces meet,
@@ -119,6 +152,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
+| isotropic TV | an entry with a vanishing gradient | flat: z held constant across its edges (the gradient below the threshold counts as zero) |
 
 The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
 x − γλ P(x/(γλ)), with P the projection onto the ℓ1 ball, so an entry kept
@@ -221,6 +255,12 @@ fp_workspace_set_warm(ws, 1);        /* every call starts from the previous dual
 Only image operators have a dual; for other operators these return
 `FP_EINVAL`, as does `get` before any call. `set` rejects non-finite values.
 
+```c
+fp_workspace_set_deriv_tol(ws, 1e-8, 500);   /* CG of isotropic TV's fp_jvp/fp_vjp */
+double residual; int iters;
+fp_workspace_deriv_info(ws, &residual, &iters);  /* worst over the batch, last call */
+```
+
 ### Conjugates
 
 `fp_prox_conj(op, σ, y, out, ...)` computes prox_{σg*}(y) =
@@ -292,6 +332,10 @@ y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
 img = np.random.default_rng(1).normal(size=(256, 256))
 z, info = fp.tv_aniso(img, gamma=0.2, tol=1e-6)   # info.gap, info.iters, info.converged, info.dual
 z, info = fp.tv_aniso(img, gamma=0.25, warm_start=info.dual)
+iso = fp.TVIso(ndim=2)
+v, ctx = iso.prox(img, 0.2, keep=True, tol=1e-8, max_iter=100000)
+gx, grads = iso.vjp(ctx, np.ones_like(img), tol=1e-10)   # conjugate gradients
+residual, cg_iters = ctx.deriv
 tv = fp.TVAniso(ndim=3, weights=[1.0, 1.0, 0.5])
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True)   # ctx.info is an IterInfo
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)

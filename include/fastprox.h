@@ -164,6 +164,16 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
  * with the last iterate written). Its dual is kept in the workspace. */
 FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out);
 
+/* Isotropic TV of an image: g(z) = sum_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
+ * with forward differences D_a along the last ndim axes (2 or 3; zero past the
+ * last entry), batched over the others; the weights scale each axis inside
+ * the norm (e.g. voxel spacing). axis_weights: NULL (w = 1), length 1, or
+ * ndim, all >= 0. theta = (w_0, ..., w_{ndim-1}). Iterative, as
+ * fp_op_tv_aniso. The dual u in the workspace has |u_p|_2 <= gamma and
+ * z = x - sum_a w_a D_a^T u_a. Derivatives solve a linear system by conjugate
+ * gradients (fp_workspace_set_deriv_tol, fp_workspace_deriv_info). */
+FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **out);
+
 FP_API void        fp_op_free(fp_op *op);
 FP_API int64_t     fp_op_nparams(const fp_op *op);
 FP_API const char *fp_op_name(const fp_op *op);
@@ -185,6 +195,14 @@ FP_API void      fp_workspace_free(fp_workspace *ws);
 FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out);
 FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual);
 FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on);
+
+/* Derivatives of iterative image operators that solve a linear system
+ * (isotropic TV, by conjugate gradients): the relative residual tolerance
+ * and iteration cap of fp_jvp/fp_vjp (defaults 1e-10 and 10000), and the
+ * worst residual and iteration count of the last fp_jvp/fp_vjp over the
+ * batch (0 for derivatives in closed form). Other operators: FP_EINVAL. */
+FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter);
+FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residual, int *iters);
 
 /* ------------------------------------------------------------------------
  * Entry points. ws may be NULL unless opt->keep_structure is set; out may
