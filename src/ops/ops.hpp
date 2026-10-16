@@ -19,10 +19,18 @@ fp_status make_elastic_net(double l1, double l2, fp_op **out);
 fp_status make_huber(double lambda, double delta, fp_op **out);
 fp_status make_box(Vec lo, Vec hi, fp_op **out);
 fp_status make_nonneg(fp_op **out);
+fp_status make_log_barrier(double lambda, fp_op **out);
+fp_status make_l1_box(double lambda, Vec w, Vec lo, Vec hi, fp_op **out);
 
 // group.cpp
 fp_status make_group_l2(double lambda, std::vector<int64_t> groups, int64_t ngroups, Vec c,
                         fp_op **out);
+
+// radial.cpp: norm composition of a scalar map (Huber, SCAD, MCP; scalar is
+// owned and deleted on failure) and the second-order cone.
+fp_status make_group_radial(fp_op *scalar, const char *name, std::vector<int64_t> groups,
+                            int64_t ngroups, Vec c, fp_op **out);
+fp_status make_soc(fp_op **out);
 
 // projections.cpp
 fp_status make_l2_ball(double radius, fp_op **out);

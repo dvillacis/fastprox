@@ -73,7 +73,7 @@ bool valid_status(fp_status s) { return s >= FP_OK && s <= FP_EINTERNAL; }
 
 struct Case {
     fp_op *op = nullptr;
-    std::vector<double> params[2];
+    std::vector<double> params[3];
     std::vector<int64_t> groups;
 };
 
@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 23;
+    const int kind = b.u8() % 28;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -181,6 +181,40 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             const double rhs = (b.u8() % 2 ? -1.0 : 1.0) * b.param();
             return fp_op_hyperplane(b.u8() % 4 ? &a0 : nullptr, rhs, lo, hi, nullptr,
                                     upper ? &a1 : nullptr, b.u8() % 2, &c.op);
+        }
+        case 23: return fp_op_log_barrier(b.param(), &c.op);
+        case 24: {  // l1 over a box; lo > hi sometimes
+            fill(c.params[0], pick);
+            fill(c.params[1], b.u8() % 2 ? n : 1);
+            fill(c.params[2], b.u8() % 2 ? n : 1);
+            for (auto &v : c.params[1]) v = -v;
+            static int64_t s2[1];
+            s0[0] = static_cast<int64_t>(c.params[0].size());
+            s1[0] = static_cast<int64_t>(c.params[1].size());
+            s2[0] = static_cast<int64_t>(c.params[2].size());
+            a0 = fp_array{c.params[0].data(), FP_F64, 1, s0, nullptr, FP_DEVICE_CPU};
+            a1 = fp_array{c.params[1].data(), FP_F64, 1, s1, nullptr, FP_DEVICE_CPU};
+            fp_array a2{c.params[2].data(), FP_F64, 1, s2, nullptr, FP_DEVICE_CPU};
+            const bool arrays = b.u8() % 2;
+            const double lam = b.param();
+            return fp_op_l1_box(lam, b.u8() % 2 ? &a0 : nullptr, -b.param(), b.param(),
+                                arrays ? &a1 : nullptr, arrays ? &a2 : nullptr, &c.op);
+        }
+        case 25: return fp_op_soc(&c.op);
+        case 26: {  // group Huber, SCAD or MCP, groups as in case 3
+            const int64_t G = 1 + b.u8() % 4;
+            c.groups.resize(static_cast<size_t>(n > 0 ? n : 1));
+            for (auto &g : c.groups) g = b.u8() % (G + (b.u8() % 8 == 0));
+            fill(c.params[0], b.u8() % 2 ? G : 1);
+            a0 = vec(c.params[0]);
+            const int64_t *g = b.u8() % 3 ? c.groups.data() : nullptr;
+            const int64_t len = static_cast<int64_t>(c.groups.size());
+            const double lam = b.param(), p = b.param();
+            switch (b.u8() % 3) {
+                case 0: return fp_op_group_huber(lam, p, len, g, G, &a0, &c.op);
+                case 1: return fp_op_group_scad(lam, 1.0 + p, len, g, G, &a0, &c.op);
+                default: return fp_op_group_mcp(lam, p, len, g, G, &a0, &c.op);
+            }
         }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);

@@ -39,6 +39,8 @@ __all__ = [
     "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
     "Max", "SumLargest", "Hyperplane", "HalfSpace", "prox_max", "prox_sum_largest",
     "project_hyperplane", "project_halfspace",
+    "LogBarrier", "L1Box", "SOC", "GroupHuber", "GroupSCAD", "GroupMCP", "prox_log_barrier",
+    "prox_l1_box", "project_soc", "group_huber", "group_scad", "group_mcp",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -320,6 +322,102 @@ class NonNeg(Operator):
 
     def __init__(self):
         super().__init__(_C.nonneg())
+
+
+class LogBarrier(Operator):
+    """g(z) = -lam * sum_i log z_i, lam > 0: z = (x + sqrt(x^2 + 4 gamma lam)) / 2
+    (Beck, Lemma 6.5). Parameters: lam."""
+
+    _layout = [("lam", 1, True)]
+
+    def __init__(self, lam=1.0):
+        super().__init__(_C.log_barrier(float(lam)))
+
+
+class L1Box(Operator):
+    """g(z) = lam * sum_i w_i |z_i| restricted to lower <= z <= upper:
+    z = clip(soft(x, gamma lam w), lower, upper) (Beck, Example 6.23). The
+    weights and bounds are scalars or one entry per element along the axis.
+    Parameters: weights, lower, upper; ``grads.lam`` is also provided."""
+
+    def __init__(self, lam=1.0, lower=-np.inf, upper=np.inf, weights=None):
+        w = _vec(weights)
+        lo = np.atleast_1d(np.asarray(lower, np.float64))
+        hi = np.atleast_1d(np.asarray(upper, np.float64))
+        super().__init__(_C.l1_box(float(lam), w, _vec(lo), _vec(hi)))
+        self.lam = float(lam)
+        self._w = np.ones(1) if w is None else w
+        self._layout = [("weights", self._w.size, w is None),
+                        ("lower", lo.size, np.ndim(lower) == 0),
+                        ("upper", hi.size, np.ndim(upper) == 0)]
+
+    def _fields(self, gp):
+        f = super()._fields(gp)
+        gw = gp[:self._w.size]
+        f["lam"] = float(self._w @ gw) / self.lam if self.lam > 0 else float("nan")
+        return f
+
+
+class SOC(Operator):
+    """Projection onto the second-order cone {(t, y) : ||y||_2 <= t} along the
+    axis, with t the first entry (Beck, Example 6.37)."""
+
+    def __init__(self):
+        super().__init__(_C.soc())
+
+
+class _GroupRadial(Operator):
+    """g(z) = sum_g c_g h(||z_g||_2) along the axis for a scalar penalty h:
+    each group is scaled by prox_{gamma c_g h}(||x_g||) / ||x_g|| (norm
+    composition, Beck, Theorem 6.18). ``groups`` and ``group_weights`` as in
+    GroupL2."""
+
+    _kind = 0
+    _pname = ""
+
+    def __init__(self, lam, p, groups, group_weights):
+        if groups is not None:
+            groups = np.ascontiguousarray(groups, dtype=np.int64).reshape(-1)
+            ngroups = int(groups.max()) + 1 if groups.size else 0
+        else:
+            ngroups = 1
+        c = _vec(group_weights)
+        super().__init__(_C.group_radial(self._kind, float(lam), float(p), groups, ngroups, c))
+        self._layout = [("lam", 1, True), (self._pname, 1, True),
+                        ("group_weights", 1 if c is None else c.size, c is None)]
+
+
+class GroupHuber(_GroupRadial):
+    """g(z) = lam * sum_g c_g H_delta(||z_g||_2), with H_delta the Huber function
+    of Huber: z_g = (1 - gamma c_g lam / max(||x_g||, delta + gamma c_g lam)) x_g
+    (Beck, Example 6.66). Parameters: lam, delta, group_weights."""
+
+    _kind, _pname = 0, "delta"
+
+    def __init__(self, lam=1.0, delta=1.0, groups=None, group_weights=None):
+        super().__init__(lam, delta, groups, group_weights)
+
+
+class GroupSCAD(_GroupRadial):
+    """Group SCAD: sum_g c_g SCAD(||z_g||_2) with threshold lam and concavity
+    a > 1; the prox needs a > 1 + gamma max c (ValueError otherwise).
+    Parameters: lam, a, group_weights."""
+
+    _kind, _pname = 1, "a"
+
+    def __init__(self, lam=1.0, a=3.7, groups=None, group_weights=None):
+        super().__init__(lam, a, groups, group_weights)
+
+
+class GroupMCP(_GroupRadial):
+    """Group MCP: sum_g c_g MCP(||z_g||_2) with threshold lam and concavity
+    b > 0; the prox needs b > gamma max c (ValueError otherwise).
+    Parameters: lam, b, group_weights."""
+
+    _kind, _pname = 2, "b"
+
+    def __init__(self, lam=1.0, b=3.0, groups=None, group_weights=None):
+        super().__init__(lam, b, groups, group_weights)
 
 
 class L2Ball(Operator):
@@ -782,3 +880,41 @@ def mcp(x, lam=1.0, b=3.0, gamma=1.0, *, out=None, threads=0, copy=False):
 def prox_log(x, lam=1.0, eps=1.0, gamma=1.0, *, tie="nonzero", out=None, threads=0, copy=False):
     """prox of gamma * lam * sum_i log(1 + |z_i| / eps)."""
     return LogPenalty(lam, eps).prox(x, gamma, out=out, threads=threads, copy=copy, tie=tie)
+
+
+def prox_log_barrier(x, lam=1.0, gamma=1.0, *, out=None, threads=0, copy=False):
+    """prox of -gamma * lam * sum_i log z_i."""
+    return _once(_C.log_barrier(float(lam)), x, gamma, -1, out, threads, copy)
+
+
+def prox_l1_box(x, lam=1.0, lower=-np.inf, upper=np.inf, gamma=1.0, *, weights=None, axis=-1,
+                out=None, threads=0, copy=False):
+    """prox of gamma * lam * sum_i w_i |z_i| over lower <= z <= upper."""
+    op = L1Box(lam, lower, upper, weights)
+    return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def project_soc(x, *, axis=-1, out=None, threads=0, copy=False):
+    """Projection onto {(t, y) : ||y||_2 <= t} along the axis, t the first entry."""
+    return _once(_C.soc(), x, 1.0, axis, out, threads, copy)
+
+
+def group_huber(x, lam=1.0, delta=1.0, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
+                out=None, threads=0, copy=False):
+    """prox of gamma * lam * sum_g c_g H_delta(||z_g||_2) along the axis."""
+    op = GroupHuber(lam, delta, groups, group_weights)
+    return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def group_scad(x, lam=1.0, a=3.7, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
+               out=None, threads=0, copy=False):
+    """prox of gamma * sum_g c_g SCAD(||z_g||_2) along the axis."""
+    op = GroupSCAD(lam, a, groups, group_weights)
+    return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def group_mcp(x, lam=1.0, b=3.0, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
+              out=None, threads=0, copy=False):
+    """prox of gamma * sum_g c_g MCP(||z_g||_2) along the axis."""
+    op = GroupMCP(lam, b, groups, group_weights)
+    return _once(op._op, x, gamma, axis, out, threads, copy)

@@ -557,3 +557,31 @@ there for scale.
   3–5 passes.
 - **The per-entry box** costs more at n = 10⁶ because each pass reads three
   arrays (a, lo, hi) besides x.
+
+## 2026-10-16, Apple M5 Pro: cones, barriers and group penalties
+
+Single thread, as in the previous section (best of 25 calls through Python,
+ns per entry, one row of normal entries; groups of 16 consecutive entries).
+
+| Operator | n = 10⁴ | n = 10⁶ |
+| --- | --- | --- |
+| soft thresholding (for scale) | 0.52 | 0.46 |
+| log barrier | 0.82 | 0.76 |
+| ℓ1 over the box [−0.5, 0.8] | 0.70 | 0.65 |
+| ℓ1 over a per-entry box | 0.70 | 0.64 |
+| second-order cone, one row | 0.93 | 0.90 |
+| Huber of the ℓ2 norm, one row | 0.97 | 0.96 |
+| group ℓ2 with group ids (for scale) | 3.34 | 3.28 |
+| group Huber with group ids | 3.45 | 3.35 |
+| group SCAD with group ids | 3.65 | 3.62 |
+| group MCP with group ids | 3.50 | 3.48 |
+| group Huber, rows of 16 | 1.08 | 1.09 |
+| group ℓ2, rows of 16 (for scale) | 1.00 | 0.94 |
+
+- **Group penalties** cost what group ℓ2 costs: the scalar map runs once per
+  group (a virtual call into the scalar operator), and the time goes to the
+  norm accumulation, which with group ids scatters into per-group sums. Rows
+  of 16 along a batch axis avoid the scatter and run 3× faster.
+- **Single-row norms** (the cone, Huber of the norm) are bound by the
+  sequential sum of squares: one dependent addition per entry, which the
+  compiler may not reorder without fast-math (as for the ℓ2 ball).

@@ -38,6 +38,11 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Sum of the k largest (*since 0.2*) | λ Σ of the k largest zᵢ (or \|zᵢ\|) | `fp_op_sum_largest(λ, k, absolute)` | `SumLargest(lam, k, absolute)`, `prox_sum_largest` | (λ) |
 | Hyperplane ∩ box (*since 0.2*) | aᵀz = b, lo ≤ z ≤ hi | `fp_op_hyperplane(a, b, lo, hi, lower, upper, 0)` | `Hyperplane(a, b, lower, upper)`, `project_hyperplane` | (b, a…, lower…, upper…) |
 | Half-space ∩ box (*since 0.2*) | aᵀz ≤ b, lo ≤ z ≤ hi | `fp_op_hyperplane(a, b, lo, hi, lower, upper, 1)` | `HalfSpace(a, b, lower, upper)`, `project_halfspace` | (b, a…, lower…, upper…) |
+| Second-order cone (*since 0.2*) | ‖(z₂, …, zₙ)‖₂ ≤ z₁ | `fp_op_soc()` | `SOC`, `project_soc` | none |
+| Log barrier (*since 0.2*) | −λ Σ log zᵢ | `fp_op_log_barrier(λ)` | `LogBarrier(lam)`, `prox_log_barrier` | (λ) |
+| ℓ1 over a box (*since 0.2*) | λ Σ wᵢ \|zᵢ\| on lo ≤ z ≤ hi | `fp_op_l1_box(λ, w, lo, hi, lower, upper)` | `L1Box(lam, lower, upper, weights)`, `prox_l1_box` | (w…, lower…, upper…) |
+| Group Huber (*since 0.2*) | λ Σ_g c_g H_δ(‖z_g‖₂), H_δ as for Huber | `fp_op_group_huber(λ, δ, n, groups, G, c)` | `GroupHuber(lam, delta, groups, group_weights)`, `group_huber` | (λ, δ, c…) |
+| Group SCAD, group MCP (*since 0.2*) | Σ_g c_g ρ(‖z_g‖₂), ρ the SCAD or MCP penalty | `fp_op_group_scad(λ, a, …)`, `fp_op_group_mcp(λ, b, …)` | `GroupSCAD`, `GroupMCP`, `group_scad`, `group_mcp` | (λ, a or b, c…) |
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
 | ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
@@ -68,6 +73,20 @@ Notes:
   half-space), and `FP_EPARAM` reports an empty one. Since only the ratios of
   (a, b) matter, nonzero |aᵢ| / max |a| must be at least 1e-100. The
   half-space keeps the box projection when it meets aᵀz ≤ b.
+- **Second-order cone.** t is the first entry of the row, as in conic
+  solvers (Beck's Example 6.37 puts it last). Rows of length 1 give the
+  projection onto t ≥ 0.
+- **Log barrier** needs λ > 0. The prox (x + √(x² + 4γλ))/2 is evaluated
+  without cancellation for x < 0 and without overflow for huge |x| or γλ.
+- **ℓ1 over a box** is clip(soft(x, γλw), lo, hi), for any interval (Beck,
+  Example 6.23, states the box [−α, α]); weights as for soft thresholding and
+  bounds as for `Box`. `grads.lam` is also provided in Python.
+- **Group penalties by norm composition.** Group Huber, SCAD and MCP scale each
+  group by φ(‖x_g‖)/‖x_g‖, with φ the scalar prox at the step γc_g (Beck,
+  Theorem 6.18); groups and weights are as for group ℓ2, and a one-entry
+  group is the scalar map. SCAD needs a > 1 + γ max c and MCP b > γ max c,
+  checked at each call (`FP_EPARAM`). Group SCAD and MCP are nonconvex, but
+  their prox is single-valued under these conditions, so there is no tie rule.
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
@@ -209,6 +228,12 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | sum of the k largest | xᵢ − μ on 0 or γλ (an end of the scaled cap) | entry at the shared level μ |
 | hyperplane, half-space ∩ box | xᵢ − μaᵢ on a bound | interior (free) |
 | half-space ∩ box | aᵀP_box(x) = b | box projection (constraint inactive) |
+| second-order cone | ‖y‖ = t (on the cone), or the origin | inside: identity |
+| second-order cone | ‖y‖ = −t > 0 (on the polar cone) | z = 0: 0 |
+| log barrier | none for γλ > 0; at γ = 0, xᵢ = 0 | 1 |
+| ℓ1 over a box | \|xᵢ\| equal to the threshold; soft(xᵢ) on a bound | thresholded: 0; interior (soft's Jacobian) |
+| group Huber, SCAD, MCP | ‖x_g‖ at a breakpoint of the scalar map | the scalar map's rule (Huber: inner branch; SCAD, MCP: the branch below) |
+| group Huber, SCAD, MCP | x_g = 0 | φ′(0) I, the limit of φ(s)/s |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
@@ -402,6 +427,13 @@ zk = fp.prox_sum_largest(x, lam=0.5, k=3)            # absolute=True for |x|
 w = np.linspace(0.5, 1.5, 1000)                     # one a_i per entry of the axis
 zp = fp.project_hyperplane(x, a=w, b=100.0, lower=0.0, upper=1.0)
 zh = fp.project_halfspace(x, a=w, b=1.0)
+
+# Cones, barriers and group penalties (since 0.2).
+zc = fp.project_soc(x)                               # t = x[..., 0]
+zb = fp.prox_log_barrier(x, lam=0.1)                 # > 0
+zl = fp.prox_l1_box(x, lam=0.2, lower=-1.0, upper=1.0)
+groups = np.arange(1000) // 10                       # one group id per entry of the axis
+zg = fp.group_scad(x, lam=1.0, a=3.7, groups=groups)
 
 # Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
 img = np.random.default_rng(1).normal(size=(256, 256))

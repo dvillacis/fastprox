@@ -431,6 +431,24 @@ fp_status dual_impl(fp_workspace *ws, const fp_array *aa, bool to_ws) {
     return FP_OK;
 }
 
+// Group penalty around a scalar map built by make_scalar.
+template <class F>
+fp_status group_radial(F make_scalar, const char *name, int64_t n, const int64_t *groups,
+                       int64_t ngroups, const fp_array *group_weights, fp_op **out) {
+    if (!out) return FP_EINVAL;
+    *out = nullptr;
+    std::vector<int64_t> g;
+    if (groups) {
+        if (n < 1) return FP_EPARAM;
+        g.assign(groups, groups + n);
+    }
+    Vec c;
+    if (fp_status s = read_vec(group_weights, c)) return s;
+    fp_op *h = nullptr;
+    if (fp_status s = make_scalar(&h)) return s;
+    return make_group_radial(h, name, std::move(g), ngroups, std::move(c), out);
+}
+
 }  // namespace
 }  // namespace fp
 
@@ -491,6 +509,30 @@ FP_API fp_status fp_op_group_l2(double lambda, int64_t n, const int64_t *groups,
     });
 }
 
+FP_API fp_status fp_op_group_huber(double lambda, double delta, int64_t n, const int64_t *groups,
+                                   int64_t ngroups, const fp_array *group_weights, fp_op **out) {
+    return guard([&] {
+        return fp::group_radial([&](fp_op **h) { return fp::make_huber(lambda, delta, h); },
+                            "group_huber", n, groups, ngroups, group_weights, out);
+    });
+}
+
+FP_API fp_status fp_op_group_scad(double lambda, double a, int64_t n, const int64_t *groups,
+                                  int64_t ngroups, const fp_array *group_weights, fp_op **out) {
+    return guard([&] {
+        return fp::group_radial([&](fp_op **h) { return fp::make_scad(lambda, a, h); },
+                            "group_scad", n, groups, ngroups, group_weights, out);
+    });
+}
+
+FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64_t *groups,
+                                 int64_t ngroups, const fp_array *group_weights, fp_op **out) {
+    return guard([&] {
+        return fp::group_radial([&](fp_op **h) { return fp::make_mcp(lambda, b, h); },
+                            "group_mcp", n, groups, ngroups, group_weights, out);
+    });
+}
+
 FP_API fp_status fp_op_box(double lo, double hi, const fp_array *lower, const fp_array *upper,
                            fp_op **out) {
     return guard([&] {
@@ -510,6 +552,37 @@ FP_API fp_status fp_op_nonneg(fp_op **out) {
         if (!out) return FP_EINVAL;
         *out = nullptr;
         return fp::make_nonneg(out);
+    });
+}
+
+FP_API fp_status fp_op_log_barrier(double lambda, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_log_barrier(lambda, out);
+    });
+}
+
+FP_API fp_status fp_op_l1_box(double lambda, const fp_array *weights, double lo, double hi,
+                              const fp_array *lower, const fp_array *upper, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w, l, h;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        if (fp_status s = fp::read_vec(lower, l)) return s;
+        if (fp_status s = fp::read_vec(upper, h)) return s;
+        if (!lower) l.assign(1, lo);
+        if (!upper) h.assign(1, hi);
+        return fp::make_l1_box(lambda, std::move(w), std::move(l), std::move(h), out);
+    });
+}
+
+FP_API fp_status fp_op_soc(fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_soc(out);
     });
 }
 

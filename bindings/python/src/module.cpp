@@ -196,6 +196,17 @@ NB_MODULE(_fastprox, m) {
         return make([&](fp_op **o) { return fp_op_box(lo, hi, pl.get(), pu.get(), o); });
     }, "lo"_a, "hi"_a, "lower"_a.none(), "upper"_a.none());
     m.def("nonneg", [] { return make([](fp_op **o) { return fp_op_nonneg(o); }); });
+    m.def("log_barrier", [](double lam) {
+        return make([&](fp_op **o) { return fp_op_log_barrier(lam, o); });
+    }, "lam"_a);
+    m.def("l1_box", [](double lam, std::optional<Params> w, std::optional<Params> lower,
+                       std::optional<Params> upper) {
+        const ParamView pw(w), pl(lower), pu(upper);
+        return make([&](fp_op **o) {
+            return fp_op_l1_box(lam, pw.get(), -INFINITY, INFINITY, pl.get(), pu.get(), o);
+        });
+    }, "lam"_a, "weights"_a.none(), "lower"_a.none(), "upper"_a.none());
+    m.def("soc", [] { return make([](fp_op **o) { return fp_op_soc(o); }); });
     m.def("l2_ball", [](double r) {
         return make([&](fp_op **o) { return fp_op_l2_ball(r, o); });
     }, "radius"_a);
@@ -251,6 +262,18 @@ NB_MODULE(_fastprox, m) {
     m.def("log_penalty", [](double lam, double eps) {
         return make([&](fp_op **o) { return fp_op_log(lam, eps, o); });
     }, "lam"_a, "eps"_a);
+    // Group penalties: kind 0 Huber (p = delta), 1 SCAD (p = a), 2 MCP (p = b).
+    m.def("group_radial", [](int kind, double lam, double p, std::optional<IdArr> groups,
+                             int64_t ngroups, std::optional<Params> c) {
+        const ParamView pc(c);
+        const int64_t n = groups ? static_cast<int64_t>(groups->shape(0)) : 0;
+        const int64_t *g = groups ? groups->data() : nullptr;
+        return make([&](fp_op **o) {
+            if (kind == 0) return fp_op_group_huber(lam, p, n, g, ngroups, pc.get(), o);
+            if (kind == 1) return fp_op_group_scad(lam, p, n, g, ngroups, pc.get(), o);
+            return fp_op_group_mcp(lam, p, n, g, ngroups, pc.get(), o);
+        });
+    }, "kind"_a, "lam"_a, "p"_a, "groups"_a.none(), "ngroups"_a, "group_weights"_a.none());
     m.def("tv_aniso", [](int ndim, std::optional<Params> w) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv_aniso(ndim, pw.get(), o); });

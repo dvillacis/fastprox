@@ -131,6 +131,16 @@ FP_API fp_status fp_op_box(double lo, double hi, const fp_array *lower,
 /* Projection onto z >= 0. No parameters. */
 FP_API fp_status fp_op_nonneg(fp_op **out);
 
+/* g(z) = -lambda * sum_i log z_i, lambda > 0 (since 0.2): z = (x + sqrt(x^2 +
+ * 4 gamma lambda)) / 2. theta = (lambda). */
+FP_API fp_status fp_op_log_barrier(double lambda, fp_op **out);
+
+/* g(z) = lambda * sum_i w_i |z_i| restricted to lo <= z <= hi (since 0.2):
+ * z = clamp(soft(x, gamma lambda w), lo, hi). weights as fp_op_soft, the box
+ * as fp_op_box. theta = (w..., lower..., upper...). */
+FP_API fp_status fp_op_l1_box(double lambda, const fp_array *weights, double lo, double hi,
+                              const fp_array *lower, const fp_array *upper, fp_op **out);
+
 /* Projection onto ||z||_2 <= radius. theta = (radius). */
 FP_API fp_status fp_op_l2_ball(double radius, fp_op **out);
 
@@ -164,6 +174,10 @@ FP_API fp_status fp_op_sum_largest(double lambda, int64_t k, int absolute, fp_op
 FP_API fp_status fp_op_hyperplane(const fp_array *a, double b, double lo, double hi,
                                   const fp_array *lower, const fp_array *upper, int inequality,
                                   fp_op **out);
+
+/* Projection onto the second-order cone { (t, y) : ||y||_2 <= t } along the
+ * axis, t the first entry (since 0.2). No parameters. */
+FP_API fp_status fp_op_soc(fp_op **out);
 
 /* Projection onto the monotone cone (isotonic regression by PAVA), minimising
  * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0.
@@ -200,6 +214,19 @@ FP_API fp_status fp_op_mcp(double lambda, double b, fp_op **out);
 
 /* g(z) = lambda * sum_i log(1 + |z_i| / eps), eps > 0. theta = (lambda, eps). */
 FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out);
+
+/* Group penalties g(z) = sum_g c_g h(||z_g||_2) along the axis (since 0.2),
+ * with h the scalar map of fp_op_huber, fp_op_scad or fp_op_mcp: the prox
+ * scales each group by prox_{gamma c_g h}(||x_g||) / ||x_g|| (norm
+ * composition). groups, ngroups and group_weights as fp_op_group_l2. SCAD
+ * needs a > 1 + gamma max c, MCP b > gamma max c (else FP_EPARAM).
+ * theta = (lambda, delta | a | b, c...). */
+FP_API fp_status fp_op_group_huber(double lambda, double delta, int64_t n, const int64_t *groups,
+                                   int64_t ngroups, const fp_array *group_weights, fp_op **out);
+FP_API fp_status fp_op_group_scad(double lambda, double a, int64_t n, const int64_t *groups,
+                                  int64_t ngroups, const fp_array *group_weights, fp_op **out);
+FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64_t *groups,
+                                 int64_t ngroups, const fp_array *group_weights, fp_op **out);
 
 /* Anisotropic TV of an image: g(z) = sum over the last ndim axes a of
  * w_a * (1D TV of z along a), for ndim = 2 or 3. It acts on the last ndim axes
