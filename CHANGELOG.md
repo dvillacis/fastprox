@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.1.0] — 2026-10-16
 
-First release. Changes since 0.1.0rc2:
+First release, on PyPI (`pip install fastprox`). Changes since 0.1.0rc2:
 
 ### Added
 
