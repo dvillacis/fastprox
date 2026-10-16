@@ -36,6 +36,11 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | ℓ∞ norm | λ‖z‖∞ | `fp_op_linf(λ)` | `LInf`, `prox_linf` | (λ) |
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
+| ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
+| ℓq, 0 < q < 1 (*since 0.2*) | λ Σ wᵢ \|zᵢ\|^q | `fp_op_lq(λ, q, w)` | `Lq(lam, q, weights)`, `lq` | w (scalar or per entry) |
+| SCAD (*since 0.2*) | Fan and Li's penalty, threshold λ, concavity a | `fp_op_scad(λ, a)` | `SCAD(lam, a)`, `scad` | (λ, a) |
+| MCP (*since 0.2*) | Zhang's minimax concave penalty, threshold λ, concavity b | `fp_op_mcp(λ, b)` | `MCP(lam, b)`, `mcp` | (λ, b) |
+| Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
 
@@ -57,6 +62,39 @@ Notes:
 - **Kinks.** At a point where the prox is not differentiable the derivative
   is that of the structure the forward pass selected (see "Derivatives at
   kinks" below).
+
+### Nonconvex pointwise maps (*since 0.2*)
+
+ℓ0, ℓq, SCAD, MCP and the log penalty act entry by entry, like soft
+thresholding. Their prox is a global minimiser of the nonconvex scalar
+problem ½(z − x)² + γψ(z):
+- **ℓ0** is hard thresholding at √(2γλwᵢ).
+- **ℓq.** Zero below the threshold τ = β + γλwᵢ q β^{q−1}, with β = (2γλwᵢ(1 − q))^{1/(2−q)}
+  the size of the jump. Above it, the root of z + γλwᵢ q z^{q−1} = |x|: in
+  closed form for q = 1/2 and 2/3 (a cubic and a quartic), by Newton's
+  method from |x| otherwise (monotone on that branch).
+- **SCAD** needs a > 1 + γ and **MCP** b > γ; below that the prox is not
+  single-valued and the call returns `FP_EPARAM` (with `fp_prox_conj` the
+  condition applies to its step 1/σ). Both are continuous and piecewise
+  linear; with γ = 1 they are Fan and Li's and Zhang's thresholding rules.
+- **Log penalty.** The positive root of a quadratic, kept when it beats 0;
+  for γλ ≤ ε² the problem is convex.
+- **Ties.** Where two minimisers exist (ℓ0 and ℓq at the threshold, the log
+  penalty when both objective values are equal), `fp_options.tie` chooses:
+  `FP_TIE_NONZERO` (default) or `FP_TIE_ZERO`, in Python `tie="nonzero"` or
+  `"zero"`. `fp_info.ties` (Python: `ctx.info.ties`) counts the entries that
+  sat on a tie, the same for any thread count. A tie means the input is
+  exactly the threshold computed in double precision; a threshold that
+  falls between two doubles has no tie.
+- **Derivatives** are those of the selected branch: 0 off the support, and
+  1/(1 + γλψ''(z)) on it, from the scalar equation z + γλψ'(z) = x, with the
+  γ and parameter derivatives from the same equation. ℓ0 is piecewise
+  constant in γ and w.
+- **Conjugates.** `fp_prox_conj` returns y − σ prox_{g/σ}(y/σ). For these
+  nonconvex g that is not the prox of g*: the Moreau identity holds only for
+  convex g.
+- Every decision is made in double precision, also for float32 inputs, so
+  float32 and float64 pick the same branch.
 
 ### Image operators (*since 0.2*)
 
@@ -152,6 +190,8 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
+| ℓ0, ℓq, log penalty | \|xᵢ\| on the threshold (two minimisers) | the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
+| SCAD, MCP | \|xᵢ\| at a breakpoint | the branch below it (at γλ: thresholded) |
 | isotropic TV | an entry with a vanishing gradient | flat: z held constant across its edges (the gradient below the threshold counts as zero) |
 
 The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
@@ -328,6 +368,12 @@ dz = op.jvp(ctx, dx=np.ones_like(x), dgamma=0.0, dparams={"weights": 1.0})
 gx, grads = op.vjp(ctx, g=np.ones_like(x))      # grads.gamma, grads.weights, grads.params
 y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
 
+# Nonconvex maps (since 0.2): ties at thresholds follow tie= and are counted.
+zq = fp.lq(x, lam=0.1, q=0.5, gamma=1.0, tie="nonzero")
+zs = fp.scad(x, lam=0.2, a=3.7, gamma=1.0)          # needs a > 1 + gamma
+z0, ctx = fp.L0(0.3).prox(x, 1.0, keep=True, tie="zero")
+ctx.info.ties                                       # entries exactly on the threshold
+
 # Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
 img = np.random.default_rng(1).normal(size=(256, 256))
 z, info = fp.tv_aniso(img, gamma=0.2, tol=1e-6)   # info.gap, info.iters, info.converged, info.dual
@@ -366,6 +412,7 @@ v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)
 - Derivatives are an element of the generalized Jacobian, chosen by the
   structure of the forward pass (see "Kinks" above).
 - Exact operators report `gap = 0`; `iters` and `ties` are zero for every
-  0.1 operator. Iterative operators report their duality gap and iterations.
+  0.1 operator. Iterative operators report their duality gap and iterations,
+  and the nonconvex maps the number of entries on a tie.
 - float32 inputs are computed with double-precision accumulators wherever a
   sum spans a row.

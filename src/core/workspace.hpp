@@ -97,6 +97,7 @@ struct fp_workspace {
     bool conj = false;
     double gamma = 0.0;  // step used by the kernel (1/sigma in conjugate mode)
     double sigma = 0.0;
+    int tie = 0;  // fp_tie rule of the last prox call
 
     char *image_set(int k) const noexcept {
         return reinterpret_cast<char *>(image_work.data()) + static_cast<size_t>(k) * image_bytes;

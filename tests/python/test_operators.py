@@ -20,8 +20,11 @@ HI = _rng.uniform(0.0, 1.0, N)
 GROUPS = np.arange(N) * 7 % 3
 
 
-# name: (build(theta) -> Operator, theta0, reference(x_row, gamma, theta) or None,
-#        gamma, convex)
+# name: (build(theta) -> Operator, theta0, reference, gamma[, convex]).
+# reference: reference(x_row, gamma, theta) -> z, None (1D TV: optimality
+# residual), or ("objective", psi(theta)) for the nonconvex maps (the
+# minimum on a refined grid, see reference.grid_prox). convex defaults to
+# True; nonconvex maps are not firmly nonexpansive.
 CASES = {
     "soft": (lambda t: fp.Soft(0.4, t), W, lambda x, g, t: ref.soft(x, g * 0.4 * t), 0.8),
     # theta is the weight vector (here a broadcast scalar), not lam.
@@ -54,6 +57,21 @@ CASES = {
     "tv1d": (lambda t: fp.TV1D(t), np.array([1.0]), None, 0.6),
     "tv1d_w": (lambda t: fp.TV1D(t), WE, None, 0.6),
     "tv1d_taut": (lambda t: fp.TV1D(t, method="taut_string"), np.array([1.0]), None, 0.6),
+    "l0": (lambda t: fp.L0(0.3, t), W,
+           ("objective", lambda t: lambda z: 0.3 * t[0] * (z != 0)), 0.8, False),
+    "lq_half": (lambda t: fp.Lq(0.4, 0.5, t), W,
+                ("objective", lambda t: lambda z: 0.4 * t[0] * np.abs(z) ** 0.5), 0.8, False),
+    "lq_two_thirds": (lambda t: fp.Lq(0.4, 2 / 3, t), np.array([1.0]),
+                      ("objective", lambda t: lambda z: 0.4 * t[0] * np.abs(z) ** (2 / 3)), 0.8,
+                      False),
+    "lq_0.3": (lambda t: fp.Lq(0.4, 0.3, t), np.array([1.0]),
+               ("objective", lambda t: lambda z: 0.4 * t[0] * np.abs(z) ** 0.3), 0.8, False),
+    "scad": (lambda t: fp.SCAD(*t), np.array([0.5, 3.7]),
+             ("objective", lambda t: ref.scad_psi(*t)), 0.8, False),
+    "mcp": (lambda t: fp.MCP(*t), np.array([0.5, 3.0]),
+            ("objective", lambda t: ref.mcp_psi(*t)), 0.8, False),
+    "log": (lambda t: fp.LogPenalty(*t), np.array([0.8, 0.5]),
+            ("objective", lambda t: lambda z: t[0] * np.log1p(np.abs(z) / t[1])), 0.8, False),
 }
 NAMES = sorted(CASES)
 
@@ -67,13 +85,27 @@ def apply_rows(f, x):
 
 @pytest.mark.parametrize("name", NAMES)
 def test_matches_reference(name):
-    build, theta, reference, gamma = CASES[name]
+    build, theta, reference, gamma = CASES[name][:4]
     op = build(theta)
     rng = np.random.default_rng(1)
     for scale in (0.1, 1.0, 10.0):
         x = rng.normal(scale=scale, size=(7, N))
         z = op.prox(x, gamma)
-        if reference is None:
+        if isinstance(reference, tuple):  # nonconvex: a global minimiser, entry by entry
+            # theta is the per-entry weight vector for l0 and lq_half, else the
+            # map's parameters; psi(z) for one entry j.
+            per_entry = theta.size == N and name in ("l0", "lq_half")
+            for row in range(2):  # the grid reference is slow: two rows per scale
+                for j in range(N):
+                    psi = reference[1](np.array([theta[j]]) if per_entry else theta)
+                    xj, zj = x[row, j], z[row, j]
+                    zg = ref.grid_prox(np.array([xj]), gamma, psi)[0]
+                    fz = ref.nonconvex_objective(zj, xj, gamma, psi)
+                    fg = ref.nonconvex_objective(zg, xj, gamma, psi)
+                    assert fz <= fg + 1e-13 * (1 + xj ** 2)  # no better point on the grid
+                    # The flat minimum locates the grid's argmin to ~sqrt(eps).
+                    assert abs(zj - zg) <= 1e-7 * (1 + abs(xj))
+        elif reference is None:
             w = theta if theta.size > 1 else theta[0]
             for xr, zr in zip(x, z):
                 assert ref.tv1d_kkt_residual(xr, zr, gamma, w) < 1e-12
@@ -217,7 +249,7 @@ def test_edge_cases():
 
 
 def _derivative_setup(name, conj, seed):
-    build, theta, _, gamma = CASES[name]
+    build, theta, _, gamma = CASES[name][:4]
     rng = np.random.default_rng(seed)
     op = build(theta)
     x = rng.normal(scale=1.5, size=(3, N))
@@ -297,7 +329,9 @@ rows = hnp.arrays(np.float64, st.integers(1, 30), elements=finite)
 @settings(max_examples=60, deadline=None)
 @given(st.sampled_from(NAMES), st.data())
 def test_firm_nonexpansive(name, data):
-    build, theta, _, gamma = CASES[name]
+    build, theta, _, gamma = CASES[name][:4]
+    if len(CASES[name]) > 4 and not CASES[name][4]:
+        return  # nonconvex maps are not firmly nonexpansive
     n = N
     x1 = data.draw(hnp.arrays(np.float64, n, elements=finite))
     x2 = data.draw(hnp.arrays(np.float64, n, elements=finite))
@@ -338,7 +372,7 @@ def test_moreau_conjugates(y, sigma, lam):
 
 @pytest.mark.parametrize("name", NAMES)
 def test_threads_bitwise(name):
-    build, theta, _, gamma = CASES[name]
+    build, theta, _, gamma = CASES[name][:4]
     op = build(theta)
     x = np.random.default_rng(5).normal(size=(4000, N))
     outs = [op.prox(x, gamma, threads=t) for t in (1, 2, 8)]
@@ -354,7 +388,7 @@ def test_threads_bitwise(name):
 
 @pytest.mark.parametrize("name", NAMES)
 def test_axis_and_strides(name):
-    build, theta, _, gamma = CASES[name]
+    build, theta, _, gamma = CASES[name][:4]
     op = build(theta)
     x = np.random.default_rng(6).normal(size=(5, N, 4))
     z1 = op.prox(x, gamma, axis=1)
@@ -372,7 +406,7 @@ def test_axis_and_strides(name):
 
 @pytest.mark.parametrize("name", NAMES)
 def test_float32(name):
-    build, theta, _, gamma = CASES[name]
+    build, theta, _, gamma = CASES[name][:4]
     op = build(theta)
     x = np.random.default_rng(7).normal(size=(20, N))
     z64 = op.prox(x.astype(np.float32).astype(np.float64), gamma)

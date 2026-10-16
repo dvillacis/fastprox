@@ -36,6 +36,13 @@ fp_status make_isotonic(Vec w, bool increasing, fp_op **out);
 // tv1d.cpp
 fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out);
 
+// nonconvex.cpp
+fp_status make_l0(double lambda, Vec w, fp_op **out);
+fp_status make_lq(double lambda, double q, Vec w, fp_op **out);
+fp_status make_scad(double lambda, double a, fp_op **out);
+fp_status make_mcp(double lambda, double b, fp_op **out);
+fp_status make_log(double lambda, double eps, fp_op **out);
+
 // tv_aniso.cpp
 fp_status make_tv_aniso(int ndim, Vec w, fp_op **out);
 

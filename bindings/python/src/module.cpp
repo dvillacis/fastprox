@@ -91,7 +91,8 @@ Op *make(F &&f) {
     return op.release();
 }
 
-fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_iter = 1000) {
+fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_iter = 1000,
+                   int tie = FP_TIE_NONZERO) {
     fp_options o;
     fp_options_init(&o);
     o.axis = axis;
@@ -99,6 +100,7 @@ fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_
     o.keep_structure = keep ? 1 : 0;
     o.tol = tol;
     o.max_iter = max_iter;
+    o.tie = tie;
     return o;
 }
 
@@ -106,10 +108,10 @@ fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_
 // iterate is written and converged is false.
 std::tuple<double, int, int64_t, bool> prox(const Op &op, double step, const InArr &x, OutArr &out,
                                             int axis, int threads, bool keep, Workspace *ws, bool conj,
-                                            double tol, int max_iter) {
+                                            double tol, int max_iter, int tie) {
     const fp_array xa = view(x);
     fp_array oa = view(out);
-    const fp_options o = options(axis, threads, keep, tol, max_iter);
+    const fp_options o = options(axis, threads, keep, tol, max_iter, tie);
     fp_info info{0.0, 0, 0};
     fp_status s;
     {
@@ -217,6 +219,23 @@ NB_MODULE(_fastprox, m) {
         });
     }, "weights"_a.none(), "method"_a);
 
+    m.def("l0", [](double lam, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_l0(lam, pw.get(), o); });
+    }, "lam"_a, "weights"_a.none());
+    m.def("lq", [](double lam, double q, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_lq(lam, q, pw.get(), o); });
+    }, "lam"_a, "q"_a, "weights"_a.none());
+    m.def("scad", [](double lam, double a) {
+        return make([&](fp_op **o) { return fp_op_scad(lam, a, o); });
+    }, "lam"_a, "a"_a);
+    m.def("mcp", [](double lam, double b) {
+        return make([&](fp_op **o) { return fp_op_mcp(lam, b, o); });
+    }, "lam"_a, "b"_a);
+    m.def("log_penalty", [](double lam, double eps) {
+        return make([&](fp_op **o) { return fp_op_log(lam, eps, o); });
+    }, "lam"_a, "eps"_a);
     m.def("tv_aniso", [](int ndim, std::optional<Params> w) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv_aniso(ndim, pw.get(), o); });
@@ -237,7 +256,7 @@ NB_MODULE(_fastprox, m) {
     }, "ws"_a);
 
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
-          "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000);
+          "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000, "tie"_a = 0);
     m.def("get_dual", [](const Workspace &ws, OutArr &out) {
         fp_array oa = view(out);
         check(fp_workspace_get_dual(ws.p, &oa));

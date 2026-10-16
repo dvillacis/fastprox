@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 15;
+    const int kind = b.u8() % 20;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -147,6 +147,19 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             a0 = vec(c.params[0]);
             return fp_op_tv_iso(k, b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
+        case 15:
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            return fp_op_l0(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        case 16: {
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            const double qs[5] = {0.5, 2.0 / 3.0, 0.1, 0.9, b.f64()};  // closed forms, Newton, junk
+            return fp_op_lq(b.param(), qs[b.u8() % 5], b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 17: return fp_op_scad(b.param(), 1.0 + b.param(), &c.op);
+        case 18: return fp_op_mcp(b.param(), b.param(), &c.op);
+        case 19: return fp_op_log(b.param(), b.param(), &c.op);
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);
             if (b.u8() % 4 == 0)  // zero weights split the row
@@ -217,6 +230,7 @@ void run(const uint8_t *data, size_t size) {
     fp_options_init(&o);
     o.axis = axis;
     o.max_iter = 30;  // iterative operators: keep cases fast (FP_ENOTCONV is fine)
+    o.tie = b.u8() % 2;  // nonconvex maps: either tie rule
 
     // Contiguous outputs for one and four threads.
     const fp_dtype dt = f32 ? FP_F32 : FP_F64;
