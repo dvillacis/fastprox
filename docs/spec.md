@@ -450,12 +450,15 @@ The papers below are the sources each kernel is implemented from. The first grou
 - A. Chambolle, [An algorithm for total variation minimization and applications](https://doi.org/10.1023/B:JMIV.0000011325.36760.1e), JMIV 20, 2004 — dual method for isotropic TV.
 - Q. Bertrand et al., [Implicit differentiation for fast hyperparameter selection in non-smooth convex learning](https://www.jmlr.org/papers/v23/21-0486.html), JMLR 23, 2022 — support-restricted Jacobians.
 
+**Checked during 0.2** (2026-10-15/16, against the bibliographies of A. Beck, *First-Order Methods in Optimization*, SIAM 2017, Appendix D, of F. Wen, L. Chu, P. Liu and R. Qiu, *A survey on nonconvex regularization based sparse and low-rank recovery*, IEEE Access 6, 2018, and of a third citing paper; the original papers were not opened, so the kernels derive their closed forms themselves and verify them against minimisation on a refined grid)
+
+- A. Beck and M. Teboulle, Fast gradient-based algorithms for constrained total variation image denoising and deblurring problems, IEEE Trans. Image Processing 18 (2009) 2419–2434 — FGP for isotropic TV.
+- Z. Xu, X. Chang, F. Xu and H. Zhang, L1/2 regularization: a thresholding representation theory and a fast solver, IEEE Trans. Neural Networks and Learning Systems 23(7) (2012) 1013–1027 — ℓ1/2 thresholding.
+- W. Cao, J. Sun and Z. Xu, Fast image deconvolution using closed-form thresholding formulas of Lq (q = 1/2, 2/3) regularization, J. Visual Communication and Image Representation 24(1) (2013) 31–41 — ℓ2/3 thresholding.
+- J. Fan and R. Li, Variable selection via nonconcave penalized likelihood and its oracle properties, JASA 96(456) (2001) 1348–1360; C.-H. Zhang, Nearly unbiased variable selection under minimax concave penalty, Annals of Statistics 38(2) (2010) 894–942 — SCAD and MCP.
+
 **To check before citing in code**
 
-- A. Beck and M. Teboulle, fast gradient-based algorithms for constrained TV denoising and deblurring, IEEE Trans. Image Processing, 2009 — FGP for isotropic TV.
-- Z. Xu et al., L1/2 regularization: a thresholding representation theory and a fast solver, IEEE Trans. Neural Networks and Learning Systems, 2012 — ℓ1/2 thresholding.
-- W. Cao, J. Sun and Z. Xu, closed-form thresholding formulas for ℓq with q = 1/2 and 2/3, J. Visual Communication and Image Representation, 2013 — ℓ2/3 thresholding.
-- J. Fan and R. Li, SCAD penalty, JASA, 2001; C.-H. Zhang, MCP penalty, Annals of Statistics, 2010 — SCAD and MCP prox maps.
 - Tooling documentation (nanobind, scikit-build-core, cibuildwheel, BinaryBuilder, the GCC Runtime Library Exception) was not opened while writing this spec; confirm the details in Section 12 against it.
 
 The survey this spec builds on: [Compiled solvers for variational imaging and nonsmooth optimization](https://claude.ai/code/artifact/51657fed-21f0-4ccc-b9ed-2d47aa2a97f3).

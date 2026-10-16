@@ -89,30 +89,37 @@ struct fp_op {
     virtual int64_t nparams() const noexcept = 0;
     // Validates the operator against the length of the operator axis.
     virtual fp_status check_n(int64_t n) const noexcept = 0;
+    // Validates the step the kernel will use (1/sigma after fp_prox_conj):
+    // FP_EPARAM where the prox is not single-valued (SCAD, MCP).
+    virtual fp_status check_step(double) const noexcept { return FP_OK; }
+    // True when the prox can be set-valued at thresholds (nonconvex maps):
+    // prox_run then applies the tie rule and counts the entries on a tie.
 
     // ---- elementwise interface -------------------------------------------
     // True when some parameter varies along the operator axis.
     virtual bool axis_params() const noexcept { return false; }
+    virtual bool has_ties() const noexcept { return false; }
 
     // z[i*zs] = prox(x[i*xs]) for i < len. widx is the axis coordinate of the
     // first entry and wstep its increment along the run. save, if not null,
     // receives the (scaled) input contiguously. In conjugate mode the run
-    // computes y - sigma prox_{g/sigma}(y/sigma) and gamma is 1/sigma.
-    virtual void prox_run(const float *, int64_t, float *, int64_t, int64_t, double, int64_t,
-                          int64_t, float *, bool, double) const noexcept {}
-    virtual void prox_run(const double *, int64_t, double *, int64_t, int64_t, double, int64_t,
-                          int64_t, double *, bool, double) const noexcept {}
-    // xsave is contiguous; dx may be null.
+    // computes y - sigma prox_{g/sigma}(y/sigma) and gamma is 1/sigma. tie is
+    // the fp_tie rule; the return value counts the entries that sat on a tie.
+    virtual int64_t prox_run(const float *, int64_t, float *, int64_t, int64_t, double, int64_t,
+                             int64_t, float *, bool, double, int) const noexcept { return 0; }
+    virtual int64_t prox_run(const double *, int64_t, double *, int64_t, int64_t, double, int64_t,
+                             int64_t, double *, bool, double, int) const noexcept { return 0; }
+    // xsave is contiguous; dx may be null. tie: the rule of the prox call.
     virtual void jvp_run(const float *, const float *, int64_t, float *, int64_t, int64_t, double,
-                         double, const double *, int64_t, int64_t, bool, double) const noexcept {}
+                         double, const double *, int64_t, int64_t, bool, double, int) const noexcept {}
     virtual void jvp_run(const double *, const double *, int64_t, double *, int64_t, int64_t,
                          double, double, const double *, int64_t, int64_t, bool,
-                         double) const noexcept {}
+                         double, int) const noexcept {}
     // acc has nparams() + 2 slots: theta..., gamma, conjugate extra term.
     virtual void vjp_run(const float *, const float *, int64_t, float *, int64_t, int64_t, double,
-                         double *, int64_t, int64_t, bool, double) const noexcept {}
+                         double *, int64_t, int64_t, bool, double, int) const noexcept {}
     virtual void vjp_run(const double *, const double *, int64_t, double *, int64_t, int64_t,
-                         double, double *, int64_t, int64_t, bool, double) const noexcept {}
+                         double, double *, int64_t, int64_t, bool, double, int) const noexcept {}
 
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.
@@ -171,45 +178,82 @@ namespace fp {
 // CRTP base for elementwise operators. D provides
 //   template <class T> T prox1(T x, double gamma, int64_t widx) const noexcept;
 //   ElemDeriv deriv1(double x, double gamma, int64_t widx) const noexcept;
+// Per-entry evaluation of an elementwise operator D: the tie-aware form
+// (D::kTies, nonconvex maps) takes the tie rule and reports a tie; the plain
+// form ignores both.
+template <class D>
+struct ElemCall {
+    template <class T>
+    static T prox(const D &d, T x, double gamma, int64_t w, int tie, bool &tied) noexcept {
+        if constexpr (D::kTies) return d.template prox1<T>(x, gamma, w, tie, tied);
+        else return d.template prox1<T>(x, gamma, w);
+    }
+    static ElemDeriv deriv(const D &d, double x, double gamma, int64_t w, int tie) noexcept {
+        if constexpr (D::kTies) return d.deriv1(x, gamma, w, tie);
+        else return d.deriv1(x, gamma, w);
+    }
+};
+
+// CRTP base for elementwise operators. D provides
+//   template <class T> T prox1(T x, double gamma, int64_t widx) const noexcept;
+//   ElemDeriv deriv1(double x, double gamma, int64_t widx) const noexcept;
+// or, with static constexpr bool kTies = true, the same with an extra tie
+// rule argument (and a bool &tied out-argument for prox1).
 template <class D>
 struct ElemOp : fp_op {
+    static constexpr bool kTies = false;
     bool elementwise() const noexcept override { return true; }
+    bool has_ties() const noexcept override { return D::kTies; }
 
     template <class T>
-    void run_prox(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,
-                  int64_t widx, int64_t wstep, T *save, bool conj, double sigma) const noexcept {
+    int64_t run_prox(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,
+                     int64_t widx, int64_t wstep, T *save, bool conj, double sigma,
+                     int tie) const noexcept {
         const D &d = static_cast<const D &>(*this);
+        using C = ElemCall<D>;
+        int64_t ties = 0;
+        bool tied = false;
         if (conj) {
             for (int64_t i = 0; i < len; ++i) {
                 const double y = static_cast<double>(x[i * xs]);
                 const T t = static_cast<T>(y / sigma);
                 if (save) save[i] = t;
-                const double p = static_cast<double>(d.template prox1<T>(t, gamma, widx + i * wstep));
+                const double p = static_cast<double>(C::template prox<T>(d, t, gamma, widx + i * wstep, tie, tied));
+                ties += tied;
                 z[i * zs] = static_cast<T>(y - sigma * p);
             }
         } else if (save) {
             for (int64_t i = 0; i < len; ++i) {
                 const T xi = x[i * xs];
                 save[i] = xi;
-                z[i * zs] = d.template prox1<T>(xi, gamma, widx + i * wstep);
+                z[i * zs] = C::template prox<T>(d, xi, gamma, widx + i * wstep, tie, tied);
+                ties += tied;
             }
         } else if (xs == 1 && zs == 1) {
-            for (int64_t i = 0; i < len; ++i) z[i] = d.template prox1<T>(x[i], gamma, widx + i * wstep);
+            for (int64_t i = 0; i < len; ++i) {
+                z[i] = C::template prox<T>(d, x[i], gamma, widx + i * wstep, tie, tied);
+                ties += tied;
+            }
         } else {
-            for (int64_t i = 0; i < len; ++i)
-                z[i * zs] = d.template prox1<T>(x[i * xs], gamma, widx + i * wstep);
+            for (int64_t i = 0; i < len; ++i) {
+                z[i * zs] = C::template prox<T>(d, x[i * xs], gamma, widx + i * wstep, tie, tied);
+                ties += tied;
+            }
         }
+        return ties;
     }
 
     template <class T>
     void run_jvp(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,
                  double gamma, double dgamma, const double *dparams, int64_t widx, int64_t wstep,
-                 bool conj, double sigma) const noexcept {
+                 bool conj, double sigma, int tie) const noexcept {
         const D &d = static_cast<const D &>(*this);
+        using C = ElemCall<D>;
+        bool tied = false;
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
-            const ElemDeriv e = d.deriv1(xi, gamma, w);
+            const ElemDeriv e = C::deriv(d, xi, gamma, w, tie);
             const double dxi = dx ? static_cast<double>(dx[i * dxs]) : 0.0;
             double ptheta = 0.0;
             if (dparams)
@@ -218,7 +262,7 @@ struct ElemOp : fp_op {
                 dz[i * dzs] = static_cast<T>(e.j * dxi + e.dg * dgamma + ptheta);
             } else {
                 // out = y - sigma p(gamma = 1/sigma, t = y/sigma), dgamma reads as dsigma.
-                const double p = static_cast<double>(d.template prox1<double>(xi, gamma, w));
+                const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
                 const double dt = dxi / sigma - xi * dgamma / sigma;
                 const double dgam = -dgamma / (sigma * sigma);
                 const double dp = e.j * dt + e.dg * dgam + ptheta;
@@ -230,20 +274,22 @@ struct ElemOp : fp_op {
     template <class T>
     void run_vjp(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
                  double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
-                 double) const noexcept {
+                 double, int tie) const noexcept {
         const D &d = static_cast<const D &>(*this);
+        using C = ElemCall<D>;
+        bool tied = false;
         const int64_t P = this->nparams();
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
-            const ElemDeriv e = d.deriv1(xi, gamma, w);
+            const ElemDeriv e = C::deriv(d, xi, gamma, w, tie);
             const double gi = static_cast<double>(g[i * gs]);
             for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += e.pv[k] * gi;
             acc[P] += e.dg * gi;
             if (!conj) {
                 gx[i * gxs] = static_cast<T>(e.j * gi);
             } else {
-                const double p = static_cast<double>(d.template prox1<double>(xi, gamma, w));
+                const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
                 acc[P + 1] += -gi * p + e.j * gi * xi;
                 gx[i * gxs] = static_cast<T>(gi - e.j * gi);
             }
@@ -251,21 +297,21 @@ struct ElemOp : fp_op {
     }
 
 #define FP_ELEM_FORWARD(T)                                                                       \
-    void prox_run(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,           \
-                  int64_t widx, int64_t wstep, T *save, bool conj, double sigma)                 \
+    int64_t prox_run(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,        \
+                     int64_t widx, int64_t wstep, T *save, bool conj, double sigma, int tie)     \
         const noexcept override {                                                                \
-        run_prox<T>(x, xs, z, zs, len, gamma, widx, wstep, save, conj, sigma);                   \
+        return run_prox<T>(x, xs, z, zs, len, gamma, widx, wstep, save, conj, sigma, tie);       \
     }                                                                                            \
     void jvp_run(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,      \
                  double gamma, double dgamma, const double *dparams, int64_t widx,               \
-                 int64_t wstep, bool conj, double sigma) const noexcept override {               \
+                 int64_t wstep, bool conj, double sigma, int tie) const noexcept override {      \
         run_jvp<T>(xsave, dx, dxs, dz, dzs, len, gamma, dgamma, dparams, widx, wstep, conj,      \
-                   sigma);                                                                       \
+                   sigma, tie);                                                                  \
     }                                                                                            \
     void vjp_run(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,        \
                  double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,              \
-                 double sigma) const noexcept override {                                         \
-        run_vjp<T>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma);            \
+                 double sigma, int tie) const noexcept override {                                \
+        run_vjp<T>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie);       \
     }
     FP_ELEM_FORWARD(float)
     FP_ELEM_FORWARD(double)

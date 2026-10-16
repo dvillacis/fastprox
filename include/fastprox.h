@@ -155,6 +155,32 @@ FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op *
 FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
                             fp_op **out);
 
+/* Nonconvex pointwise maps (elementwise). The prox can be set-valued at a
+ * threshold: fp_options.tie picks the nonzero branch (FP_TIE_NONZERO, the
+ * default) or 0 (FP_TIE_ZERO), and fp_info.ties counts the entries that sat
+ * on a tie. fp_prox_conj applies the Moreau formula y - sigma prox(y/sigma),
+ * which for these functions is not the prox of the conjugate. */
+
+/* g(z) = lambda * sum_i w_i [z_i != 0] (hard thresholding at sqrt(2 gamma
+ * lambda w_i)). weights: NULL (w = 1), length 1, or the axis length.
+ * theta = w (the map is piecewise constant in it). */
+FP_API fp_status fp_op_l0(double lambda, const fp_array *weights, fp_op **out);
+
+/* g(z) = lambda * sum_i w_i |z_i|^q, 0 < q < 1 (closed form for q = 1/2 and
+ * 2/3, safeguarded Newton otherwise). weights as fp_op_l0. theta = w. */
+FP_API fp_status fp_op_lq(double lambda, double q, const fp_array *weights, fp_op **out);
+
+/* SCAD (Fan and Li) with threshold lambda and concavity a > 1; the prox
+ * needs a > 1 + gamma, else FP_EPARAM. theta = (lambda, a). */
+FP_API fp_status fp_op_scad(double lambda, double a, fp_op **out);
+
+/* MCP (Zhang) with threshold lambda and concavity b > 0; the prox needs
+ * b > gamma, else FP_EPARAM. theta = (lambda, b). */
+FP_API fp_status fp_op_mcp(double lambda, double b, fp_op **out);
+
+/* g(z) = lambda * sum_i log(1 + |z_i| / eps), eps > 0. theta = (lambda, eps). */
+FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out);
+
 /* Anisotropic TV of an image: g(z) = sum over the last ndim axes a of
  * w_a * (1D TV of z along a), for ndim = 2 or 3. It acts on the last ndim axes
  * and is batched over the others (fp_options.axis is ignored). axis_weights:

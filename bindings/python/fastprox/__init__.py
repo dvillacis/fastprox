@@ -32,12 +32,20 @@ __all__ = [
     "Info", "IterInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
     "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso",
+    "L0", "Lq", "SCAD", "MCP", "LogPenalty", "hard_threshold", "lq", "scad", "mcp", "prox_log",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
     "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
+_TIES = {"nonzero": 0, "zero": 1}
+
+
+def _tie(tie):
+    if tie not in _TIES:
+        raise ValueError(f"tie must be one of {sorted(_TIES)}")
+    return _TIES[tie]
 
 
 def default_threads() -> int:
@@ -485,6 +493,93 @@ class TVIso(_ImageOperator):
         return res
 
 
+class _Pointwise(Operator):
+    """Nonconvex pointwise map: ``prox`` and ``prox_conj`` take ``tie`` ("nonzero",
+    the default, or "zero"), the minimiser returned where the prox is
+    set-valued; with ``keep=True``, ``ctx.info.ties`` counts the entries that
+    sat on a tie. ``prox_conj`` is the Moreau formula y - sigma prox(y/sigma),
+    not the prox of the conjugate, for these nonconvex functions."""
+
+    def prox(self, x, gamma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
+             copy=False, tie="nonzero"):
+        return self._run_tie(x, gamma, axis, out, threads, keep, ctx, copy, False, tie)
+
+    def prox_conj(self, y, sigma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
+                  copy=False, tie="nonzero"):
+        return self._run_tie(y, sigma, axis, out, threads, keep, ctx, copy, True, tie)
+
+    def _run_tie(self, x, step, axis, out, threads, keep, ctx, copy, conj, tie):
+        t = _tie(tie)
+        x = _input(x, copy)
+        z = _output(x, out)
+        if not keep:
+            _C.prox(self._op, float(step), x, z, axis, threads, False, None, conj, tie=t)
+            return z
+        ctx = self._context(x, axis, threads, ctx)
+        ctx.info = Info(*_C.prox(self._op, float(step), x, z, axis, threads, True, ctx.ws, conj,
+                                 tie=t)[:3])
+        ctx.conj = conj
+        ctx.step = float(step)
+        return z, ctx
+
+
+class L0(_Pointwise):
+    """g(z) = lam * sum_i w_i [z_i != 0] (hard thresholding at sqrt(2 gamma lam
+    w_i)). Parameters: weights (the map is piecewise constant in them)."""
+
+    def __init__(self, lam=1.0, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.l0(float(lam), w))
+        self._layout = [("weights", 1 if w is None else w.size, w is None or w.size == 1)]
+
+
+class Lq(_Pointwise):
+    """g(z) = lam * sum_i w_i |z_i|^q with 0 < q < 1 (closed form for q = 1/2
+    and 2/3, safeguarded Newton otherwise). Parameters: weights;
+    ``grads.lam`` is also provided."""
+
+    def __init__(self, lam=1.0, q=0.5, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.lq(float(lam), float(q), w))
+        self.lam = float(lam)
+        self._w = np.ones(1) if w is None else w
+        self._layout = [("weights", self._w.size, w is None or w.size == 1)]
+
+    def _fields(self, gp):
+        f = super()._fields(gp)
+        f["lam"] = float(self._w @ gp) / self.lam if self.lam > 0 else float("nan")
+        return f
+
+
+class SCAD(_Pointwise):
+    """SCAD penalty (Fan and Li 2001) with threshold lam and concavity a > 1;
+    the prox needs a > 1 + gamma (ValueError otherwise). Parameters: lam, a."""
+
+    _layout = [("lam", 1, True), ("a", 1, True)]
+
+    def __init__(self, lam=1.0, a=3.7):
+        super().__init__(_C.scad(float(lam), float(a)))
+
+
+class MCP(_Pointwise):
+    """Minimax concave penalty (Zhang 2010) with threshold lam and concavity
+    b > 0; the prox needs b > gamma (ValueError otherwise). Parameters: lam, b."""
+
+    _layout = [("lam", 1, True), ("b", 1, True)]
+
+    def __init__(self, lam=1.0, b=3.0):
+        super().__init__(_C.mcp(float(lam), float(b)))
+
+
+class LogPenalty(_Pointwise):
+    """g(z) = lam * sum_i log(1 + |z_i| / eps), eps > 0. Parameters: lam, eps."""
+
+    _layout = [("lam", 1, True), ("eps", 1, True)]
+
+    def __init__(self, lam=1.0, eps=1.0):
+        super().__init__(_C.log_penalty(float(lam), float(eps)))
+
+
 # ---------------------------------------------------------------------------
 # One-shot functions
 # ---------------------------------------------------------------------------
@@ -584,3 +679,32 @@ def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_
     (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
     return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
                                       max_iter=max_iter, warm_start=warm_start)
+
+
+def hard_threshold(x, lam=1.0, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,
+                   threads=0, copy=False):
+    """prox of gamma * lam * sum_i w_i [z_i != 0]."""
+    return L0(lam, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy,
+                                 tie=tie)
+
+
+def lq(x, lam=1.0, q=0.5, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,
+       threads=0, copy=False):
+    """prox of gamma * lam * sum_i w_i |z_i|^q, 0 < q < 1."""
+    return Lq(lam, q, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy,
+                                    tie=tie)
+
+
+def scad(x, lam=1.0, a=3.7, gamma=1.0, *, out=None, threads=0, copy=False):
+    """prox of gamma * SCAD(lam, a); needs a > 1 + gamma."""
+    return SCAD(lam, a).prox(x, gamma, out=out, threads=threads, copy=copy)
+
+
+def mcp(x, lam=1.0, b=3.0, gamma=1.0, *, out=None, threads=0, copy=False):
+    """prox of gamma * MCP(lam, b); needs b > gamma."""
+    return MCP(lam, b).prox(x, gamma, out=out, threads=threads, copy=copy)
+
+
+def prox_log(x, lam=1.0, eps=1.0, gamma=1.0, *, tie="nonzero", out=None, threads=0, copy=False):
+    """prox of gamma * lam * sum_i log(1 + |z_i| / eps)."""
+    return LogPenalty(lam, eps).prox(x, gamma, out=out, threads=threads, copy=copy, tie=tie)

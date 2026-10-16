@@ -59,7 +59,8 @@ inline void scatter(const T *src, T *dst, int64_t s, int64_t n) noexcept {
 
 template <class T>
 fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, double gamma,
-                      bool conj, double sigma, fp_workspace &ws, int nt, bool keep) {
+                      bool conj, double sigma, fp_workspace &ws, int nt, bool keep, int tie = 0,
+                      int64_t *ties = nullptr) {
     const T *xd = reinterpret_cast<const T *>(x.data);
     T *od = reinterpret_cast<T *>(out.data);
     const int64_t *st[2] = {x.strides, out.strides};
@@ -70,14 +71,18 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         T *save = keep ? ws.xs<T>() : nullptr;
         if (p.numel < kParallelMin) nt = 1;
+        std::atomic<int64_t> nties{0};  // integer sums: the same for any order
         parallel_for(nt, nch, 1, [&](int, int64_t c0, int64_t c1) {
+            int64_t local = 0;
             p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
-                           op.prox_run(xd + off[0], xs, od + off[1], os, len, gamma, widx, wstep,
-                                       save ? save + pos : nullptr, conj, sigma);
+                           local += op.prox_run(xd + off[0], xs, od + off[1], os, len, gamma, widx,
+                                                wstep, save ? save + pos : nullptr, conj, sigma, tie);
                        });
+            nties.fetch_add(local, std::memory_order_relaxed);
         });
+        if (ties) *ties = nties.load();
         return FP_OK;
     }
 
@@ -155,7 +160,8 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
                            op.jvp_run(save + pos, dxd ? dxd + off[0] : nullptr, xs, dd + off[1],
-                                      os, len, gamma, dgamma, dparams, widx, wstep, conj, sigma);
+                                      os, len, gamma, dgamma, dparams, widx, wstep, conj, sigma,
+                                      ws.tie);
                        });
         });
         return FP_OK;
@@ -243,7 +249,7 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                            [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                                int64_t wstep) {
                                op.vjp_run(save + pos, gd + off[0], gs, xd + off[1], os, len, gamma,
-                                          a, widx, wstep, conj, sigma);
+                                          a, widx, wstep, conj, sigma, ws.tie);
                            });
             }
         });

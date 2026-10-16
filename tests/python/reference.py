@@ -102,3 +102,44 @@ def tv1d_kkt_residual(x, z, gamma, w):
         res = max(res, np.max(np.abs(ue[up] + lam[up]), initial=0.0))
         res = max(res, np.max(np.abs(ue[down] - lam[down]), initial=0.0))
     return res / scale
+
+
+def grid_prox(x, gamma, psi, n=4001, rounds=7):
+    """Minimiser of (z - x)^2 / 2 + gamma psi(z) for each entry of x, by a dense
+    grid on [-|x| - 1, |x| + 1] (plus 0) refined around the best point:
+    an independent check of the nonconvex maps, accurate to about
+    1e-12 relative after the refinement rounds."""
+    x = np.asarray(x, float)
+    flat = x.reshape(-1)
+    out = np.empty_like(flat)
+    for i, xi in enumerate(flat):
+        lo, hi = -abs(xi) - 1.0, abs(xi) + 1.0
+        best = 0.0
+        for r in range(rounds):
+            g = np.append(np.linspace(lo, hi, n), 0.0)
+            f = 0.5 * (g - xi) ** 2 + gamma * psi(g)
+            best = g[np.argmin(f)]
+            h = (hi - lo) / (n - 1)
+            lo, hi = best - 4 * h, best + 4 * h
+        out[i] = best
+    return out.reshape(x.shape)
+
+
+def nonconvex_objective(z, x, gamma, psi):
+    return 0.5 * (z - x) ** 2 + gamma * psi(z)
+
+
+def scad_psi(lam, a):
+    def psi(z):
+        t = np.abs(z)
+        return np.where(t <= lam, lam * t,
+                        np.where(t <= a * lam, (2 * a * lam * t - t * t - lam * lam) / (2 * (a - 1)),
+                                 (a + 1) * lam * lam / 2))
+    return psi
+
+
+def mcp_psi(lam, b):
+    def psi(z):
+        t = np.abs(z)
+        return np.where(t <= b * lam, lam * t - t * t / (2 * b), b * lam * lam / 2)
+    return psi

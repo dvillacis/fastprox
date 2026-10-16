@@ -208,6 +208,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     if (!op || !xa || !oa) return FP_EINVAL;
     if (!finite(step) || step < 0) return FP_EPARAM;
     const fp_options o = opt ? *opt : defaults();
+    if (o.tie != FP_TIE_NONZERO && o.tie != FP_TIE_ZERO) return FP_EINVAL;
     Arr x, out;
     if (fp_status s = to_arr(xa, x)) return s;
     if (fp_status s = to_arr(oa, out)) return s;
@@ -269,6 +270,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     }
     const double gamma = conj ? 1.0 / step : step;
     const double sigma = conj ? step : 0.0;
+    if (fp_status s = op->check_step(gamma)) return s;
     if (k) {
         fp_status s = x.dtype == FP_F32
                           ? image_prox_driver<float>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
@@ -283,14 +285,17 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         }
         return s;
     }
+    int64_t ties = 0;
     fp_status s = x.dtype == FP_F32
-                      ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep)
-                      : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep);
+                      ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties)
+                      : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties);
+    if (info) info->ties = ties;
     if (s == FP_OK && keep) {
         ws->valid = true;
         ws->conj = conj;
         ws->gamma = gamma;
         ws->sigma = sigma;
+        ws->tie = o.tie;
     }
     return s;
 }
@@ -559,6 +564,50 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
         Vec w;
         if (fp_status s = fp::read_vec(edge_weights, w)) return s;
         return fp::make_tv1d(std::move(w), method, out);
+    });
+}
+
+FP_API fp_status fp_op_l0(double lambda, const fp_array *weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        return fp::make_l0(lambda, std::move(w), out);
+    });
+}
+
+FP_API fp_status fp_op_lq(double lambda, double q, const fp_array *weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        return fp::make_lq(lambda, q, std::move(w), out);
+    });
+}
+
+FP_API fp_status fp_op_scad(double lambda, double a, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_scad(lambda, a, out);
+    });
+}
+
+FP_API fp_status fp_op_mcp(double lambda, double b, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_mcp(lambda, b, out);
+    });
+}
+
+FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_log(lambda, eps, out);
     });
 }
 

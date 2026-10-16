@@ -17,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `fp_workspace_set_deriv_tol` and `fp_workspace_deriv_info`: tolerance and iteration cap of the derivative solves, and the residual and iterations of the last one; in Python, `tol` and `max_iter` on `TVIso.jvp`/`vjp` and `ctx.deriv`.
 - `bench/compare_tv_iso.py`: time to reach a given accuracy against scikit-image's `denoise_tv_chambolle`. CVXPY fixtures for isotropic TV, `tests/python/test_tv_iso.py`, C tests with an independent certificate, and fuzzing.
 - `src/ops/image_util.hpp`: the fiber passes, geometry and fixed-order row sums shared by the image operators.
+- Nonconvex pointwise maps: ℓ0 (`fp_op_l0`, `L0`, `hard_threshold`), ℓq for 0 < q < 1 (`fp_op_lq`, `Lq`, `lq`; closed forms for q = 1/2 and 2/3, Newton from |x| otherwise), SCAD (`fp_op_scad`, `SCAD`, `scad`), MCP (`fp_op_mcp`, `MCP`, `mcp`) and the log penalty (`fp_op_log`, `LogPenalty`, `prox_log`), with derivatives in x, γ and their parameters. The SCAD and MCP maps are given for any step and need a > 1 + γ and b > γ (`FP_EPARAM` otherwise, through a new step check). Verified against minimisation on a refined grid, ties included; ℓ0, SCAD and MCP cost about 0.4–0.5 ns per entry, ℓq 12–13 ns in closed form and about 40 ns by Newton (Apple M5).
+- The tie rule: `fp_options.tie` (`FP_TIE_NONZERO` by default, `FP_TIE_ZERO`) and `fp_info.ties`, the number of entries exactly on a threshold, the same for any thread count; in Python `tie="nonzero"|"zero"` and `ctx.info.ties`. Derivatives follow the branch the rule picked.
+- `tests/python/test_nonconvex.py` (global minimisers on a refined grid, exact tie flags, closed forms against Newton, step conditions) and the nonconvex maps in `CASES`, the C derivative cases and the fuzzer. `CASES` entries may now be marked nonconvex, which skips the firm-nonexpansiveness property.
 
 ## [0.1.0] — 2026-10-16
 

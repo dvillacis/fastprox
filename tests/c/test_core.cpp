@@ -329,6 +329,15 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},
         {"tv1d_w", [=](fp_op **o) { return fp_op_tv1d(wm, FP_TV1D_AUTO, o); }, 0.6},
+        // Nonconvex maps (the conjugate's step 1/gamma keeps SCAD's a > 1 + 1/gamma
+        // and MCP's b > 1/gamma).
+        {"l0_w", [=](fp_op **o) { return fp_op_l0(0.3, wn, o); }, 0.8},
+        {"lq_half", [=](fp_op **o) { return fp_op_lq(0.4, 0.5, wn, o); }, 0.8},
+        {"lq_two_thirds", [](fp_op **o) { return fp_op_lq(0.4, 2.0 / 3.0, nullptr, o); }, 0.8},
+        {"lq_0.3", [](fp_op **o) { return fp_op_lq(0.4, 0.3, nullptr, o); }, 0.8},
+        {"scad", [](fp_op **o) { return fp_op_scad(0.5, 3.7, o); }, 0.8},
+        {"mcp", [](fp_op **o) { return fp_op_mcp(0.5, 3.0, o); }, 0.8},
+        {"log", [](fp_op **o) { return fp_op_log(0.8, 0.5, o); }, 0.8},
     };
 }
 
@@ -760,6 +769,101 @@ static void test_tv_aniso() {
     }
 }
 
+// ---------------------------------------------------------------- nonconvex maps
+// prox of op at one entry with a tie rule; ties reported through info.
+static double prox1_tie(fp_op *op, double gamma, double x, int tie, int64_t *ties) {
+    Arr xa({1}, {x}), za({1});
+    fp_options o = opts();
+    o.tie = tie;
+    fp_info info;
+    CHECK_OK(fp_prox(op, gamma, &xa.a, &za.a, &o, nullptr, &info));
+    if (ties) *ties = info.ties;
+    return za.data[0];
+}
+
+// The smallest double where the nonzero tie rule leaves a nonzero result:
+// the tie itself when the threshold is representable, else the first double
+// above it. Bisection on the representable values between lo (0) and hi.
+static double tie_point(fp_op *op, double gamma, double lo, double hi) {
+    for (int it = 0; it < 200 && std::nextafter(lo, hi) < hi; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        if (prox1_tie(op, gamma, mid, FP_TIE_NONZERO, nullptr) == 0.0) lo = mid;
+        else hi = mid;
+    }
+    return hi;
+}
+
+static void test_nonconvex() {
+    // l0 and lq: one double sits on the tie; the rules differ there only, and
+    // it is counted.
+    for (int kind = 0; kind < 3; ++kind) {
+        fp_op *op;
+        if (kind == 0) CHECK_OK(fp_op_l0(0.7, nullptr, &op));
+        else CHECK_OK(fp_op_lq(0.6, kind == 1 ? 0.5 : 0.4, nullptr, &op));
+        const double gamma = 0.9;
+        const double t = tie_point(op, gamma, 0.0, 10.0);
+        int64_t ties = -1, ties0 = -1;
+        const double zn = prox1_tie(op, gamma, t, FP_TIE_NONZERO, &ties);
+        const double zz = prox1_tie(op, gamma, t, FP_TIE_ZERO, &ties0);
+        CHECK(zn != 0.0 && ties == ties0);
+        // On a tie the rules differ and the entry is counted; otherwise both
+        // keep the nonzero branch and nothing is counted.
+        CHECK(ties == 1 ? zz == 0.0 : (ties == 0 && zz == zn));
+        const double below = std::nextafter(t, 0.0);
+        int64_t tb = -1;
+        CHECK(prox1_tie(op, gamma, below, FP_TIE_NONZERO, &tb) == 0.0 && tb == 0);
+        CHECK(prox1_tie(op, gamma, -t, FP_TIE_NONZERO, nullptr) == -zn);
+        // l0's tie is exactly at sqrt(2 gamma lambda), always representable.
+        if (kind == 0) CHECK(t == std::sqrt(2.0 * gamma * 0.7) && ties == 1);
+        // Tie counts over a batch, for any thread count.
+        Arr xb({4, 50000}), zb({4, 50000});
+        for (size_t i = 0; i < xb.data.size(); ++i) xb.data[i] = (i % 7 == 0) ? t : unif(-3, 3);
+        int64_t counts[3];
+        int ti = 0;
+        for (int nt : {1, 3, 8}) {
+            fp_options o = opts(-1, nt);
+            fp_info info;
+            CHECK_OK(fp_prox(op, gamma, &xb.a, &zb.a, &o, nullptr, &info));
+            counts[ti++] = info.ties;
+        }
+        CHECK(counts[0] == counts[1] && counts[0] == counts[2]);
+        CHECK(counts[0] == (ties == 1 ? int64_t((xb.data.size() + 6) / 7) : 0));
+        fp_op_free(op);
+    }
+
+    // SCAD and MCP need the concavity parameter large enough for the step.
+    fp_op *scad, *mcp;
+    CHECK_OK(fp_op_scad(0.5, 3.7, &scad));
+    CHECK_OK(fp_op_mcp(0.5, 3.0, &mcp));
+    Arr x({5}, {-2.0, -0.4, 0.0, 0.7, 3.0}), z({5});
+    CHECK_OK(fp_prox(scad, 2.6, &x.a, &z.a, nullptr, nullptr, nullptr));
+    CHECK(fp_prox(scad, 2.7, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+    CHECK(fp_prox_conj(scad, 1.0 / 2.7, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+    CHECK_OK(fp_prox(mcp, 2.9, &x.a, &z.a, nullptr, nullptr, nullptr));
+    CHECK(fp_prox(mcp, 3.0, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+    fp_op_free(scad);
+    fp_op_free(mcp);
+
+    // Parameters, the tie option and special values.
+    fp_op *bad = nullptr;
+    CHECK(fp_op_lq(1.0, 0.0, nullptr, &bad) == FP_EPARAM);
+    CHECK(fp_op_lq(1.0, 1.0, nullptr, &bad) == FP_EPARAM);
+    CHECK(fp_op_scad(1.0, 1.0, &bad) == FP_EPARAM);
+    CHECK(fp_op_mcp(1.0, 0.0, &bad) == FP_EPARAM);
+    CHECK(fp_op_log(1.0, 0.0, &bad) == FP_EPARAM);
+    CHECK(fp_op_l0(-1.0, nullptr, &bad) == FP_EPARAM);
+    fp_op *op;
+    CHECK_OK(fp_op_lq(0.5, 0.5, nullptr, &op));
+    fp_options o = opts();
+    o.tie = 7;
+    CHECK(fp_prox(op, 1.0, &x.a, &z.a, &o, nullptr, nullptr) == FP_EINVAL);
+    Arr xn({3}, {1.0, NAN, 4.0}), zn({3});
+    CHECK_OK(fp_prox(op, 1.0, &xn.a, &zn.a, nullptr, nullptr, nullptr));
+    CHECK(std::isnan(zn.data[1]) && !std::isnan(zn.data[0]) && !std::isnan(zn.data[2]));
+    CHECK(prox1_tie(op, 0.0, 0.3, FP_TIE_NONZERO, nullptr) == 0.3);  // gamma = 0: identity
+    fp_op_free(op);
+}
+
 // ---------------------------------------------------------------- isotropic TV
 // Independent certificate from the dual u of shape (k, *shape): |u_p| <= gamma,
 // u_a = 0 at the last entry along a, z = x - sum_a w_a D_a^T u_a, and
@@ -1149,6 +1253,7 @@ int main() {
     test_batching();
     test_tv_aniso();
     test_tv_iso();
+    test_nonconvex();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();
