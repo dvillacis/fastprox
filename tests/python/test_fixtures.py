@@ -7,7 +7,7 @@ import pathlib
 import numpy as np
 import pytest
 
-from fixture_cases import CASES
+from fixture_cases import CASES, IMAGE_CASES
 
 FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "reference.npz"
 
@@ -40,3 +40,35 @@ def test_matches_generic_solver(case):
     assert probs, f"no fixtures for {case}"
     worst = max(discrepancy(p) for p in probs)
     assert worst < 1e-8
+
+
+IMAGE_FIXTURES = FIXTURES.parent / "reference_images.npz"
+
+
+def load_images():
+    data = np.load(IMAGE_FIXTURES)
+    problems = {}
+    for key in data.files:
+        k, field = key.split("/", 1)
+        problems.setdefault(k, {"param": {}})
+        if field.startswith("param/"):
+            problems[k]["param"][field[6:]] = data[key]
+        else:
+            problems[k][field] = data[key]
+    return [problems[k] for k in sorted(problems)]
+
+
+IMAGE_PROBLEMS = load_images()
+
+
+@pytest.mark.parametrize("case", sorted(IMAGE_CASES))
+def test_image_operators_match_generic_solver(case):
+    probs = [p for p in IMAGE_PROBLEMS if str(p["case"]) == case]
+    assert probs, f"no fixtures for {case}"
+    worst = 0.0
+    for p in probs:
+        op = IMAGE_CASES[case][1](p["param"])
+        z, info = op.solve(p["x"], float(p["gamma"]), tol=1e-14, max_iter=100000)
+        assert info.converged
+        worst = max(worst, np.abs(z - p["z"]).max() / (1 + np.abs(p["x"]).max()))
+    assert worst < 1e-7

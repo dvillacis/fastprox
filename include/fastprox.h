@@ -155,6 +155,15 @@ FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op *
 FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
                             fp_op **out);
 
+/* Anisotropic TV of an image: g(z) = sum over the last ndim axes a of
+ * w_a * (1D TV of z along a), for ndim = 2 or 3. It acts on the last ndim axes
+ * and is batched over the others (fp_options.axis is ignored). axis_weights:
+ * NULL (w = 1), length 1, or ndim, all >= 0. theta = (w_0, ..., w_{ndim-1}).
+ * Iterative: fp_info reports the duality gap, and the call stops when the gap
+ * of every image is at most tol * ||x||^2 / 2 (FP_ENOTCONV after max_iter,
+ * with the last iterate written). Its dual is kept in the workspace. */
+FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out);
+
 FP_API void        fp_op_free(fp_op *op);
 FP_API int64_t     fp_op_nparams(const fp_op *op);
 FP_API const char *fp_op_name(const fp_op *op);
@@ -166,6 +175,16 @@ FP_API const char *fp_op_name(const fp_op *op);
 FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like,
                                      const fp_options *opt, fp_workspace **out);
 FP_API void      fp_workspace_free(fp_workspace *ws);
+
+/* Iterative image operators keep their dual in the workspace: an array of
+ * shape (ndim, *x.shape) whose blocks q_a are feasible for the conjugate of
+ * the term along axis a, with z = x - sum_a q_a at the solution. get copies
+ * out the dual of the last call (FP_EINVAL before any call); set seeds it,
+ * and the next call starts from it; with set_warm(ws, 1) every call starts
+ * from the dual left by the previous one. Other operators: FP_EINVAL. */
+FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out);
+FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual);
+FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on);
 
 /* ------------------------------------------------------------------------
  * Entry points. ws may be NULL unless opt->keep_structure is set; out may

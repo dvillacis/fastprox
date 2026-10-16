@@ -1,4 +1,6 @@
-# API reference (0.1)
+# API reference
+
+Covers 0.1 and, marked *since 0.2*, what has landed for 0.2 so far.
 
 fastprox computes proximal operators and projections,
 
@@ -34,6 +36,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | ℓ∞ norm | λ‖z‖∞ | `fp_op_linf(λ)` | `LInf`, `prox_linf` | (λ) |
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
+| Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 
 Notes:
 
@@ -54,6 +57,49 @@ Notes:
   is that of the structure the forward pass selected (see "Derivatives at
   kinks" below).
 
+### Image operators (*since 0.2*)
+
+Anisotropic TV acts on the **last** 2 or 3 axes of the array, an image or a
+volume, and is batched over the leading axes; `fp_options.axis` is ignored.
+Each image is solved independently, so a batch gives the same result as
+image-by-image calls, for any thread count.
+
+- **Algorithms.** Dual methods whose steps are exact 1D TV proxes along one
+  axis, applied to every fiber of the image:
+  - with two active axes, the accelerated dual block proximal gradient
+    method (Beck, *First-Order Methods in Optimization*, 2017, §12.5.4,
+    Thm 12.19; Chambolle and Pock, SMAI J. Comput. Math. 1, 2015). It
+    alternates rows and columns at an O(1/k²) rate;
+  - with three, the fast dual proximal gradient method for three blocks
+    (Beck, Algorithm 9).
+  An axis of extent 1 or weight 0 drops out. With a single active axis the
+  prox is the exact 1D TV, with gap 0.
+- **Gap and stopping.** Every iterate carries duals q_a, one per axis and
+  each feasible for its term, with x − z = Σₐ q_a. The duality gap of the prox
+  problem at (z, q) bounds the error: ‖z − z*‖² ≤ 2·gap. Each image stops
+  when its gap is at most `tol`·‖x‖²/2 (default 1e-6), or after `max_iter`
+  iterations (default 1000), in which case the call returns `FP_ENOTCONV`
+  with the last iterate written. `fp_info.gap` is the sum over the batch,
+  `fp_info.iters` the maximum.
+- **Polish.** At the end the solution's constant regions (edges with a jump
+  below a threshold set by the certified error) are identified. Their
+  closed-form values are then recomputed from the input and the signs of the
+  jumps on their boundary. The polished point is kept when its gap, with
+  the same dual, is no larger, which makes the output exact to rounding
+  when the regions are identified correctly.
+- **Warm starts.** The dual of the last call stays in the workspace, shaped
+  `(ndim, *x.shape)`. `fp_workspace_get_dual` copies it out, and
+  `fp_workspace_set_dual` seeds the next call with a dual, for example one
+  from a nearby problem. After `fp_workspace_set_warm(ws, 1)`, every call
+  starts from the dual of the previous call, as in a PDHG or bilevel loop.
+  Without either, each call starts from zero.
+- **Derivatives** are exact for the identified regions: averaging over each
+  region, with γ and weight terms from the jump signs on its boundary. They
+  cost O(n), with no linear solve.
+- **Special values.** A NaN anywhere in an image makes that whole image NaN
+  (the rest of the batch is unaffected); ±Inf is rejected with `FP_EINVAL`.
+  Images are limited to 2³¹ − 1 entries.
+
 ### Derivatives at kinks
 
 Every operator is piecewise smooth. At a point where two pieces meet,
@@ -72,6 +118,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | ℓ∞ norm | ‖x‖₁ = γλ | z = 0: 0 |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
+| anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
 
 The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
 x − γλ P(x/(γλ)), with P the projection onto the ℓ1 ball, so an entry kept
@@ -163,6 +210,17 @@ fp_workspace_free(ws);
   reads as σ.
 - A workspace is used by one call at a time; use one per thread.
 
+### Warm starts and the dual (*since 0.2*)
+
+```c
+fp_workspace_get_dual(ws, &q);       /* q: shape (ndim, *x.shape), any float dtype */
+fp_workspace_set_dual(ws, &q);       /* the next call starts from q */
+fp_workspace_set_warm(ws, 1);        /* every call starts from the previous dual */
+```
+
+Only image operators have a dual; for other operators these return
+`FP_EINVAL`, as does `get` before any call. `set` rejects non-finite values.
+
 ### Conjugates
 
 `fp_prox_conj(op, σ, y, out, ...)` computes prox_{σg*}(y) =
@@ -229,6 +287,14 @@ z, ctx = op.prox(x, 0.5, keep=True)             # ctx: saved structure
 dz = op.jvp(ctx, dx=np.ones_like(x), dgamma=0.0, dparams={"weights": 1.0})
 gx, grads = op.vjp(ctx, g=np.ones_like(x))      # grads.gamma, grads.weights, grads.params
 y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
+
+# Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
+img = np.random.default_rng(1).normal(size=(256, 256))
+z, info = fp.tv_aniso(img, gamma=0.2, tol=1e-6)   # info.gap, info.iters, info.converged, info.dual
+z, info = fp.tv_aniso(img, gamma=0.25, warm_start=info.dual)
+tv = fp.TVAniso(ndim=3, weights=[1.0, 1.0, 0.5])
+v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True)   # ctx.info is an IterInfo
+v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)
 ```
 
 - **Inputs** must be float32 or float64 NumPy arrays; other dtypes raise
@@ -242,6 +308,11 @@ y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
 - **`dparams`** is a flat vector of length `op.nparams` or a dict by
   parameter name; **`grads`** exposes the same names as attributes.
   `Soft` also reports `grads.lam`.
+- **Iterative operators** (`TVAniso`): `solve` and the one-shot function
+  return `(z, info)`, where `info` is an `IterInfo`: `gap`, `iters`, `ties`,
+  `converged` (False when `max_iter` was reached; this is not an error) and
+  `dual`. `prox` and `prox_conj` take `tol`, `max_iter`, `warm_start=dual` and
+  `warm=True` (start from the dual of the previous call on `ctx`).
 - **Errors** map to `ValueError` (invalid arguments, parameters, shapes),
   `TypeError` (dtype), `MemoryError` and `RuntimeError`. The GIL is released
   during every computation.
@@ -251,6 +322,6 @@ y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
 - Derivatives are an element of the generalized Jacobian, chosen by the
   structure of the forward pass (see "Kinks" above).
 - Exact operators report `gap = 0`; `iters` and `ties` are zero for every
-  0.1 operator.
+  0.1 operator. Iterative operators report their duality gap and iterations.
 - float32 inputs are computed with double-precision accumulators wherever a
   sum spans a row.

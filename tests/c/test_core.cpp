@@ -454,6 +454,312 @@ static void test_batching() {
     }
 }
 
+// ---------------------------------------------------------------- anisotropic TV
+// Independent certificate for z = prox of gamma sum_a w_a TV_a at x, from the
+// dual q of shape (k, *shape): every q_a must be feasible (its running sums
+// along each fiber stay within gamma w_a and end at 0), and then
+// P(z) - D(q) with D(q) = <x, s> - |s|^2 / 2, s = sum_a q_a, bounds the gap.
+struct AnisoCheck {
+    double gap = 0, feas = 0, dn2 = 0;
+};
+static AnisoCheck aniso_certificate(int k, const std::vector<int64_t> &shape, double gamma, const Vec &w,
+                                    const Vec &x, const Vec &z, const Vec &q) {
+    const int nd = static_cast<int>(shape.size());
+    std::vector<int64_t> L(shape.end() - k, shape.end()), S(static_cast<size_t>(k));
+    S[k - 1] = 1;
+    for (int a = k - 2; a >= 0; --a) S[a] = S[a + 1] * L[a + 1];
+    const int64_t Ni = S[0] * L[0], N = static_cast<int64_t>(x.size()), B = N / Ni;
+    (void)nd;
+    AnisoCheck r;
+    for (int64_t b = 0; b < B; ++b) {
+        const double *xb = x.data() + b * Ni, *zb = z.data() + b * Ni;
+        double P = 0, D = 0;
+        for (int a = 0; a < k; ++a) {
+            const double lam = gamma * w[w.size() == 1 ? 0 : a];
+            const double *qb = q.data() + a * N + b * Ni;
+            for (int64_t st = 0; st < Ni; ++st) {
+                if ((st / S[a]) % L[a] != 0) continue;
+                double p = 0;
+                for (int64_t i = 0; i < L[a]; ++i) {
+                    p += qb[st + i * S[a]];
+                    r.feas = std::max(r.feas, i + 1 < L[a] ? std::fabs(p) - lam : std::fabs(p));
+                }
+            }
+            for (int64_t i = 0; i < Ni; ++i)
+                if ((i / S[a]) % L[a] + 1 < L[a]) P += lam * std::fabs(zb[i + S[a]] - zb[i]);
+        }
+        for (int64_t i = 0; i < Ni; ++i) {
+            double s = 0;
+            for (int a = 0; a < k; ++a) s += q[a * N + b * Ni + i];
+            P += 0.5 * (zb[i] - xb[i]) * (zb[i] - xb[i]);
+            D += xb[i] * s - 0.5 * s * s;
+            r.dn2 += xb[i] * xb[i];
+        }
+        r.gap += P - D;
+    }
+    return r;
+}
+
+static Vec image_signal(int64_t n) {
+    Vec x = randn(n, 0.3);
+    for (int64_t i = 0; i < n; ++i)
+        if ((i / 5) % 3 == 0) x[i] += 1.0;
+    return x;
+}
+
+static fp_op *make_aniso(int k, Vec w) {
+    fp_op *op = nullptr;
+    Arr wa({static_cast<int64_t>(w.size())}, w);
+    CHECK_OK(fp_op_tv_aniso(k, &wa.a, &op));
+    return op;
+}
+
+static void test_tv_aniso() {
+    struct Case {
+        int k;
+        std::vector<int64_t> shape;
+        double gamma;
+        Vec w;
+    };
+    const std::vector<Case> cases = {
+        {2, {24, 31}, 0.5, {1.0}},           {2, {3, 17, 20}, 0.3, {1.0, 2.0}},
+        {3, {9, 10, 11}, 0.4, {1.0}},        {3, {2, 6, 7, 8}, 0.3, {0.5, 1.0, 1.5}},
+        {3, {6, 7, 8}, 0.4, {1.0, 0.0, 2.0}}, {2, {1, 40}, 0.4, {1.0}},
+        {3, {5, 1, 9}, 0.4, {1.0}},
+    };
+    for (const auto &c : cases) {
+        fp_op *op = make_aniso(c.k, c.w);
+        int64_t N = 1;
+        for (int64_t s : c.shape) N *= s;
+        Arr x(c.shape, image_signal(N));
+        std::vector<int64_t> qshape = {c.k};
+        qshape.insert(qshape.end(), c.shape.begin(), c.shape.end());
+
+        std::vector<Vec> outs;
+        std::vector<int> its;
+        for (int t : {1, 2, 8}) {
+            fp_options o = opts(-1, t);
+            o.tol = 1e-10;
+            o.max_iter = 100000;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            Arr z(c.shape), q(qshape);
+            fp_info info;
+            CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, &info));
+            CHECK_OK(fp_workspace_get_dual(ws, &q.a));
+            const AnisoCheck r = aniso_certificate(c.k, c.shape, c.gamma, c.w, x.data, z.data, q.data);
+            const double target = o.tol * 0.5 * r.dn2;
+            CHECK(r.feas <= 1e-12 * (1 + maxabs(x.data)));
+            CHECK(r.gap <= target * (1 + 1e-6) + 1e-13 * r.dn2);
+            CHECK(r.gap >= -1e-12 * r.dn2);
+            CHECK(info.gap <= target);
+            outs.push_back(z.data);
+            its.push_back(info.iters);
+            fp_workspace_free(ws);
+        }
+        CHECK(outs[0] == outs[1] && outs[0] == outs[2]);  // bit-identical for any thread count
+        CHECK(its[0] == its[1] && its[0] == its[2]);
+
+        // Each image of a batch is solved as if alone; in place gives the same.
+        const int64_t Ni = N / (c.shape.size() > static_cast<size_t>(c.k) ? c.shape[0] : 1);
+        if (c.shape.size() > static_cast<size_t>(c.k)) {
+            std::vector<int64_t> ishape(c.shape.begin() + 1, c.shape.end());
+            fp_options o = opts();
+            o.tol = 1e-10;
+            o.max_iter = 100000;
+            Arr zb(c.shape);
+            CHECK_OK(fp_prox(op, c.gamma, &x.a, &zb.a, &o, nullptr, nullptr));
+            for (int64_t b = 0; b < c.shape[0]; ++b) {
+                Arr xi(ishape, Vec(x.data.begin() + b * Ni, x.data.begin() + (b + 1) * Ni)), zi(ishape);
+                CHECK_OK(fp_prox(op, c.gamma, &xi.a, &zi.a, &o, nullptr, nullptr));
+                CHECK(std::equal(zi.data.begin(), zi.data.end(), zb.data.begin() + b * Ni));
+            }
+            Arr y(x);
+            CHECK_OK(fp_prox(op, c.gamma, &y.a, &y.a, &o, nullptr, nullptr));
+            CHECK(y.data == zb.data);
+        }
+
+        // Derivatives: finite differences in (x, gamma, w) and adjointness, for
+        // the prox and its conjugate.
+        for (bool conj : {false, true}) {
+            const double step = conj ? 1.0 / c.gamma : c.gamma;
+            fp_options o = opts(-1, 0, 1);
+            o.tol = 1e-14;
+            o.max_iter = 200000;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            Arr z(c.shape);
+            CHECK_OK(conj ? fp_prox_conj(op, step, &x.a, &z.a, &o, ws, nullptr)
+                          : fp_prox(op, step, &x.a, &z.a, &o, ws, nullptr));
+            Arr dx(c.shape, randn(N)), jv(c.shape), g(c.shape, randn(N)), gx(c.shape);
+            Vec wv(static_cast<size_t>(c.k));
+            for (int a = 0; a < c.k; ++a) wv[a] = c.w[c.w.size() == 1 ? 0 : a];
+            Arr dw({c.k}, randn(c.k)), gw({c.k});
+            for (int a = 0; a < c.k; ++a)
+                if (wv[a] == 0.0) dw.data[a] = 0.0;  // a zero weight cannot step below 0
+            const double dg = 0.3;
+            CHECK_OK(fp_jvp(op, ws, &dx.a, dg, &dw.a, &jv.a));
+            double gg = 0;
+            CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gw.a));
+            double lhs = 0, rhs = gg * dg;
+            for (int64_t i = 0; i < N; ++i) {
+                lhs += g.data[i] * jv.data[i];
+                rhs += gx.data[i] * dx.data[i];
+            }
+            for (int a = 0; a < c.k; ++a) rhs += gw.data[a] * dw.data[a];
+            CHECK(std::fabs(lhs - rhs) <= 1e-10 * (1 + std::fabs(lhs)));
+
+            const double h = 1e-6;
+            Vec zs[2];
+            for (int sgn = 0; sgn < 2; ++sgn) {
+                const double e = sgn ? -h : h;
+                Vec wp(wv), xp(x.data);
+                for (int a = 0; a < c.k; ++a) wp[a] += e * dw.data[a];
+                for (int64_t i = 0; i < N; ++i) xp[i] += e * dx.data[i];
+                fp_op *op2 = make_aniso(c.k, wp);
+                Arr xa(c.shape, xp), za(c.shape);
+                fp_options o2 = o;
+                o2.keep_structure = 0;
+                CHECK_OK(conj ? fp_prox_conj(op2, step + e * dg, &xa.a, &za.a, &o2, nullptr, nullptr)
+                              : fp_prox(op2, step + e * dg, &xa.a, &za.a, &o2, nullptr, nullptr));
+                zs[sgn] = za.data;
+                fp_op_free(op2);
+            }
+            double err = 0, scale = 1;
+            for (int64_t i = 0; i < N; ++i) {
+                const double fd = (zs[0][i] - zs[1][i]) / (2 * h);
+                err = std::max(err, std::fabs(fd - jv.data[i]));
+                scale = std::max(scale, std::fabs(fd));
+            }
+            CHECK(err <= 1e-6 * scale);
+            if (err > 1e-6 * scale) std::fprintf(stderr, "  tv_aniso k=%d fd error %.2e\n", c.k, err);
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+
+    // One active axis is exactly 1D TV along it; gamma = 0 and zero weights are
+    // the identity.
+    {
+        fp_op *op = make_aniso(2, {0.0, 1.0}), *tv;
+        CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+        Arr x({7, 30}, randn(210)), z({7, 30}), z1({7, 30});
+        fp_info info;
+        CHECK_OK(fp_prox(op, 0.6, &x.a, &z.a, nullptr, nullptr, &info));
+        CHECK_OK(fp_prox(tv, 0.6, &x.a, &z1.a, nullptr, nullptr, nullptr));
+        CHECK(z.data == z1.data && info.gap == 0.0 && info.iters == 0);
+        CHECK_OK(fp_prox(op, 0.0, &x.a, &z.a, nullptr, nullptr, nullptr));
+        CHECK(z.data == x.data);
+        fp_op_free(op);
+        fp_op_free(tv);
+        op = make_aniso(3, {0.0});
+        Arr x3({4, 5, 6}, randn(120)), z3({4, 5, 6});
+        CHECK_OK(fp_prox(op, 1.0, &x3.a, &z3.a, nullptr, nullptr, nullptr));
+        CHECK(z3.data == x3.data);
+        fp_op_free(op);
+    }
+
+    // Warm starts: the dual of a solve restarts it at 0 iterations; seeding
+    // with a nearby problem's dual takes fewer iterations than a cold start.
+    {
+        fp_op *op = make_aniso(2, {1.0});
+        Arr x({40, 50}, image_signal(2000)), z({40, 50}), q({2, 40, 50});
+        fp_options o = opts();
+        o.tol = 1e-10;
+        o.max_iter = 100000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK(fp_workspace_get_dual(ws, &q.a) == FP_EINVAL);  // no call yet
+        fp_info cold, warm;
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, &cold));
+        CHECK_OK(fp_workspace_set_warm(ws, 1));
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, &warm));
+        CHECK(warm.iters == 0 && cold.iters > 0);
+        CHECK_OK(fp_workspace_set_warm(ws, 0));
+        CHECK_OK(fp_workspace_get_dual(ws, &q.a));
+        Arr x2(x);
+        for (auto &v : x2.data) v += 0.01 * std::sin(v * 7);
+        fp_info c2, w2;
+        CHECK_OK(fp_prox(op, 0.5, &x2.a, &z.a, &o, ws, &c2));  // cold (warm is off, nothing seeded)
+        CHECK_OK(fp_workspace_set_dual(ws, &q.a));
+        CHECK_OK(fp_prox(op, 0.5, &x2.a, &z.a, &o, ws, &w2));
+        CHECK(w2.iters < c2.iters);
+        Arr bad({3, 40, 50});
+        CHECK(fp_workspace_set_dual(ws, &bad.a) == FP_ESHAPE);
+        q.data[5] = INFINITY;
+        CHECK(fp_workspace_set_dual(ws, &q.a) == FP_EINVAL);
+        // max_iter reached: FP_ENOTCONV with the last iterate written.
+        fp_options o1 = o;
+        o1.max_iter = 1;
+        o1.tol = 1e-14;
+        Arr z1({40, 50}, Vec(2000, NAN));
+        fp_info i1;
+        CHECK(fp_prox(op, 0.5, &x.a, &z1.a, &o1, ws, &i1) == FP_ENOTCONV);
+        CHECK(i1.iters == 1 && i1.gap > 0 && std::isfinite(maxabs(z1.data)));
+        fp_workspace_free(ws);
+
+        // Errors and special values.
+        fp_op *bad_op = nullptr;
+        CHECK(fp_op_tv_aniso(4, nullptr, &bad_op) == FP_EPARAM);
+        Arr wneg({2}, {1.0, -1.0}), w3({3}, {1.0, 1.0, 1.0});
+        CHECK(fp_op_tv_aniso(2, &wneg.a, &bad_op) == FP_EPARAM);
+        CHECK(fp_op_tv_aniso(2, &w3.a, &bad_op) == FP_ESHAPE);
+        Arr x1({50}, randn(50)), z1d({50});
+        CHECK(fp_prox(op, 0.5, &x1.a, &z1d.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        fp_options oneg = o;
+        oneg.tol = -1;
+        CHECK(fp_prox(op, 0.5, &x.a, &z.a, &oneg, nullptr, nullptr) == FP_EPARAM);
+        Arr xb({3, 10, 12}, randn(360)), zb({3, 10, 12});
+        xb.data[130] = NAN;  // in image 1
+        CHECK_OK(fp_prox(op, 0.5, &xb.a, &zb.a, nullptr, nullptr, nullptr));
+        CHECK(std::isnan(zb.data[120]) && std::isnan(zb.data[239]));
+        CHECK(!std::isnan(zb.data[0]) && !std::isnan(zb.data[240]));
+        xb.data[130] = INFINITY;
+        CHECK(fp_prox(op, 0.5, &xb.a, &zb.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+        fp_op *tv;
+        CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+        CHECK_OK(fp_workspace_create(tv, &x.a, nullptr, &ws));
+        CHECK(fp_workspace_get_dual(ws, &q.a) == FP_EINVAL);
+        CHECK(fp_workspace_set_warm(ws, 1) == FP_EINVAL);
+        fp_workspace_free(ws);
+        fp_op_free(tv);
+
+        // A strided image (every other column of a wider array) gives the
+        // same result as a contiguous copy.
+        Arr wide({40, 100}, randn(4000)), wz({40, 100});
+        Arr narrow({40, 50}), nz({40, 50});
+        for (int64_t i = 0; i < 40; ++i)
+            for (int64_t j = 0; j < 50; ++j) narrow.data[i * 50 + j] = wide.data[i * 100 + 2 * j];
+        const int64_t sstr[2] = {100, 2};
+        fp_array sv = wide.a, so = wz.a;
+        sv.shape = narrow.shape.data();
+        so.shape = narrow.shape.data();
+        sv.strides = sstr;
+        so.strides = sstr;
+        CHECK_OK(fp_prox(op, 0.5, &sv, &so, &o, nullptr, nullptr));
+        CHECK_OK(fp_prox(op, 0.5, &narrow.a, &nz.a, &o, nullptr, nullptr));
+        bool same = true;
+        for (int64_t i = 0; i < 40; ++i)
+            for (int64_t j = 0; j < 50; ++j) same = same && wz.data[i * 100 + 2 * j] == nz.data[i * 50 + j];
+        CHECK(same);
+
+        // float32 agrees with float64 to float32 accuracy.
+        std::vector<float> xf(x.data.begin(), x.data.end()), zf(2000);
+        fp_array xfa = x.a, zfa = x.a;
+        xfa.dtype = zfa.dtype = FP_F32;
+        xfa.data = xf.data();
+        zfa.data = zf.data();
+        fp_options of = o;
+        of.tol = 1e-8;
+        CHECK_OK(fp_prox(op, 0.5, &xfa, &zfa, &of, nullptr, nullptr));
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, nullptr, nullptr));
+        double df = 0;
+        for (int64_t i = 0; i < 2000; ++i) df = std::max(df, std::fabs(zf[i] - z.data[i]));
+        CHECK(df <= 1e-3 * (1 + maxabs(x.data)));
+        fp_op_free(op);
+    }
+}
+
 // ---------------------------------------------------------------- misc
 static void test_no_allocation() {
     fp_op *op;
@@ -474,6 +780,35 @@ static void test_no_allocation() {
     CHECK(g_allocs.load() == before);
     fp_workspace_free(ws);
     fp_op_free(op);
+
+    // Anisotropic TV: a single image (threads inside it) and a batch.
+    for (std::vector<int64_t> shape : {std::vector<int64_t>{120, 130}, std::vector<int64_t>{6, 30, 40}}) {
+        fp_op *iop;
+        CHECK_OK(fp_op_tv_aniso(2, nullptr, &iop));
+        int64_t N = 1;
+        for (int64_t s : shape) N *= s;
+        Arr ix(shape, randn(N)), iz(shape), ig(shape, randn(N)), igx(shape), iq({2});
+        std::vector<int64_t> qs = {2};
+        qs.insert(qs.end(), shape.begin(), shape.end());
+        Arr dual(qs);
+        fp_options io = opts(-1, 4, 1);
+        io.tol = 1e-8;
+        fp_workspace *iws;
+        CHECK_OK(fp_workspace_create(iop, &ix.a, &io, &iws));
+        CHECK_OK(fp_prox(iop, 0.5, &ix.a, &iz.a, &io, iws, nullptr));
+        CHECK_OK(fp_workspace_set_warm(iws, 1));
+        const long ibefore = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_prox(iop, 0.5, &ix.a, &iz.a, &io, iws, nullptr));
+            CHECK_OK(fp_jvp(iop, iws, &ix.a, 0.1, nullptr, &igx.a));
+            CHECK_OK(fp_vjp(iop, iws, &ig.a, &igx.a, &gg, &iq.a));
+            CHECK_OK(fp_workspace_get_dual(iws, &dual.a));
+            CHECK_OK(fp_workspace_set_dual(iws, &dual.a));
+        }
+        CHECK(g_allocs.load() == ibefore);
+        fp_workspace_free(iws);
+        fp_op_free(iop);
+    }
 }
 
 // Several callers at once: one of them gets the thread pool and the others
@@ -586,6 +921,7 @@ int main() {
     test_projections();
     test_derivatives();
     test_batching();
+    test_tv_aniso();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

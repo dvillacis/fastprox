@@ -143,6 +143,39 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
     w.keep = keep;
     const size_t item = x.itemsize();
     const bool elem = op.elementwise();
+    if (const int k = op.image_ndim()) {
+        // Images: the last k axes, `rows` of them.
+        const int64_t *ishape = x.shape + (x.ndim - k);
+        int64_t N = 1;
+        for (int d = 0; d < k; ++d) N *= ishape[d];
+        w.image_ndim = k;
+        w.image_numel = N;
+        w.n = N;
+        w.rows = N > 0 ? w.numel / N : 0;
+        if (w.numel == 0) return FP_OK;
+        const int64_t B = w.rows;
+        w.image_sets = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(B, w.nthreads)));
+        w.image_bytes = image_staging_bytes(N) + round64(op.image_bytes(ishape));
+        w.image_thread_bytes = round64(op.image_thread_bytes(ishape));
+        w.image_work.resize(w.image_bytes * static_cast<size_t>(w.image_sets) / sizeof(double) + 1);
+        w.image_thread.resize(w.image_thread_bytes * static_cast<size_t>(w.nthreads) / sizeof(double) + 1);
+        w.dual.resize(static_cast<size_t>(B) * static_cast<size_t>(k) * static_cast<size_t>(N));
+        w.image_gaps.resize(static_cast<size_t>(B));
+        w.image_iters.resize(static_cast<size_t>(B));
+        if (keep) {
+            const size_t bytes = static_cast<size_t>(w.numel) * item;
+            w.xsave.resize(bytes / sizeof(double) + 1);
+            w.zsave.resize(bytes / sizeof(double) + 1);
+            w.struct_bytes = round64(op.struct_bytes(ishape));
+            w.structure.resize(w.struct_bytes * static_cast<size_t>(B) / sizeof(double) + 1);
+            const int64_t P = op.nparams();
+            w.nblocks = reduction_blocks(B, P);
+            w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
+            w.tot.resize(static_cast<size_t>(P + 2));
+            w.dparams.resize(static_cast<size_t>(P) + 1);
+        }
+        return FP_OK;
+    }
     if (!elem && w.numel > 0) {
         w.thread_bytes = row_thread_bytes(op, w.n, item);
         w.scratch.resize(w.thread_bytes * static_cast<size_t>(w.nthreads) / sizeof(double) + 1);
@@ -200,8 +233,17 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         info->iters = 0;
         info->ties = 0;
     }
+    const int k = op->image_ndim();
+    if (k) {
+        if (x.ndim < k) return FP_ESHAPE;
+        if (!(o.tol >= 0.0) || !finite(o.tol) || o.max_iter < 1) return FP_EPARAM;
+    }
     if (x.numel() == 0) return FP_OK;
-    if (fp_status s = op->check_n(x.shape[axis])) return s;
+    if (k) {
+        if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
+    } else if (fp_status s = op->check_n(x.shape[axis])) {
+        return s;
+    }
 
     // sigma = 0 in the conjugate: prox_{0 g*} is the identity.
     if (conj && step == 0.0) {
@@ -225,6 +267,20 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     }
     const double gamma = conj ? 1.0 / step : step;
     const double sigma = conj ? step : 0.0;
+    if (k) {
+        fp_status s = x.dtype == FP_F32
+                          ? image_prox_driver<float>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
+                                                     o.tol, o.max_iter, info)
+                          : image_prox_driver<double>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
+                                                      o.tol, o.max_iter, info);
+        if ((s == FP_OK || s == FP_ENOTCONV) && keep) {
+            ws->valid = true;
+            ws->conj = conj;
+            ws->gamma = gamma;
+            ws->sigma = sigma;
+        }
+        return s;
+    }
     fp_status s = x.dtype == FP_F32
                       ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep)
                       : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep);
@@ -265,6 +321,9 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
     }
     if (ws->numel == 0) return FP_OK;
     const Arr *dxp = dxa ? &dx : nullptr;
+    if (op->image_ndim())
+        return ws->dtype == FP_F32 ? image_jvp_driver<float>(*op, *ws, dxp, dgamma, dp, out)
+                                   : image_jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
     return ws->dtype == FP_F32 ? jvp_driver<float>(*op, *ws, dxp, dgamma, dp, out)
                                : jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
 }
@@ -287,8 +346,13 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     double *tot = ws->tot.data();
     for (int64_t k = 0; k < P + 2; ++k) tot[k] = 0.0;
     if (ws->numel > 0) {
-        fp_status s = ws->dtype == FP_F32 ? vjp_driver<float>(*op, *ws, g, gx, tot)
-                                          : vjp_driver<double>(*op, *ws, g, gx, tot);
+        fp_status s;
+        if (op->image_ndim())
+            s = ws->dtype == FP_F32 ? image_vjp_driver<float>(*op, *ws, g, gx, tot)
+                                    : image_vjp_driver<double>(*op, *ws, g, gx, tot);
+        else
+            s = ws->dtype == FP_F32 ? vjp_driver<float>(*op, *ws, g, gx, tot)
+                                    : vjp_driver<double>(*op, *ws, g, gx, tot);
         if (s) return s;
     }
     if (ws->conj) {
@@ -297,6 +361,66 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     }
     if (ggamma) *ggamma = tot[P];
     if (gpa && P > 0) return write_exact(gpa, P, tot);
+    return FP_OK;
+}
+
+// Copies between the workspace dual (per image, k blocks of image_numel) and a
+// public array of shape (k, *x.shape). to_ws: from the array into the dual.
+template <class T>
+void dual_copy(fp_workspace &ws, const Arr &a, bool to_ws) noexcept {
+    const int k = ws.image_ndim;
+    const int64_t N = ws.image_numel;
+    for (int b = 0; b < k; ++b) {
+        Arr v;
+        v.dtype = a.dtype;
+        v.ndim = ws.ndim;
+        v.data = a.data + b * a.strides[0] * static_cast<int64_t>(sizeof(T));
+        for (int d = 0; d < ws.ndim; ++d) {
+            v.shape[d] = ws.shape[d];
+            v.strides[d] = a.strides[d + 1];
+        }
+        const int64_t *st[1] = {v.strides};
+        const ImagePlan p = make_image_plan(v.ndim, v.shape, k, 1, st);
+        T *base = reinterpret_cast<T *>(v.data);
+        for (int64_t r = 0; r < p.images; ++r) {
+            int64_t off[1];
+            p.offsets(r, off);
+            double *dual = ws.dual.data() + (static_cast<size_t>(r) * static_cast<size_t>(k) + static_cast<size_t>(b)) * static_cast<size_t>(N);
+            T *img = base + off[0];
+            if (to_ws)
+                p.for_each(0, [&](int64_t i, int64_t o) { dual[i] = static_cast<double>(img[o]); });
+            else
+                p.for_each(0, [&](int64_t i, int64_t o) { img[o] = static_cast<T>(dual[i]); });
+        }
+    }
+}
+
+fp_status dual_impl(fp_workspace *ws, const fp_array *aa, bool to_ws) {
+    if (!ws || !aa || !ws->op || !ws->image_ndim) return FP_EINVAL;
+    Arr a;
+    if (fp_status s = to_arr(aa, a)) return s;
+    if (aa->ndim != ws->ndim + 1 || a.shape[0] != ws->image_ndim) return FP_ESHAPE;
+    for (int d = 0; d < ws->ndim; ++d)
+        if (a.shape[d + 1] != ws->shape[d]) return FP_ESHAPE;
+    if (!to_ws && !ws->dual_valid) return FP_EINVAL;
+    if (ws->numel == 0) return FP_OK;
+    if (to_ws) {  // a seed must be finite
+        bool ok = true;
+        if (a.dtype == FP_F32) dual_copy<float>(*ws, a, true);
+        else dual_copy<double>(*ws, a, true);
+        const double *d = ws->dual.data();
+        const size_t m = ws->dual.size();
+        for (size_t i = 0; i < m; ++i) ok = ok && std::isfinite(d[i]);
+        if (!ok) {
+            ws->dual_valid = false;
+            return FP_EINVAL;
+        }
+        ws->dual_valid = true;
+        ws->seeded = true;
+        return FP_OK;
+    }
+    if (a.dtype == FP_F32) dual_copy<float>(*ws, a, false);
+    else dual_copy<double>(*ws, a, false);
     return FP_OK;
 }
 
@@ -436,6 +560,16 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
     });
 }
 
+FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(axis_weights, w)) return s;
+        return fp::make_tv_aniso(ndim, std::move(w), out);
+    });
+}
+
 FP_API void fp_op_free(fp_op *op) { delete op; }
 
 FP_API int64_t fp_op_nparams(const fp_op *op) { return op ? op->nparams() : -1; }
@@ -453,8 +587,13 @@ FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like, cons
         if (fp_status s = fp::to_arr(like, x)) return s;
         int axis;
         if (fp::norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
-        if (x.numel() > 0)
+        if (const int k = op->image_ndim()) {
+            if (x.ndim < k) return FP_ESHAPE;
+            if (x.numel() > 0)
+                if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
+        } else if (x.numel() > 0) {
             if (fp_status s = op->check_n(x.shape[axis])) return s;
+        }
         std::unique_ptr<fp_workspace> ws;
         if (fp_status s = fp::build_workspace(*op, x, axis, fp::resolve_threads(o),
                                               o.keep_structure != 0, ws))
@@ -465,6 +604,20 @@ FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like, cons
 }
 
 FP_API void fp_workspace_free(fp_workspace *ws) { delete ws; }
+
+FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out) {
+    return guard([&] { return fp::dual_impl(const_cast<fp_workspace *>(ws), out, false); });
+}
+
+FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual) {
+    return guard([&] { return fp::dual_impl(ws, dual, true); });
+}
+
+FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on) {
+    if (!ws || !ws->image_ndim) return FP_EINVAL;
+    ws->warm = on != 0;
+    return FP_OK;
+}
 
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x, fp_array *out,
                          const fp_options *opt, fp_workspace *ws, fp_info *info) {

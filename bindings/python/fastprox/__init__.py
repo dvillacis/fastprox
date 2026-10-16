@@ -5,7 +5,9 @@ Every operator computes
     prox_{gamma g}(x) = argmin_z  g(z) + ||z - x||^2 / (2 gamma)
 
 along one axis of a float32 or float64 array, batched over the other axes.
-Projections ignore ``gamma``. One-shot functions (``tv1d``, ``project_simplex``,
+Projections ignore ``gamma``. Image operators (``TVAniso``) act on the last
+two or three axes instead and are iterative: they report a duality gap.
+One-shot functions (``tv1d``, ``project_simplex``,
 ...) return the result; operator classes (``TV1D``, ``Simplex``, ...) also give
 Jacobian-vector and vector-Jacobian products for bilevel and implicit
 differentiation::
@@ -27,9 +29,9 @@ from . import _fastprox as _C
 __version__ = _C.version()
 
 __all__ = [
-    "Info", "Grads", "Context", "Operator",
+    "Info", "IterInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
-    "L1Ball", "LInf", "Isotonic", "TV1D",
+    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "tv_aniso",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
     "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
@@ -52,6 +54,20 @@ class Info(NamedTuple):
     gap: float
     iters: int
     ties: int
+
+
+class IterInfo(NamedTuple):
+    """Certificate of an iterative operator: the duality gap of the prox
+    problem at the returned point (summed over the batch; |z - z*|^2 <= 2 gap
+    per image), the iterations (the maximum over the batch), whether every
+    image reached the tolerance, and the dual of shape (ndim, *x.shape), which
+    ``warm_start=`` accepts back."""
+
+    gap: float
+    iters: int
+    ties: int
+    converged: bool
+    dual: np.ndarray | None
 
 
 class Grads:
@@ -79,6 +95,7 @@ class Context:
     ``vjp``. Pass it back as ``ctx=`` to reuse its memory in the next call."""
 
     __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info")
+    # info is an Info, or an IterInfo for iterative operators
 
     def __init__(self, op, ws, shape, dtype, axis, threads):
         self.op = op
@@ -160,14 +177,19 @@ class Operator:
         if not keep:
             _C.prox(self._op, float(step), x, z, axis, threads, False, None, conj)
             return z
+        ctx = self._context(x, axis, threads, ctx)
+        ctx.info = Info(*_C.prox(self._op, float(step), x, z, axis, threads, True, ctx.ws,
+                                 conj)[:3])
+        ctx.conj = conj
+        ctx.step = float(step)
+        return z, ctx
+
+    def _context(self, x, axis, threads, ctx):
         if ctx is None or ctx.op is not self or ctx.shape != x.shape or ctx.dtype != x.dtype \
                 or ctx.axis != axis or ctx.threads != threads:
             ctx = Context(self, _C.workspace(self._op, x, axis, threads, True), x.shape,
                           x.dtype, axis, threads)
-        ctx.info = Info(*_C.prox(self._op, float(step), x, z, axis, threads, True, ctx.ws, conj))
-        ctx.conj = conj
-        ctx.step = float(step)
-        return z, ctx
+        return ctx
 
     # -- derivatives -------------------------------------------------------
     def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None):
@@ -351,6 +373,76 @@ class TV1D(Operator):
                          weights is None or np.ndim(weights) == 0)]
 
 
+class TVAniso(Operator):
+    """Anisotropic total variation of 2D or 3D images, on the last ``ndim``
+    axes and batched over the others:
+
+        g(z) = sum_a w_a * (sum of |z_{p + e_a} - z_p| along image axis a)
+
+    Iterative (accelerated dual block methods with exact 1D TV steps): each
+    image stops when its duality gap is at most ``tol * ||x||^2 / 2``.
+    ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
+    ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
+    dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
+    the dual of the previous call on that context. Parameters: weights (one
+    per axis, or a scalar for all)."""
+
+    def __init__(self, ndim=2, weights=None):
+        if ndim not in (2, 3):
+            raise ValueError("ndim must be 2 or 3")
+        w = _vec(weights)
+        super().__init__(_C.tv_aniso(int(ndim), w))
+        self.ndim = int(ndim)
+        self._layout = [("weights", self.ndim, False)]  # one gradient per axis
+
+    def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
+             tol=1e-6, max_iter=1000, warm_start=None, warm=False):
+        """prox_{gamma g}(x); see the class docstring."""
+        z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, max_iter,
+                               warm_start, warm)
+        return (z, ctx) if keep else z
+
+    def prox_conj(self, y, sigma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
+                  tol=1e-6, max_iter=1000, warm_start=None, warm=False):
+        """prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y/sigma) (Moreau)."""
+        z, ctx, _ = self._iter(y, sigma, out, threads, keep, ctx, copy, True, tol, max_iter,
+                               warm_start, warm)
+        return (z, ctx) if keep else z
+
+    def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=1e-6, max_iter=1000,
+              warm_start=None, ctx=None, warm=False):
+        """``(z, info)`` with ``info`` an :class:`IterInfo` (gap and dual)."""
+        z, _, info = self._iter(x, gamma, out, threads, False, ctx, copy, False, tol, max_iter,
+                                warm_start, warm)
+        return z, info
+
+    def _iter(self, x, step, out, threads, keep, ctx, copy, conj, tol, max_iter, warm_start,
+              warm):
+        x = _input(x, copy)
+        if x.ndim < self.ndim:
+            raise ValueError(f"TVAniso(ndim={self.ndim}) needs arrays with at least "
+                             f"{self.ndim} dimensions")
+        z = _output(x, out)
+        if keep or ctx is not None:
+            ctx = self._context(x, -1, threads, ctx)
+            ws = ctx.ws
+        else:
+            ws = _C.workspace(self._op, x, -1, threads, False)
+        _C.set_warm(ws, bool(warm))
+        if warm_start is not None:
+            _C.set_dual(ws, np.asarray(warm_start, np.float64))
+        gap, iters, ties, conv = _C.prox(self._op, float(step), x, z, -1, threads, keep, ws, conj,
+                                         float(tol), int(max_iter))
+        dual = np.empty((self.ndim, *x.shape), np.float64)
+        _C.get_dual(ws, dual)
+        info = IterInfo(gap, iters, ties, conv, dual)
+        if ctx is not None:
+            ctx.info = info
+            ctx.conj = conj
+            ctx.step = float(step)
+        return z, ctx, info
+
+
 # ---------------------------------------------------------------------------
 # One-shot functions
 # ---------------------------------------------------------------------------
@@ -433,3 +525,12 @@ def tv1d(x, gamma=1.0, *, weights=None, axis=-1, method="auto", out=None, thread
         raise ValueError(f"method must be one of {sorted(_TV1D_METHODS)}")
     return _once(_C.tv1d(_vec(weights), _TV1D_METHODS[method]), x, gamma, axis, out, threads,
                  copy)
+
+
+def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
+             out=None, threads=0, copy=False):
+    """prox of gamma * sum_a w_a TV_a on the last ``ndim`` (2 or 3) axes.
+    Returns ``(z, info)``; ``info.gap`` certifies the result and ``info.dual``
+    can be passed back as ``warm_start``."""
+    return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
+                                        max_iter=max_iter, warm_start=warm_start)

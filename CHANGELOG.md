@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Anisotropic TV of 2D and 3D images (`fp_op_tv_aniso`, `fastprox.TVAniso`, `fastprox.tv_aniso`): the prox of γ Σₐ wₐ TVₐ on the last 2 or 3 axes, batched over the others. Dual methods with exact 1D TV steps along each axis: the accelerated dual block proximal gradient method for two axes (Beck 2017, §12.5.4; Chambolle and Pock 2015) and the fast dual proximal gradient method for three (Beck, Algorithm 9). It stops on a certified duality gap (`tol`·‖x‖²/2 per image, `FP_ENOTCONV` after `max_iter`), and recovers the solution's constant regions to polish it to the exact solution when they are identified. JVP and VJP in x, γ and the axis weights come from those regions in O(n). Bit-identical for any thread count, also inside a single image.
+- Image operators in the core: a third operator kind (`ImageOp`) acting on the last k axes, with its own driver, working sets in the workspace and threads inside an image when the batch is small.
+- Warm starts: `fp_workspace_get_dual`, `fp_workspace_set_dual` and `fp_workspace_set_warm`; in Python, `warm_start=` and `warm=True`, and `IterInfo` (gap, iters, ties, converged, dual) for iterative operators.
+- `fp_options.tol` and `max_iter` are now used (by the iterative operators), and the Python `prox` binding takes them.
+- CVXPY reference fixtures for images (`tests/fixtures/reference_images.npz`, `generate.py images`), Python tests (`tests/python/test_tv_aniso.py`), C tests with an independently recomputed certificate, and fuzzing of the new operator.
+- `bench/compare_tv_aniso.py`: time to reach a given accuracy against proxTV's 2D and 3D solvers.
+
 ## [0.1.0] — 2026-10-16
 
 First release, on PyPI (`pip install fastprox`). Changes since 0.1.0rc2:

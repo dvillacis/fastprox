@@ -296,4 +296,270 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
     return FP_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Image operators: the last k axes form an image, batched over the others.
+// ---------------------------------------------------------------------------
+
+// Walks the images of an array: image r starts at offset(r) in each array,
+// and its entries are visited in C order through the strides of the last k
+// axes (a contiguous image is one run).
+struct ImagePlan {
+    int k = 0;
+    int nlead = 0;
+    int narr = 0;
+    int64_t images = 1, numel = 1;
+    int64_t lshape[FP_MAX_NDIM] = {};
+    int64_t lstride[kMaxArr][FP_MAX_NDIM] = {};
+    int64_t ishape[3] = {1, 1, 1};
+    int64_t istride[kMaxArr][3] = {};
+    bool contiguous[kMaxArr] = {};
+
+    void offsets(int64_t r, int64_t *off) const noexcept {
+        for (int a = 0; a < narr; ++a) off[a] = 0;
+        for (int d = nlead - 1; d >= 0; --d) {
+            const int64_t i = r % lshape[d];
+            r /= lshape[d];
+            for (int a = 0; a < narr; ++a) off[a] += i * lstride[a][d];
+        }
+    }
+    // f(position in C order, element offset from the image start in array a).
+    template <class F>
+    void for_each(int a, F &&f) const {
+        int64_t pos = 0;
+        for (int64_t i = 0; i < ishape[0]; ++i)
+            for (int64_t j = 0; j < ishape[1]; ++j)
+                for (int64_t l = 0; l < ishape[2]; ++l)
+                    f(pos++, i * istride[a][0] + j * istride[a][1] + l * istride[a][2]);
+    }
+};
+
+inline ImagePlan make_image_plan(int ndim, const int64_t *shape, int k, int narr,
+                                 const int64_t *const *strides) noexcept {
+    ImagePlan p;
+    p.k = k;
+    p.narr = narr;
+    p.nlead = ndim - k;
+    for (int d = 0; d < p.nlead; ++d) {
+        p.lshape[d] = shape[d];
+        p.images *= shape[d];
+        for (int a = 0; a < narr; ++a) p.lstride[a][d] = strides[a][d];
+    }
+    // Pad the image to three axes in front (extent 1, stride 0).
+    for (int d = 0; d < k; ++d) {
+        const int e = 3 - k + d;
+        p.ishape[e] = shape[p.nlead + d];
+        p.numel *= p.ishape[e];
+        for (int a = 0; a < narr; ++a) p.istride[a][e] = strides[a][p.nlead + d];
+    }
+    for (int a = 0; a < narr; ++a) {
+        int64_t s = 1;
+        bool c = true;
+        for (int e = 2; e >= 0; --e) {
+            if (p.ishape[e] != 1 && p.istride[a][e] != s) c = false;
+            s *= p.ishape[e];
+        }
+        p.contiguous[a] = c;
+    }
+    return p;
+}
+
+// Driver-owned staging at the start of each image working set: three images
+// of T (input, output, and a third for the conjugate jvp), then the kernel's
+// own working set.
+inline size_t image_staging_bytes(int64_t numel) noexcept { return round64(3 * static_cast<size_t>(numel) * 8); }
+
+template <class T>
+fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, double gamma, bool conj,
+                            double sigma, fp_workspace &ws, int nt, bool keep, double tol,
+                            int max_iter, fp_info *info) {
+    const T *xd = reinterpret_cast<const T *>(x.data);
+    T *od = reinterpret_cast<T *>(out.data);
+    const int64_t *st[2] = {x.strides, out.strides};
+    const ImagePlan p = make_image_plan(x.ndim, x.shape, op.image_ndim(), 2, st);
+    const int64_t N = p.numel, B = p.images;
+    const int k = p.k;
+    const int64_t *ishape = x.shape + p.nlead;
+    const bool warm = ws.dual_valid && (ws.warm || ws.seeded);
+    const bool outer = B >= 2 && B >= nt;
+    if (outer) nt = std::min<int>(nt, ws.image_sets);
+    double *gaps = ws.image_gaps.data();
+    int *iters = reinterpret_cast<int *>(ws.image_iters.data());
+    std::atomic<int> err{0}, notconv{0};
+
+    auto solve = [&](int64_t r, char *set, char *threads, int inner) {
+        int64_t off[2];
+        p.offsets(r, off);
+        const T *xr = xd + off[0];
+        T *orow = od + off[1];
+        T *sin = reinterpret_cast<T *>(set);
+        T *sout = sin + N;
+        const T *in = xr;
+        if (keep || conj || !p.contiguous[0] || x.data == out.data) {
+            T *dst = keep ? ws.xs<T>() + r * N : sin;
+            if (conj)
+                p.for_each(0, [&](int64_t i, int64_t o) { dst[i] = static_cast<T>(static_cast<double>(xr[o]) / sigma); });
+            else
+                p.for_each(0, [&](int64_t i, int64_t o) { dst[i] = xr[o]; });
+            in = dst;
+        }
+        T *res = keep ? ws.zs<T>() + r * N : ((conj || !p.contiguous[1]) ? sout : orow);
+        ImageCall c;
+        c.shape = ishape;
+        c.numel = N;
+        c.gamma = gamma;
+        c.tol = tol;
+        c.max_iter = max_iter;
+        c.nt = inner;
+        c.work = set + image_staging_bytes(N);
+        c.thread_base = threads;
+        c.thread_bytes = ws.image_thread_bytes;
+        c.dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
+        c.warm = warm;
+        c.save = keep ? ws.image_struct(r) : nullptr;
+        if (int e = op.prox_image(in, res, c)) err.fetch_or(e, std::memory_order_relaxed);
+        if (!c.converged) notconv.store(1, std::memory_order_relaxed);
+        gaps[r] = conj ? c.gap * sigma * sigma : c.gap;
+        iters[r] = c.iters;
+        if (conj) {
+            // out = x - sigma z, reading x through its own strides.
+            int64_t pos = 0;
+            for (int64_t a0 = 0; a0 < p.ishape[0]; ++a0)
+                for (int64_t a1 = 0; a1 < p.ishape[1]; ++a1)
+                    for (int64_t a2 = 0; a2 < p.ishape[2]; ++a2, ++pos) {
+                        const int64_t ox = a0 * p.istride[0][0] + a1 * p.istride[0][1] + a2 * p.istride[0][2];
+                        const int64_t oo = a0 * p.istride[1][0] + a1 * p.istride[1][1] + a2 * p.istride[1][2];
+                        orow[oo] = static_cast<T>(static_cast<double>(xr[ox]) - sigma * static_cast<double>(res[pos]));
+                    }
+        } else if (res != orow) {
+            p.for_each(1, [&](int64_t i, int64_t o) { orow[o] = res[i]; });
+        }
+    };
+
+    if (outer) {
+        parallel_for(nt, B, 1, [&](int tid, int64_t r0, int64_t r1) {
+            for (int64_t r = r0; r < r1; ++r) solve(r, ws.image_set(tid), ws.image_threads(tid, 1), 1);
+        });
+    } else {
+        for (int64_t r = 0; r < B; ++r) solve(r, ws.image_set(0), ws.image_threads(0, nt), nt);
+    }
+
+    ws.seeded = false;
+    if (err.load()) return FP_EINVAL;
+    ws.dual_valid = true;
+    if (info) {
+        double g = 0.0;
+        int it = 0;
+        for (int64_t r = 0; r < B; ++r) {
+            g += gaps[r];
+            it = std::max(it, iters[r]);
+        }
+        info->gap = g;
+        info->iters = it;
+    }
+    return notconv.load() ? FP_ENOTCONV : FP_OK;
+}
+
+template <class T>
+fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, double dgamma,
+                           const double *dparams, const Arr &dout) {
+    const T *dxd = dx ? reinterpret_cast<const T *>(dx->data) : nullptr;
+    T *dd = reinterpret_cast<T *>(dout.data);
+    const int64_t *st[2] = {dx ? dx->strides : dout.strides, dout.strides};
+    const ImagePlan p = make_image_plan(dout.ndim, dout.shape, op.image_ndim(), 2, st);
+    const int64_t N = p.numel, B = p.images;
+    const int64_t *ishape = dout.shape + p.nlead;
+    const bool conj = ws.conj;
+    const double gamma = ws.gamma, sigma = ws.sigma;
+    const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
+    parallel_for(B >= 2 ? nt : 1, B, 1, [&](int tid, int64_t r0, int64_t r1) {
+        char *set = ws.image_set(tid);
+        T *a = reinterpret_cast<T *>(set);
+        T *b = a + N;
+        char *work = set + image_staging_bytes(N);
+        for (int64_t r = r0; r < r1; ++r) {
+            int64_t off[2];
+            p.offsets(r, off);
+            if (dxd) {
+                const T *src = dxd + off[0];
+                p.for_each(0, [&](int64_t i, int64_t o) { a[i] = src[o]; });
+            } else {
+                std::memset(a, 0, static_cast<size_t>(N) * sizeof(T));
+            }
+            const char *save = ws.image_struct(r);
+            if (!conj) {
+                op.jvp_image(save, a, b, ishape, gamma, dgamma, dparams, work);
+            } else {
+                // out = y - sigma z(1/sigma, y/sigma); dgamma reads as dsigma.
+                const T *xs = ws.xs<T>() + r * N;
+                const T *zs = ws.zs<T>() + r * N;
+                for (int64_t i = 0; i < N; ++i)
+                    b[i] = static_cast<T>(static_cast<double>(a[i]) / sigma -
+                                          static_cast<double>(xs[i]) * dgamma / sigma);
+                T *c = b + N;
+                op.jvp_image(save, b, c, ishape, gamma, -dgamma / (sigma * sigma), dparams, work);
+                for (int64_t i = 0; i < N; ++i)
+                    b[i] = static_cast<T>(static_cast<double>(a[i]) - dgamma * static_cast<double>(zs[i]) -
+                                          sigma * static_cast<double>(c[i]));
+            }
+            T *dst = dd + off[1];
+            p.for_each(1, [&](int64_t i, int64_t o) { dst[o] = b[i]; });
+        }
+    });
+    return FP_OK;
+}
+
+template <class T>
+fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, const Arr &gx,
+                           double *tot) {
+    const int64_t P = op.nparams();
+    const int64_t W = P + 2;
+    const int64_t nb = ws.nblocks;
+    double *acc = ws.acc.data();
+    std::fill(acc, acc + nb * W, 0.0);
+    const T *gd = reinterpret_cast<const T *>(g.data);
+    T *xd = reinterpret_cast<T *>(gx.data);
+    const int64_t *st[2] = {g.strides, gx.strides};
+    const ImagePlan p = make_image_plan(g.ndim, g.shape, op.image_ndim(), 2, st);
+    const int64_t N = p.numel, B = p.images;
+    const int64_t *ishape = g.shape + p.nlead;
+    const bool conj = ws.conj;
+    const double gamma = ws.gamma;
+    const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
+    parallel_for(nb >= 2 ? nt : 1, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
+        char *set = ws.image_set(tid);
+        T *a = reinterpret_cast<T *>(set);
+        T *b = a + N;
+        char *work = set + image_staging_bytes(N);
+        for (int64_t blk = b0; blk < b1; ++blk) {
+            double *ac = acc + blk * W;
+            for (int64_t r = B * blk / nb; r < B * (blk + 1) / nb; ++r) {
+                int64_t off[2];
+                p.offsets(r, off);
+                const T *src = gd + off[0];
+                p.for_each(0, [&](int64_t i, int64_t o) { a[i] = src[o]; });
+                const char *save = ws.image_struct(r);
+                op.vjp_image(save, a, b, ishape, gamma, ac, work);
+                if (conj) {
+                    const T *xs = ws.xs<T>() + r * N;
+                    const T *zs = ws.zs<T>() + r * N;
+                    double e = 0.0;
+                    for (int64_t i = 0; i < N; ++i) {
+                        const double gi = static_cast<double>(a[i]);
+                        const double jg = static_cast<double>(b[i]);
+                        e += -gi * static_cast<double>(zs[i]) + jg * static_cast<double>(xs[i]);
+                        b[i] = static_cast<T>(gi - jg);
+                    }
+                    ac[P + 1] += e;
+                }
+                T *dst = xd + off[1];
+                p.for_each(1, [&](int64_t i, int64_t o) { dst[o] = b[i]; });
+            }
+        }
+    });
+    for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
+    for (int64_t blk = 0; blk < nb; ++blk)
+        for (int64_t k = 0; k < W; ++k) tot[k] += acc[blk * W + k];
+    return FP_OK;
+}
+
 }  // namespace fp

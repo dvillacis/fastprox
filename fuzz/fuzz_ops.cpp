@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 13;
+    const int kind = b.u8() % 14;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -133,6 +133,13 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             fill(c.params[0], n);
             a0 = vec(c.params[0]);
             return fp_op_isotonic(b.u8() % 2 ? &a0 : nullptr, b.u8() % 2, &c.op);
+        case 13: {  // anisotropic TV on the last 2 or 3 axes
+            const int k = 2 + b.u8() % 2;
+            fill(c.params[0], b.u8() % 2 ? k : 1);
+            if (b.u8() % 4 == 0) c.params[0][0] = 0.0;
+            a0 = vec(c.params[0]);
+            return fp_op_tv_aniso(k, b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);
             if (b.u8() % 4 == 0)  // zero weights split the row
@@ -202,6 +209,7 @@ void run(const uint8_t *data, size_t size) {
     fp_options o;
     fp_options_init(&o);
     o.axis = axis;
+    o.max_iter = 30;  // iterative operators: keep cases fast (FP_ENOTCONV is fine)
 
     // Contiguous outputs for one and four threads.
     const fp_dtype dt = f32 ? FP_F32 : FP_F64;
@@ -219,13 +227,14 @@ void run(const uint8_t *data, size_t size) {
     o.threads = 4;
     const fp_status s4 = prox(c.op, gamma, &x, &o4, &o, nullptr, nullptr);
     if (!valid_status(s1) || s1 != s4) fail("prox status");
-    if (s1 == FP_OK && std::memcmp(z1.data(), z4.data(), static_cast<size_t>(numel) * item) != 0)
+    const bool written = s1 == FP_OK || s1 == FP_ENOTCONV;  // ENOTCONV still writes the iterate
+    if (written && std::memcmp(z1.data(), z4.data(), static_cast<size_t>(numel) * item) != 0)
         fail("thread count changed the result");
 
     // Finite moderate input, parameters and step: the output of a successful
     // prox is finite. Moderate means far from overflow in the array's dtype.
     const double big = f32 ? 1e12 : 1e100;
-    if (s1 == FP_OK && std::isfinite(gamma) && gamma < 1e6 && b.max_param < big &&
+    if (written && std::isfinite(gamma) && gamma < 1e6 && b.max_param < big &&
         !(conj && gamma < 1e-6)) {
         bool moderate = true;
         std::vector<double> xs;
@@ -281,7 +290,8 @@ void run(const uint8_t *data, size_t size) {
             double gg = 0;
             const fp_status vs = fp_vjp(c.op, ws, &x, &o4, &gg, P ? &gpa : nullptr);
             if (!valid_status(js) || !valid_status(vs)) fail("derivative status");
-            if (ps != FP_OK && (js == FP_OK || vs == FP_OK)) fail("derivative without structure");
+            if (ps != FP_OK && ps != FP_ENOTCONV && (js == FP_OK || vs == FP_OK))
+                fail("derivative without structure");
         }
         fp_workspace_free(ws);
     }
