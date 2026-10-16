@@ -119,6 +119,10 @@ CASES = {
                   lambda x, g, t: ref.tv1d_ball(x, t[0], t[1]), 1.0),
     "tv1d_ball_w": (lambda t: fp.TV1DBall(t[0], t[1:]), np.concatenate([[1.5], WE]),
                     lambda x, g, t: ref.tv1d_ball(x, t[0], t[1:]), 1.0),
+    # theta = weights.
+    "tv1d_l2": (lambda t: fp.TV1DL2(t), np.array([1.0]),
+                lambda x, g, t: ref.tv1d_l2(x, g, t[0]), 0.6),
+    "tv1d_l2_w": (lambda t: fp.TV1DL2(t), WE, lambda x, g, t: ref.tv1d_l2(x, g, t), 0.6),
     "l0": (lambda t: fp.L0(0.3, t), W,
            ("objective", lambda t: lambda z: 0.3 * t[0] * (z != 0)), 0.8, False),
     "lq_half": (lambda t: fp.Lq(0.4, 0.5, t), W,

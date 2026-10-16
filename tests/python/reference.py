@@ -272,3 +272,38 @@ def tv1d_ball(x, alpha, w=1.0):
         else:
             hi = mid
     return fp.tv1d(x, hi, weights=wv)
+
+
+def tv1d_l2(x, gamma, w=1.0):
+    """prox of gamma ||W D z||_2 with K = D^T W^2 D, by dense solves of
+    (mu I + K) v = mu (x - z_inf) in an orthonormal basis B of the range of K
+    (from an SVD of W D; there B^T K B is positive definite, so the solves stay
+    accurate as mu -> 0; z_inf is the projection of x onto the null space) and
+    bisection on log mu for ||W D z|| / mu = gamma. The inside test uses the
+    minimal-norm dual from the same SVD."""
+    n = x.size
+    if n == 1 or gamma == 0:
+        return x.astype(float).copy()
+    wd = np.broadcast_to(np.asarray(w, float), (n - 1,))[:, None] * np.diff(np.eye(n), axis=0)
+    _, sv, vt = np.linalg.svd(wd, full_matrices=False)
+    B = vt[sv > 1e-12 * sv.max()].T if sv.max() > 0 else np.zeros((n, 0))
+    xr = B.T @ x
+    zinf = x - B @ xr
+    Kr = B.T @ wd.T @ wd @ B
+    if np.linalg.norm(np.linalg.lstsq(wd.T, B @ xr, rcond=None)[0]) <= gamma:
+        return zinf
+    v = lambda mu: B @ np.linalg.solve(mu * np.eye(B.shape[1]) + Kr, xr)  # (z - z_inf) / mu
+    z = lambda mu: zinf + mu * v(mu)
+    rho = lambda mu: np.linalg.norm(wd @ v(mu))
+    lo, hi = -200.0, 1.0
+    while rho(np.exp(hi)) > gamma:
+        hi += 2.0
+    for _ in range(300):
+        mid = 0.5 * (lo + hi)
+        if mid in (lo, hi):
+            break
+        if rho(np.exp(mid)) > gamma:
+            lo = mid
+        else:
+            hi = mid
+    return z(np.exp(0.5 * (lo + hi)))

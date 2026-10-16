@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 30;
+    const int kind = b.u8() % 31;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -237,6 +237,14 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
                     if (b.u8() % 3 == 0) w = 0.0;
             a0 = vec(c.params[0]);
             return fp_op_tv1d_ball(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 29: {
+            fill(c.params[0], pick == 1 ? 1 : n - 1);
+            if (b.u8() % 4 == 0)
+                for (auto &w : c.params[0])
+                    if (b.u8() % 3 == 0) w = 0.0;
+            a0 = vec(c.params[0]);
+            return fp_op_tv1d_l2(b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);

@@ -704,6 +704,16 @@ FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_
     });
 }
 
+FP_API fp_status fp_op_tv1d_l2(const fp_array *edge_weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(edge_weights, w)) return s;
+        return fp::make_tv1d_l2(std::move(w), out);
+    });
+}
+
 FP_API fp_status fp_op_l0(double lambda, const fp_array *weights, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;

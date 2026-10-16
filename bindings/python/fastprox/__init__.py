@@ -42,7 +42,7 @@ __all__ = [
     "LogBarrier", "L1Box", "SOC", "GroupHuber", "GroupSCAD", "GroupMCP", "prox_log_barrier",
     "prox_l1_box", "project_soc", "group_huber", "group_scad", "group_mcp",
     "TreeL2", "tree_soft_threshold", "sparse_group_soft_threshold", "TV1DBall",
-    "project_tv1d_ball",
+    "project_tv1d_ball", "TV1DL2", "tv1d_l2",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -576,6 +576,18 @@ class TV1DBall(Operator):
                         ("weights", 1 if w is None else w.size, w is None or w.size == 1)]
 
 
+class TV1DL2(Operator):
+    """g(z) = ||W D z||_2 = sqrt(sum_i w_i^2 (z_{i+1} - z_i)^2) along the axis:
+    1D TV with the l2 norm of the differences (Newton on the dual trust-region
+    problem, to rounding). Weights as in TV1D. Parameters: weights."""
+
+    def __init__(self, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.tv1d_l2(w))
+        self._layout = [("weights", 1 if w is None else w.size,
+                         weights is None or np.ndim(weights) == 0)]
+
+
 class _ImageOperator(Operator):
     """Iterative operator on the last ``ndim`` axes (see :class:`TVAniso`)."""
 
@@ -879,6 +891,11 @@ def tv1d(x, gamma=1.0, *, weights=None, axis=-1, method="auto", out=None, thread
         raise ValueError(f"method must be one of {sorted(_TV1D_METHODS)}")
     return _once(_C.tv1d(_vec(weights), _TV1D_METHODS[method]), x, gamma, axis, out, threads,
                  copy)
+
+
+def tv1d_l2(x, gamma=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=False):
+    """prox of gamma * sqrt(sum_i w_i^2 (z_{i+1} - z_i)^2) along the axis."""
+    return _once(_C.tv1d_l2(_vec(weights)), x, gamma, axis, out, threads, copy)
 
 
 def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,

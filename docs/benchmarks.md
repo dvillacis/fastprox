@@ -615,3 +615,48 @@ marked).
   The first version started from the secant through γ_max. It landed right of
   the root and bisected down over several orders of magnitude, taking 13–27
   solves (80–460 ns per entry).
+
+## 2026-10-17, Apple M5 Pro: 1D TV with ℓ2 of differences
+
+`bench/compare_external.py` (new section), single thread, ns per entry, median
+over fresh inputs, solvers alternating. Each input is scaled so that the prox
+of λ‖Dz‖₂ becomes constant exactly at λ = 1, so λ is the fraction of that
+threshold. proxTV's `more_TV2` is Moré–Sorensen on the same dual problem; it
+stops at an internal tolerance and an iteration cap.
+
+| Signal, λ | fastprox 10³ | proxTV 10³ | fastprox 10⁵ | proxTV 10⁵ | fastprox 10⁶ | proxTV 10⁶ |
+| --- | --- | --- | --- | --- | --- | --- |
+| blocks, 0.1 | 51.5 | 67.1 | 68.4 | 85.8 | 68.9 | 86.8 |
+| blocks, 0.5 | 52.0 | 64.3 | 52.6 | 64.8 | 51.2 | 65.2 |
+| blocks, 0.9 | 37.2 | 54.0 | 34.6 | 44.4 | 35.2 | 1069 (cap) |
+| random walk, 0.001 | 57.7 | 59.5 | 51.9 | 54.3 | 51.2 | 54.7 |
+| random walk, 0.1 | 52.0 | 54.9 | 50.6 | 54.3 | 44.8 | 54.8 |
+| random walk, 0.5 | 45.9 | 58.8 | 42.7 | 45.1 | 34.6 | 1071 (cap) |
+| random walk, 0.9 | 35.0 | 44.0 | 34.9 | 34.6 | 29.4 | 1076 (cap) |
+| white noise, 0.001 | 43.1 | 54.5 | 67.6 | 75.8 | 77.6 | 88.3 |
+| white noise, 0.1 | 72.5 | 92.5 | 77.0 | 86.1 | 77.3 | 87.0 |
+| white noise, 0.5 | 63.0 | 70.0 | 53.5 | 66.4 | 60.1 | 75.8 |
+| white noise, 0.9 | 44.2 | 54.3 | 43.0 | 44.4 | 43.2 | 55.8 |
+
+- **Speed.** fastprox is 1.0–1.3× faster where proxTV converges. On blocks at
+  λ = 0.001 proxTV's result differs from fastprox's beyond 10⁻⁹ on the check
+  input, so the script excludes it.
+- **proxTV's failures.** The rows marked "cap" ran to proxTV's iteration cap,
+  about 1070 ns per entry, and returned a wrong result. On unscaled inputs, where λ
+  is 10⁵–10¹² for random walks, this happened from n = 10⁴ on in most
+  settings, and once at n = 10³ (random walk, λ = 0.9 of the threshold). There
+  proxTV differed from fastprox by 0.49. The dual point built from each
+  answer settles it. fastprox's is feasible to 7·10⁻¹⁶ with a relative gap of 2·10⁻¹⁷;
+  proxTV's violates the ball constraint by a factor of 2.6 (relative gap
+  0.13). fastprox's cost does not depend on the scale.
+- **Where the time goes.** Newton from μ = 0 takes 2–8 steps (5–17 tridiagonal
+  solves per row in tests). Each step is one factorisation and two
+  substitutions, about 7 ns per entry. Most of that is the dependent division in the pivot
+  recurrence, which is a continued fraction. Fusing the factorisation with the forward substitution, and
+  the norms with the backward substitution, saved 3–8% on the rows run with
+  the same settings before and after.
+- **Stopping.** The first version stopped when the Newton step fell below
+  4ε·μ. Rounding noise in ‖u(μ)‖ then kept the steps above that bound, and
+  bisection took over for up to 40 iterations after convergence. The version kept stops once a step is below 10⁻⁷·μ, after taking it: the next error is
+  below rounding at Newton's quadratic rate. Against a 50-digit mpmath
+  bisection, the error stayed below 4.3·10⁻¹⁶ relative to max |x|.
