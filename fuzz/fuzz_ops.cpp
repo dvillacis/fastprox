@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 14;
+    const int kind = b.u8() % 15;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -139,6 +139,13 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             if (b.u8() % 4 == 0) c.params[0][0] = 0.0;
             a0 = vec(c.params[0]);
             return fp_op_tv_aniso(k, b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 14: {  // isotropic TV on the last 2 or 3 axes
+            const int k = 2 + b.u8() % 2;
+            fill(c.params[0], b.u8() % 2 ? k : 1);
+            if (b.u8() % 4 == 0) c.params[0][0] = 0.0;
+            a0 = vec(c.params[0]);
+            return fp_op_tv_iso(k, b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);

@@ -760,6 +760,230 @@ static void test_tv_aniso() {
     }
 }
 
+// ---------------------------------------------------------------- isotropic TV
+// Independent certificate from the dual u of shape (k, *shape): |u_p| <= gamma,
+// u_a = 0 at the last entry along a, z = x - sum_a w_a D_a^T u_a, and
+// gap = sum_p gamma |g_p| - <g_p, u_p> with g = W D z.
+static void iso_certificate(int k, const std::vector<int64_t> &shape, double gamma, const Vec &w, const Vec &x,
+                            const Vec &z, const Vec &u, double tol, int iters_checked) {
+    std::vector<int64_t> L(shape.end() - k, shape.end()), S(static_cast<size_t>(k));
+    S[k - 1] = 1;
+    for (int a = k - 2; a >= 0; --a) S[a] = S[a + 1] * L[a + 1];
+    const int64_t Ni = S[0] * L[0], N = static_cast<int64_t>(x.size());
+    double feas = 0, resid = 0;
+    for (int64_t b = 0; b < N / Ni; ++b) {
+        double gap = 0, dn2 = 0;
+        for (int64_t p = 0; p < Ni; ++p) {
+            const int64_t P = b * Ni + p;
+            double nu = 0, ng = 0, dot = 0, zz = x[P];
+            for (int a = 0; a < k; ++a) {
+                const double wa = w[w.size() == 1 ? 0 : a];
+                const double ua = u[a * N + P];
+                const bool nx = (p / S[a]) % L[a] + 1 < L[a], pv = (p / S[a]) % L[a] > 0;
+                nu += ua * ua;
+                zz += wa * (ua - (pv ? u[a * N + P - S[a]] : 0.0));
+                const double ga = nx ? wa * (z[P + S[a]] - z[P]) : 0.0;
+                ng += ga * ga;
+                dot += ga * ua;
+                if (!nx) feas = std::max(feas, std::fabs(ua));
+            }
+            feas = std::max(feas, std::sqrt(nu) - gamma);
+            resid = std::max(resid, std::fabs(zz - z[P]));
+            gap += gamma * std::sqrt(ng) - dot;
+            dn2 += x[P] * x[P];
+        }
+        CHECK(gap <= tol * 0.5 * dn2 * (1 + 1e-6) + 1e-13 * dn2);
+        CHECK(gap >= -1e-12 * dn2);
+    }
+    CHECK(feas <= 1e-12 * (1 + gamma));
+    CHECK(resid <= 1e-12 * (1 + maxabs(x)));
+    (void)iters_checked;
+}
+
+static fp_op *make_iso(int k, Vec w) {
+    fp_op *op = nullptr;
+    Arr wa({static_cast<int64_t>(w.size())}, w);
+    CHECK_OK(fp_op_tv_iso(k, &wa.a, &op));
+    return op;
+}
+
+static void test_tv_iso() {
+    struct Case {
+        int k;
+        std::vector<int64_t> shape, dshape;  // dshape: smaller, for the finite differences
+        double gamma;
+        Vec w;
+    };
+    const std::vector<Case> cases = {
+        {2, {18, 23}, {8, 9}, 0.4, {1.0}},
+        {2, {3, 11, 13}, {2, 6, 7}, 0.3, {0.7, 1.3}},
+        {3, {6, 7, 8}, {4, 4, 5}, 0.3, {1.0, 0.8, 1.2}},
+        {3, {6, 7, 8}, {4, 4, 5}, 0.3, {1.0, 0.0, 1.0}},
+        {2, {1, 30}, {1, 30}, 0.5, {1.0}},
+    };
+    for (const auto &c : cases) {
+        fp_op *op = make_iso(c.k, c.w);
+        int64_t N = 1;
+        for (int64_t s : c.shape) N *= s;
+        Arr x(c.shape, image_signal(N));
+        std::vector<int64_t> qshape = {c.k};
+        qshape.insert(qshape.end(), c.shape.begin(), c.shape.end());
+        std::vector<Vec> outs;
+        for (int t : {1, 2, 8}) {
+            fp_options o = opts(-1, t);
+            o.tol = 1e-9;
+            o.max_iter = 200000;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            Arr z(c.shape), q(qshape);
+            fp_info info;
+            CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, &info));
+            CHECK_OK(fp_workspace_get_dual(ws, &q.a));
+            iso_certificate(c.k, c.shape, c.gamma, c.w, x.data, z.data, q.data, o.tol, info.iters);
+            outs.push_back(z.data);
+            fp_workspace_free(ws);
+        }
+        CHECK(outs[0] == outs[1] && outs[0] == outs[2]);
+
+        int64_t Nd = 1;
+        for (int64_t s : c.dshape) Nd *= s;
+        Arr xd(c.dshape, image_signal(Nd));
+        for (bool conj : {false, true}) {
+            const double step = conj ? 1.0 / c.gamma : c.gamma;
+            fp_options o = opts(-1, 0, 1);
+            o.tol = 1e-13;  // FISTA needs ~1/sqrt(tol) iterations
+            o.max_iter = 3000000;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &xd.a, &o, &ws));
+            Arr z(c.dshape);
+            CHECK_OK(conj ? fp_prox_conj(op, step, &xd.a, &z.a, &o, ws, nullptr)
+                          : fp_prox(op, step, &xd.a, &z.a, &o, ws, nullptr));
+            Arr dx(c.dshape, randn(Nd)), jv(c.dshape), g(c.dshape, randn(Nd)), gx(c.dshape);
+            Vec wv(static_cast<size_t>(c.k));
+            for (int a = 0; a < c.k; ++a) wv[a] = c.w[c.w.size() == 1 ? 0 : a];
+            Arr dw({c.k}, randn(c.k)), gw({c.k});
+            for (int a = 0; a < c.k; ++a)
+                if (wv[a] == 0.0) dw.data[a] = 0.0;
+            const double dg = 0.2;
+            CHECK_OK(fp_jvp(op, ws, &dx.a, dg, &dw.a, &jv.a));
+            double res = -1;
+            int its = -1;
+            CHECK_OK(fp_workspace_deriv_info(ws, &res, &its));
+            CHECK(res <= 1e-10 && its >= 0);
+            double gg = 0;
+            CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gw.a));
+            double lhs = 0, rhs = gg * dg;
+            for (int64_t i = 0; i < Nd; ++i) {
+                lhs += g.data[i] * jv.data[i];
+                rhs += gx.data[i] * dx.data[i];
+            }
+            for (int a = 0; a < c.k; ++a) rhs += gw.data[a] * dw.data[a];
+            CHECK(std::fabs(lhs - rhs) <= 1e-8 * (1 + std::fabs(lhs)));
+            // The solve error (gap 1e-13, times sigma after the conjugate)
+            // divided by h bounds the finite-difference accuracy: h = 1e-5,
+            // and the tolerance accordingly. Adjointness above is exact to CG.
+            const double h = 1e-5;
+            Vec zs[2];
+            for (int sgn = 0; sgn < 2; ++sgn) {
+                const double e = sgn ? -h : h;
+                Vec wp(wv), xp(xd.data);
+                for (int a = 0; a < c.k; ++a) wp[a] += e * dw.data[a];
+                for (int64_t i = 0; i < Nd; ++i) xp[i] += e * dx.data[i];
+                fp_op *op2 = make_iso(c.k, wp);
+                Arr xa(c.dshape, xp), za(c.dshape);
+                fp_options o2 = o;
+                o2.keep_structure = 0;
+                CHECK_OK(conj ? fp_prox_conj(op2, step + e * dg, &xa.a, &za.a, &o2, nullptr, nullptr)
+                              : fp_prox(op2, step + e * dg, &xa.a, &za.a, &o2, nullptr, nullptr));
+                zs[sgn] = za.data;
+                fp_op_free(op2);
+            }
+            double err = 0, scale = 1;
+            for (int64_t i = 0; i < Nd; ++i) {
+                const double fd = (zs[0][i] - zs[1][i]) / (2 * h);
+                err = std::max(err, std::fabs(fd - jv.data[i]));
+                scale = std::max(scale, std::fabs(fd));
+            }
+            CHECK(err <= 3e-3 * scale);
+            if (err > 3e-3 * scale) std::fprintf(stderr, "  tv_iso k=%d conj=%d fd error %.2e\n", c.k, conj, err);
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+
+    // Warm starts, the derivative controls and errors.
+    fp_op *op = make_iso(2, {1.0});
+    Arr x({30, 40}, image_signal(1200)), z({30, 40}), q({2, 30, 40});
+    fp_options o = opts(-1, 0, 1);
+    o.tol = 1e-8;
+    o.max_iter = 100000;
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+    fp_info cold, warm;
+    CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, &cold));
+    CHECK_OK(fp_workspace_set_warm(ws, 1));
+    CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, &warm));
+    CHECK(warm.iters == 0 && cold.iters > 0);
+    // A dual for a larger gamma is projected onto the smaller ball.
+    CHECK_OK(fp_prox(op, 0.9, &x.a, &z.a, &o, ws, nullptr));
+    CHECK_OK(fp_prox(op, 0.3, &x.a, &z.a, &o, ws, &warm));
+    CHECK_OK(fp_workspace_get_dual(ws, &q.a));
+    iso_certificate(2, {30, 40}, 0.3, {1.0}, x.data, z.data, q.data, o.tol, warm.iters);
+    CHECK(fp_workspace_set_deriv_tol(ws, 0.0, 10) == FP_EPARAM);
+    CHECK(fp_workspace_set_deriv_tol(ws, 1e-3, 0) == FP_EPARAM);
+    CHECK_OK(fp_workspace_set_deriv_tol(ws, 1e-3, 5));
+    Arr g({30, 40}, randn(1200)), gx({30, 40});
+    CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, nullptr, nullptr));
+    double res;
+    int its;
+    CHECK_OK(fp_workspace_deriv_info(ws, &res, &its));
+    CHECK(its <= 5);
+    fp_workspace_free(ws);
+    fp_op *tv;
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+    CHECK_OK(fp_workspace_create(tv, &x.a, nullptr, &ws));
+    CHECK(fp_workspace_set_deriv_tol(ws, 1e-6, 10) == FP_EINVAL);
+    CHECK(fp_workspace_deriv_info(ws, &res, &its) == FP_EINVAL);
+    fp_workspace_free(ws);
+    fp_op_free(tv);
+    // Extreme weights and steps (found by fuzzing: 4 w^2 underflowed to 0):
+    // a denormal weight is the identity to rounding, a huge radius the
+    // constant mean, and every output is finite with a certified gap.
+    for (double wv : {9.7728522813346931e-309, 1e-200, 1e200, 1.7e308}) {
+        for (double gam : {0.2, 1e100}) {
+            fp_op *eop = make_iso(2, {wv});
+            Arr ex({6, 7}, randn(42)), ez({6, 7});
+            fp_options eo = opts();
+            eo.tol = 1e-10;
+            eo.max_iter = 100000;
+            fp_info ei;
+            CHECK_OK(fp_prox(eop, gam, &ex.a, &ez.a, &eo, nullptr, &ei));
+            CHECK(std::isfinite(maxabs(ez.data)) && ei.gap <= 1e-10 * 0.5 * 42 * 9);
+            if (wv * gam > 1e10) {  // constant mean
+                double m = 0;
+                for (double t : ex.data) m += t / 42;
+                double dev = 0;
+                for (double t : ez.data) dev = std::max(dev, std::fabs(t - m));
+                CHECK(dev <= 1e-6 * (1 + std::fabs(m)));
+            }
+            if (wv < 1e-100) CHECK(std::fabs(maxabs(ez.data) - maxabs(ex.data)) <= 1e-12);
+            fp_op_free(eop);
+        }
+    }
+
+    fp_op *bad = nullptr;
+    CHECK(fp_op_tv_iso(1, nullptr, &bad) == FP_EPARAM);
+    Arr wneg({2}, {1.0, -1.0});
+    CHECK(fp_op_tv_iso(2, &wneg.a, &bad) == FP_EPARAM);
+    Arr xb({2, 10, 12}, randn(240)), zb({2, 10, 12});
+    xb.data[3] = NAN;
+    CHECK_OK(fp_prox(op, 0.5, &xb.a, &zb.a, nullptr, nullptr, nullptr));
+    CHECK(std::isnan(zb.data[0]) && !std::isnan(zb.data[120]));
+    xb.data[3] = INFINITY;
+    CHECK(fp_prox(op, 0.5, &xb.a, &zb.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+    fp_op_free(op);
+}
+
 // ---------------------------------------------------------------- misc
 static void test_no_allocation() {
     fp_op *op;
@@ -782,9 +1006,10 @@ static void test_no_allocation() {
     fp_op_free(op);
 
     // Anisotropic TV: a single image (threads inside it) and a batch.
+    for (int iso = 0; iso < 2; ++iso)
     for (std::vector<int64_t> shape : {std::vector<int64_t>{120, 130}, std::vector<int64_t>{6, 30, 40}}) {
         fp_op *iop;
-        CHECK_OK(fp_op_tv_aniso(2, nullptr, &iop));
+        CHECK_OK(iso ? fp_op_tv_iso(2, nullptr, &iop) : fp_op_tv_aniso(2, nullptr, &iop));
         int64_t N = 1;
         for (int64_t s : shape) N *= s;
         Arr ix(shape, randn(N)), iz(shape), ig(shape, randn(N)), igx(shape), iq({2});
@@ -793,6 +1018,7 @@ static void test_no_allocation() {
         Arr dual(qs);
         fp_options io = opts(-1, 4, 1);
         io.tol = 1e-8;
+        io.max_iter = 100000;
         fp_workspace *iws;
         CHECK_OK(fp_workspace_create(iop, &ix.a, &io, &iws));
         CHECK_OK(fp_prox(iop, 0.5, &ix.a, &iz.a, &io, iws, nullptr));
@@ -922,6 +1148,7 @@ int main() {
     test_derivatives();
     test_batching();
     test_tv_aniso();
+    test_tv_iso();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

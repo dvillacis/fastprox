@@ -459,6 +459,18 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
     return notconv.load() ? FP_ENOTCONV : FP_OK;
 }
 
+// The worst residual and iteration count of the derivative solves of a batch.
+inline void finish_deriv(const fp_workspace &ws, int64_t B) noexcept {
+    double r = 0.0;
+    double it = 0.0;
+    for (int64_t i = 0; i < B; ++i) {
+        r = std::max(r, ws.deriv_res.data()[i]);
+        it = std::max(it, ws.deriv_its.data()[i]);
+    }
+    ws.deriv_residual = r;
+    ws.deriv_iters = static_cast<int>(it);
+}
+
 template <class T>
 fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, double dgamma,
                            const double *dparams, const Arr &dout) {
@@ -486,8 +498,11 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
                 std::memset(a, 0, static_cast<size_t>(N) * sizeof(T));
             }
             const char *save = ws.image_struct(r);
+            DerivCtl dc;
+            dc.tol = ws.deriv_tol;
+            dc.max_iter = ws.deriv_max_iter;
             if (!conj) {
-                op.jvp_image(save, a, b, ishape, gamma, dgamma, dparams, work);
+                op.jvp_image(save, a, b, ishape, gamma, dgamma, dparams, work, dc);
             } else {
                 // out = y - sigma z(1/sigma, y/sigma); dgamma reads as dsigma.
                 const T *xs = ws.xs<T>() + r * N;
@@ -496,15 +511,18 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
                     b[i] = static_cast<T>(static_cast<double>(a[i]) / sigma -
                                           static_cast<double>(xs[i]) * dgamma / sigma);
                 T *c = b + N;
-                op.jvp_image(save, b, c, ishape, gamma, -dgamma / (sigma * sigma), dparams, work);
+                op.jvp_image(save, b, c, ishape, gamma, -dgamma / (sigma * sigma), dparams, work, dc);
                 for (int64_t i = 0; i < N; ++i)
                     b[i] = static_cast<T>(static_cast<double>(a[i]) - dgamma * static_cast<double>(zs[i]) -
                                           sigma * static_cast<double>(c[i]));
             }
             T *dst = dd + off[1];
             p.for_each(1, [&](int64_t i, int64_t o) { dst[o] = b[i]; });
+            const_cast<double *>(ws.deriv_res.data())[r] = dc.residual;
+            const_cast<double *>(ws.deriv_its.data())[r] = dc.iters;
         }
     });
+    finish_deriv(ws, B);
     return FP_OK;
 }
 
@@ -538,7 +556,12 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
                 const T *src = gd + off[0];
                 p.for_each(0, [&](int64_t i, int64_t o) { a[i] = src[o]; });
                 const char *save = ws.image_struct(r);
-                op.vjp_image(save, a, b, ishape, gamma, ac, work);
+                DerivCtl dc;
+                dc.tol = ws.deriv_tol;
+                dc.max_iter = ws.deriv_max_iter;
+                op.vjp_image(save, a, b, ishape, gamma, ac, work, dc);
+                const_cast<double *>(ws.deriv_res.data())[r] = dc.residual;
+                const_cast<double *>(ws.deriv_its.data())[r] = dc.iters;
                 if (conj) {
                     const T *xs = ws.xs<T>() + r * N;
                     const T *zs = ws.zs<T>() + r * N;
@@ -559,6 +582,7 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
     for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
     for (int64_t blk = 0; blk < nb; ++blk)
         for (int64_t k = 0; k < W; ++k) tot[k] += acc[blk * W + k];
+    finish_deriv(ws, B);
     return FP_OK;
 }
 

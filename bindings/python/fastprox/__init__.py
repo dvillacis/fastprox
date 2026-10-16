@@ -31,7 +31,7 @@ __version__ = _C.version()
 __all__ = [
     "Info", "IterInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
-    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "tv_aniso",
+    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
     "project_l1_ball", "prox_linf", "isotonic", "tv1d", "default_threads",
@@ -94,7 +94,7 @@ class Context:
     """Structure saved by ``prox(..., keep=True)``: the input to ``jvp`` and
     ``vjp``. Pass it back as ``ctx=`` to reuse its memory in the next call."""
 
-    __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info")
+    __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info", "deriv")
     # info is an Info, or an IterInfo for iterative operators
 
     def __init__(self, op, ws, shape, dtype, axis, threads):
@@ -107,6 +107,7 @@ class Context:
         self.conj = False
         self.step = None
         self.info = None
+        self.deriv = None  # (residual, iterations) of the last iterative derivative solve
 
 
 def _input(x, copy: bool) -> np.ndarray:
@@ -373,25 +374,11 @@ class TV1D(Operator):
                          weights is None or np.ndim(weights) == 0)]
 
 
-class TVAniso(Operator):
-    """Anisotropic total variation of 2D or 3D images, on the last ``ndim``
-    axes and batched over the others:
+class _ImageOperator(Operator):
+    """Iterative operator on the last ``ndim`` axes (see :class:`TVAniso`)."""
 
-        g(z) = sum_a w_a * (sum of |z_{p + e_a} - z_p| along image axis a)
-
-    Iterative (accelerated dual block methods with exact 1D TV steps): each
-    image stops when its duality gap is at most ``tol * ||x||^2 / 2``.
-    ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
-    ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
-    dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
-    the dual of the previous call on that context. Parameters: weights (one
-    per axis, or a scalar for all)."""
-
-    def __init__(self, ndim=2, weights=None):
-        if ndim not in (2, 3):
-            raise ValueError("ndim must be 2 or 3")
-        w = _vec(weights)
-        super().__init__(_C.tv_aniso(int(ndim), w))
+    def __init__(self, handle, ndim):
+        super().__init__(handle)
         self.ndim = int(ndim)
         self._layout = [("weights", self.ndim, False)]  # one gradient per axis
 
@@ -420,8 +407,8 @@ class TVAniso(Operator):
               warm):
         x = _input(x, copy)
         if x.ndim < self.ndim:
-            raise ValueError(f"TVAniso(ndim={self.ndim}) needs arrays with at least "
-                             f"{self.ndim} dimensions")
+            raise ValueError(f"{type(self).__name__}(ndim={self.ndim}) needs arrays with at "
+                             f"least {self.ndim} dimensions")
         z = _output(x, out)
         if keep or ctx is not None:
             ctx = self._context(x, -1, threads, ctx)
@@ -441,6 +428,61 @@ class TVAniso(Operator):
             ctx.conj = conj
             ctx.step = float(step)
         return z, ctx, info
+
+
+class TVAniso(_ImageOperator):
+    """Anisotropic total variation of 2D or 3D images, on the last ``ndim``
+    axes and batched over the others:
+
+        g(z) = sum_a w_a * (sum of |z_{p + e_a} - z_p| along image axis a)
+
+    Iterative (accelerated dual block methods with exact 1D TV steps): each
+    image stops when its duality gap is at most ``tol * ||x||^2 / 2``.
+    ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
+    ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
+    dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
+    the dual of the previous call on that context. Parameters: weights (one
+    per axis, or a scalar for all)."""
+
+    def __init__(self, ndim=2, weights=None):
+        if ndim not in (2, 3):
+            raise ValueError("ndim must be 2 or 3")
+        super().__init__(_C.tv_aniso(int(ndim), _vec(weights)), ndim)
+
+
+class TVIso(_ImageOperator):
+    """Isotropic total variation of 2D or 3D images, on the last ``ndim`` axes
+    and batched over the others:
+
+        g(z) = sum_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
+
+    with forward differences (zero past the last entry); the weights scale
+    each axis inside the norm (e.g. voxel spacing). Iterative (fast gradient
+    projection on the dual), with the gap, warm starts and ``keep`` as in
+    :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has |u_p| <= gamma and
+    z = x - sum_a w_a D_a^T u_a. ``jvp`` and ``vjp`` solve a linear system by
+    conjugate gradients to relative residual ``tol`` and record the residual
+    and iterations reached in ``ctx.deriv``. Parameters: weights."""
+
+    def __init__(self, ndim=2, weights=None):
+        if ndim not in (2, 3):
+            raise ValueError("ndim must be 2 or 3")
+        super().__init__(_C.tv_iso(int(ndim), _vec(weights)), ndim)
+
+    def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=1e-10,
+            max_iter=10000):
+        self._check_ctx(ctx)
+        _C.set_deriv_tol(ctx.ws, float(tol), int(max_iter))
+        dz = super().jvp(ctx, dx, dgamma, dparams, out=out)
+        ctx.deriv = _C.deriv_info(ctx.ws)
+        return dz
+
+    def vjp(self, ctx, g, *, out=None, tol=1e-10, max_iter=10000):
+        self._check_ctx(ctx)
+        _C.set_deriv_tol(ctx.ws, float(tol), int(max_iter))
+        res = super().vjp(ctx, g, out=out)
+        ctx.deriv = _C.deriv_info(ctx.ws)
+        return res
 
 
 # ---------------------------------------------------------------------------
@@ -534,3 +576,11 @@ def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, war
     can be passed back as ``warm_start``."""
     return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
                                         max_iter=max_iter, warm_start=warm_start)
+
+
+def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
+           out=None, threads=0, copy=False):
+    """prox of gamma * sum_p |(w_a D_a z)_p|_2 (isotropic TV) on the last ``ndim``
+    (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
+    return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
+                                      max_iter=max_iter, warm_start=warm_start)

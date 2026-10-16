@@ -173,6 +173,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
             w.tot.resize(static_cast<size_t>(P + 2));
             w.dparams.resize(static_cast<size_t>(P) + 1);
+            w.deriv_res.resize(static_cast<size_t>(B));
+            w.deriv_its.resize(static_cast<size_t>(B));
         }
         return FP_OK;
     }
@@ -570,6 +572,16 @@ FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **
     });
 }
 
+FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(axis_weights, w)) return s;
+        return fp::make_tv_iso(ndim, std::move(w), out);
+    });
+}
+
 FP_API void fp_op_free(fp_op *op) { delete op; }
 
 FP_API int64_t fp_op_nparams(const fp_op *op) { return op ? op->nparams() : -1; }
@@ -611,6 +623,21 @@ FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out) {
 
 FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual) {
     return guard([&] { return fp::dual_impl(ws, dual, true); });
+}
+
+FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter) {
+    if (!ws || !ws->image_ndim) return FP_EINVAL;
+    if (!(tol > 0.0) || !std::isfinite(tol) || max_iter < 1) return FP_EPARAM;
+    ws->deriv_tol = tol;
+    ws->deriv_max_iter = max_iter;
+    return FP_OK;
+}
+
+FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residual, int *iters) {
+    if (!ws || !ws->image_ndim) return FP_EINVAL;
+    if (residual) *residual = ws->deriv_residual;
+    if (iters) *iters = ws->deriv_iters;
+    return FP_OK;
 }
 
 FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on) {

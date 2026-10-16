@@ -67,6 +67,17 @@ struct ImageCall {
     char *thread_scratch(int t) const noexcept { return thread_base + static_cast<size_t>(t) * thread_bytes; }
 };
 
+// Iterative derivative solves of an image operator (conjugate gradients):
+// tolerance on the relative residual and iteration cap in, the achieved
+// residual and iterations out. Operators with closed-form derivatives leave
+// the outputs at zero.
+struct DerivCtl {
+    double tol = 1e-10;
+    int max_iter = 10000;
+    double residual = 0.0;
+    int iters = 0;
+};
+
 }  // namespace fp
 
 // Global namespace: this is the type the C header declares as opaque.
@@ -145,14 +156,14 @@ struct fp_op {
     // Derivatives at the structure saved by prox_image. dx is never null;
     // dparams may be null. work: image_bytes(shape) of scratch.
     virtual void jvp_image(const char *, const float *, float *, const int64_t *, double, double,
-                           const double *, char *) const noexcept {}
+                           const double *, char *, fp::DerivCtl &) const noexcept {}
     virtual void jvp_image(const char *, const double *, double *, const int64_t *, double, double,
-                           const double *, char *) const noexcept {}
+                           const double *, char *, fp::DerivCtl &) const noexcept {}
     // gx = J^T g; acc[0..P) += (dz/dtheta)^T g, acc[P] += <dz/dgamma, g>.
     virtual void vjp_image(const char *, const float *, float *, const int64_t *, double, double *,
-                           char *) const noexcept {}
+                           char *, fp::DerivCtl &) const noexcept {}
     virtual void vjp_image(const char *, const double *, double *, const int64_t *, double, double *,
-                           char *) const noexcept {}
+                           char *, fp::DerivCtl &) const noexcept {}
 };
 
 namespace fp {
@@ -300,13 +311,15 @@ struct ImageOp : fp_op {
         return static_cast<const D *>(this)->template prox_img<T>(x, z, c);                      \
     }                                                                                            \
     void jvp_image(const char *save, const T *dx, T *dz, const int64_t *shape, double gamma,     \
-                   double dgamma, const double *dparams, char *work) const noexcept override {   \
+                   double dgamma, const double *dparams, char *work, DerivCtl &dc)               \
+        const noexcept override {                                                                \
         static_cast<const D *>(this)->template jvp_img<T>(save, dx, dz, shape, gamma, dgamma,    \
-                                                          dparams, work);                        \
+                                                          dparams, work, dc);                    \
     }                                                                                            \
     void vjp_image(const char *save, const T *g, T *gx, const int64_t *shape, double gamma,      \
-                   double *acc, char *work) const noexcept override {                            \
-        static_cast<const D *>(this)->template vjp_img<T>(save, g, gx, shape, gamma, acc, work); \
+                   double *acc, char *work, DerivCtl &dc) const noexcept override {              \
+        static_cast<const D *>(this)->template vjp_img<T>(save, g, gx, shape, gamma, acc, work,  \
+                                                          dc);                                   \
     }
     FP_IMAGE_FORWARD(float)
     FP_IMAGE_FORWARD(double)

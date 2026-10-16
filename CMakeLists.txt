@@ -54,6 +54,7 @@ add_library(fastprox
   src/ops/isotonic.cpp
   src/ops/tv1d.cpp
   src/ops/tv_aniso.cpp
+  src/ops/tv_iso.cpp
 )
 add_library(fastprox::fastprox ALIAS fastprox)
 

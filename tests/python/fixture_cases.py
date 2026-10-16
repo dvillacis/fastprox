@@ -132,6 +132,26 @@ def _diff(shape, axis):
                          shape=(m, idx.size))
 
 
+def _grad_full(shape, axis):
+    """Forward differences along `axis` with a zero row past the last entry
+    (one row per entry, the isotropic convention)."""
+    import scipy.sparse as sp
+
+    idx = np.arange(int(np.prod(shape))).reshape(shape)
+    n = idx.size
+    has = (np.indices(shape)[axis] < shape[axis] - 1).ravel()
+    a = np.flatnonzero(has)
+    b = a + int(np.prod(shape[axis + 1:]))
+    rows = np.concatenate([a, a])
+    return sp.csr_matrix((np.r_[-np.ones(a.size), np.ones(a.size)], (rows, np.r_[a, b])),
+                         shape=(n, n))
+
+
+def _iso_term(cp, z, g, p, shape):
+    parts = [p["weights"][a] * (_grad_full(shape, a) @ z) for a in range(len(shape))]
+    return g * cp.sum(cp.norm(cp.vstack(parts), 2, axis=0))
+
+
 def _aniso_term(cp, z, g, p, shape):
     k = len(shape)
     return g * sum(p["weights"][a] * cp.norm1(_diff(shape, a) @ z)
@@ -149,9 +169,21 @@ IMAGE_CASES = {
         lambda p: fp.TVAniso(3, p["weights"]),
         _aniso_term,
     ),
+    "tv_iso_2d": (
+        lambda rng, shape: {"weights": _pos(rng, 2, 0.3, 2.0)},
+        lambda p: fp.TVIso(2, p["weights"]),
+        _iso_term,
+    ),
+    "tv_iso_3d": (
+        lambda rng, shape: {"weights": _pos(rng, 3, 0.3, 2.0)},
+        lambda p: fp.TVIso(3, p["weights"]),
+        _iso_term,
+    ),
 }
 
 IMAGE_SHAPES = {
     "tv_aniso_2d": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
     "tv_aniso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
+    "tv_iso_2d": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
+    "tv_iso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
 }

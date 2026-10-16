@@ -39,6 +39,9 @@ fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out);
 // tv_aniso.cpp
 fp_status make_tv_aniso(int ndim, Vec w, fp_op **out);
 
+// tv_iso.cpp
+fp_status make_tv_iso(int ndim, Vec w, fp_op **out);
+
 inline bool finite_nonneg(double v) noexcept { return v >= 0.0 && v <= 1.7976931348623157e308; }
 
 }  // namespace fp
