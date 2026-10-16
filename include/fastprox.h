@@ -206,6 +206,13 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
  * final structure). edge_weights as fp_op_tv1d. theta = (alpha, w...). */
 FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_op **out);
 
+/* g(z) = ||W D z||_2 = sqrt(sum_i w_i^2 (z_{i+1} - z_i)^2) along the axis
+ * (since 0.2): 1D TV with the l2 norm of the differences. The dual is a
+ * trust-region problem, solved by Newton's method on its secular equation with
+ * one tridiagonal solve per step, to rounding (fp_info.gap is 0).
+ * edge_weights as fp_op_tv1d, with w_i^2 finite. theta = w. */
+FP_API fp_status fp_op_tv1d_l2(const fp_array *edge_weights, fp_op **out);
+
 /* Nonconvex pointwise maps (elementwise). The prox can be set-valued at a
  * threshold: fp_options.tie picks the nonzero branch (FP_TIE_NONZERO, the
  * default) or 0 (FP_TIE_ZERO), and fp_info.ties counts the entries that sat

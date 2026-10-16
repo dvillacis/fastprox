@@ -47,6 +47,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
 | 1D TV ball (*since 0.2*) | Σ wᵢ \|zᵢ₊₁ − zᵢ\| ≤ α | `fp_op_tv1d_ball(α, w)` | `TV1DBall(alpha, weights)`, `project_tv1d_ball` | (α, w…) |
+| 1D TV, ℓ2 of differences (*since 0.2*) | (Σ wᵢ² (zᵢ₊₁ − zᵢ)²)^½ | `fp_op_tv1d_l2(w)` | `TV1DL2(weights)`, `tv1d_l2` | w (scalar or n − 1 edges) |
 | ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
 | ℓq, 0 < q < 1 (*since 0.2*) | λ Σ wᵢ \|zᵢ\|^q | `fp_op_lq(λ, q, w)` | `Lq(lam, q, weights)`, `lq` | w (scalar or per entry) |
 | SCAD (*since 0.2*) | Fan and Li's penalty, threshold λ, concavity a | `fp_op_scad(λ, a)` | `SCAD(lam, a)`, `scad` | (λ, a) |
@@ -101,6 +102,17 @@ Notes:
   γ* comes from safeguarded Newton steps on that equation, each a 1D TV
   solve. Rows took 4 to 15 solves in tests, so the projection costs 6–20
   times a 1D TV prox. α = 0 gives the mean of each piece between zero weights.
+- **1D TV with ℓ2 of differences.** The dual is a trust-region problem in the
+  differences. When its unconstrained minimiser, a cumulative sum of x, lies in
+  the ball of radius γ, z is the mean of each piece between zero weights (a
+  weight whose square underflows counts as zero). Otherwise z solves the
+  tridiagonal system (μI + DᵀW²D) z = μx, with μ the root of Moré and
+  Sorensen's secular equation, found by Newton's method from μ = 0 (Nocedal and
+  Wright, Algorithm 4.4). It converges monotonically, in 2–8 steps of one
+  tridiagonal factorisation and two solves, to rounding, so `fp_info.gap` is 0.
+  For n = 2 it is 1D TV. Derivatives are in closed form: the Hessian of the
+  prox problem is that tridiagonal matrix minus a rank-one term (Sherman–
+  Morrison), so a JVP or VJP costs three O(n) solves.
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
@@ -251,6 +263,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | tree-structured group ℓ2 | ‖z_g‖ equal to the threshold at a shrink; \|xᵢ\| at the ℓ1 threshold | group set to zero; thresholded |
 | 1D TV ball | TV(x) = α | inside: identity |
 | 1D TV ball | adjacent segments with equal values | as for 1D TV, at the step γ* |
+| 1D TV, ℓ2 of differences | the dual minimiser on the sphere, ‖u₀‖ = γ | inside: piecewise averaging |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
@@ -457,6 +470,7 @@ tree = [range(0, 10), range(10, 20), range(0, 20), range(20, 1000)]
 zt = fp.tree_soft_threshold(x, tree, group_weights=[0.5, 0.5, 1.0, 2.0], l1=0.1)
 zs = fp.sparse_group_soft_threshold(x, l1=0.1, lam=0.5, groups=groups)
 zv = fp.project_tv1d_ball(x, alpha=5.0)              # sum |z_{i+1} - z_i| <= 5 per row
+zq = fp.tv1d_l2(x, gamma=2.0)                        # prox of 2 ||D z||_2 per row
 
 # Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
 img = np.random.default_rng(1).normal(size=(256, 256))

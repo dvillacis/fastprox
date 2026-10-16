@@ -374,6 +374,8 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
          [](fp_op **o) { return fp_op_tree_l2(0.3, 3, sg_ptr.data(), sg_idx.data(), nullptr, o); }, 0.9},
         {"tv1d_ball", [](fp_op **o) { return fp_op_tv1d_ball(2.0, nullptr, o); }, 1.0},
         {"tv1d_ball_w", [=](fp_op **o) { return fp_op_tv1d_ball(1.5, wm, o); }, 1.0},
+        {"tv1d_l2", [](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, 0.6},
+        {"tv1d_l2_w", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},

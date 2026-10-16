@@ -36,7 +36,7 @@ Version 1 is a small, exact and fast library of proximal operators and projectio
 **Non-goals for version 1:**
 
 - **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl.
-- **No GPU kernels.** CPU only. The array interface is designed so that a GPU backend can be added later without changing the API.
+- **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API (Section 13).
 - **No matrix-valued prox maps.** Nuclear norm and spectral functions need an SVD and are deferred to version 2.
 - **No automatic modelling.** No parser or DSL for composite objectives, unlike ProxImaL.
 
@@ -233,7 +233,7 @@ typedef struct {            /* strided n-d array, strides in elements */
     int            ndim;
     const int64_t *shape;
     const int64_t *strides;
-    fp_device      device;   /* must be FP_DEVICE_CPU in 1.x */
+    fp_device      device;   /* FP_DEVICE_CPU; GPU values from the 1.x backend */
 } fp_array;
 
 typedef enum {
@@ -300,7 +300,7 @@ FP_API int         fp_abi_version(void);
 - **Threads.** `fp_op` is immutable and safe to share. `fp_workspace` is not shared between concurrent calls; it holds one scratch region per OpenMP thread. Results are bit-identical for any value of `threads`.
 - **Errors.** Every function returns `fp_status`; there are no global error states, no printing and no aborts. Invalid parameters (negative γ, q outside (0, 1), a SCAD parameter too small for γ) return FP\_EPARAM before any work.
 - **Derivatives.** `fp_jvp` and `fp_vjp` read the structure saved in the workspace by the last `fp_prox` call with `keep_structure` set. Calling them without it returns FP\_EINVAL.
-- **ABI stability.** Structs passed by pointer carry no hidden fields; new options are added only through new functions or a versioned options struct. The major version changes only when the ABI breaks. The device field of fp\_array is reserved from 0.1 so a GPU backend can be added without an ABI break; 1.x accepts only FP\_DEVICE\_CPU and returns FP\_EINVAL for any other value.
+- **ABI stability.** Structs passed by pointer carry no hidden fields; new options are added only through new functions or a versioned options struct. The major version changes only when the ABI breaks. The device field of fp\_array is reserved from 0.1 so a GPU backend can be added without an ABI break. Up to 1.0 only FP\_DEVICE\_CPU is accepted and any other value returns FP\_EINVAL. The 1.x GPU backend adds new fp\_device values and a function that reports which operators support a device; an operator given a device it does not implement still returns FP\_EINVAL.
 
 **Python interface (sketch)**
 
@@ -319,9 +319,10 @@ z, ctx = op.prox(x, gamma, keep=True)
 dz = op.jvp(ctx, dx)
 gx, grads = op.vjp(ctx, g)          # grads.gamma, grads.weights
 
-# autodiff integration (CPU), built on the same calls
+# autodiff integration, built on the same calls
 from fastprox.torch import tv1d as tv1d_torch   # torch.autograd.Function
 from fastprox.jax import tv1d as tv1d_jax       # jax.custom_vjp + pure_callback
+from fastprox.torch import tv_iso as tv_iso_torch  # image TV on the tensor's device, GPU included
 ```
 
 - **nanobind module.** The Python extension is written with nanobind and calls only the C API, never the C++ internals, so Python sees exactly what other languages see. `nb::ndarray` accepts C-contiguous and strided NumPy arrays without copying. Other dtypes are converted only when the caller sets `copy=True`; otherwise a `TypeError` is raised.
@@ -339,6 +340,7 @@ Each requirement below has a measurable target and a named check, so a release c
 | Accuracy of exact operators | optimality residual at most 10 n ε ‖x‖∞, with ε the machine epsilon of the dtype | optimality conditions checked on every test input (Section 11) |
 | Accuracy of iterative operators | duality gap at most tol · ½‖x‖², returned in `fp_info.gap` | gap recomputed independently in tests |
 | Determinism | bit-identical output for any thread count, on the same build and machine | tests run with 1, 2 and 8 threads and compare bytes |
+| Determinism on GPUs | the same output on repeated runs on one device, build and library version; not bit-identical to the CPU, but within the gap tolerance of it | repeated runs compared byte for byte; GPU against C kernel within the gap |
 | Dtypes | float32 and float64; float32 accumulates sums in float64 where a sum spans a row | float32 results compared with float64 within the dtype's tolerance |
 | Special values | NaN in the input gives NaN in the affected output only, never a hang; ±Inf rejected with `FP_EINVAL` for operators where it is undefined | fuzzing with NaN, Inf, denormals, empty and length-1 inputs |
 | Allocation | no allocation inside `fp_prox`, `fp_jvp` or `fp_vjp` after the workspace is created | allocator hook counts calls in tests |
@@ -400,7 +402,8 @@ Julia (`fastprox_jll` through BinaryBuilder), MATLAB (a `.mltbx` toolbox with C 
 
 - **BenchOpt:** solvers using the library in the TV-1D and TV-2D benchmarks, and a new simplex-projection benchmark.
 - **PyProximal:** an adapter subclassing its `ProxOperator`, so PyProximal's solvers can call the compiled operators.
-- **PyTorch and JAX:** `torch.autograd.Function` wrappers and `jax.custom_vjp` with `pure_callback` (CPU), both using the library's VJP rather than differentiating through iterations.
+- **PyTorch and JAX:** `torch.autograd.Function` wrappers and `jax.custom_vjp` with `pure_callback` on the CPU, both using the library's VJP rather than differentiating through iterations. Isotropic and anisotropic TV also have a device-native path in each wrapper, written in framework tensor operations: dual fast gradient projection with the same gap stopping and warm starts, and a backward by conjugate gradients on the flat regions, so memory does not grow with the iteration count. It runs wherever the input lives, GPU included, and needs no change to the C API.
+- **DeepInverse:** the device-native image TV is benchmarked against DeepInverse's TV denoiser (time to accuracy, transfer cost, memory of a backward pass) before an optional backend is proposed upstream.
 
 ## Roadmap
 
@@ -412,8 +415,9 @@ Release 0.1 is highlighted because it already serves most callers: thresholding,
 
 - **0.1 — core and 1D.** The C API and its try/catch boundary, separable convex maps, projections and pool-adjacent-violators, 1D TV by Condat and taut string with weights, JVP and VJP for all of these, and Python wheels built with nanobind.
 - **0.2 — images.** Anisotropic and isotropic TV in 2D and 3D with duality gaps and warm starts, 1D TV with ℓ2 of differences, and the nonconvex pointwise maps, all exposed in the Python package.
-- **0.3 — graph TV.** The max-flow engine, graph TV and tree TV, VJPs for the iterative operators by conjugate gradients, and the PyTorch and JAX wrappers.
+- **0.3 — graph TV.** The max-flow engine, graph TV and tree TV, VJPs for the iterative operators by conjugate gradients, and the PyTorch and JAX wrappers, with a device-native path for image TV that runs on GPUs (Section 12).
 - **1.0 — stable.** ABI freeze, conda-forge packages, documentation, and the PyProximal adapter. After 1.0, only additions that keep the ABI are allowed until 2.0.
+- **1.x — GPU backend.** CUDA kernels in the C core behind the device field, an addition that keeps the frozen ABI. The first operators are those the 0.3 device path shows people running on GPUs: iterative image TV, elementwise maps and batched simplex and ℓ1-ball projections, and exact 1D TV with one thread per row for large batches. Max-flow graph TV stays on the CPU. CUDA builds ship as a separate package and through conda-forge, not in the main wheel.
 - **After 1.0 — other languages.** Julia (ccall), MATLAB (mex, with a gate that the mex files load on Linux next to MATLAB's own libstdc++) and the thin Rust crate, each over the frozen C API, plus a ProximalOperators.jl adapter.
 
 ## Decisions
@@ -422,7 +426,7 @@ The six questions left open in the first draft were settled on 14 October 2026, 
 
 | Question | Decision | Where it applies |
 | --- | --- | --- |
-| Device field for a later GPU backend | reserved now: `fp_array` carries an `fp_device` field, and 1.x accepts only `FP_DEVICE_CPU` | API header and ABI rules (Section 9) |
+| Device field for a later GPU backend | reserved now: `fp_array` carries an `fp_device` field, and up to 1.0 only `FP_DEVICE_CPU` is accepted. Revised 16 October 2026: a GPU backend in the C core comes in 1.x as an ABI-compatible addition, and a device-native image TV path comes earlier in the 0.3 PyTorch and JAX wrappers | API header and ABI rules (Section 9), Integration (Section 12), Roadmap (Section 13) |
 | License | MIT for the library and all bindings | Goals, Licensing (Section 12), Summary |
 | Name | `fastprox`; not taken on PyPI | all packages |
 | Default tie rule for nonconvex prox maps | nonzero branch, with ties always reported | Conventions (Section 4), `fp_options.tie` |

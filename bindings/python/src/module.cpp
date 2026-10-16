@@ -249,6 +249,10 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv1d_ball(alpha, pw.get(), o); });
     }, "alpha"_a, "weights"_a.none());
+    m.def("tv1d_l2", [](std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_tv1d_l2(pw.get(), o); });
+    }, "weights"_a.none());
     m.def("tv1d", [](std::optional<Params> w, int method) {
         const ParamView pw(w);
         return make([&](fp_op **o) {

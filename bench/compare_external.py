@@ -53,6 +53,15 @@ int shim_weighted_taut(double *y, double *w, double *x, int n) { return tautStri
 }
 '''
 
+# proxTV's TV-L2 solver (More-Sorensen on the dual), in its own library so an
+# existing build of the TV1 shim is reused unchanged.
+PROXTV_SHIM_TV2 = r'''
+#include "TVopt.h"
+extern "C" {
+int shim_more_tv2(double *y, int n, double lam, double *x) { double info[16] = {0}; return more_TV2(y, lam, x, info, n); }
+}
+'''
+
 
 def run(cmd, cwd=None):
     subprocess.run(cmd, cwd=cwd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -111,6 +120,20 @@ def build_proxtv():
         run([CXX, *OPT, "-std=c++11", "-w", "-DNOMATLAB", f"-I{src}", "-o", str(lib), str(shim),
              *[str(src / f) for f in files], "-llapack" if platform.system() != "Darwin"
              else "-framework", *([] if platform.system() != "Darwin" else ["Accelerate"])])
+    return lib
+
+
+def build_proxtv_tv2():
+    build_proxtv()
+    src = EXT / "proxTV" / "src"
+    lib = EXT / f"libproxtv_tv2{SUFFIX}"
+    if not lib.exists():
+        shim = EXT / "proxtv_shim_tv2.cpp"
+        shim.write_text(PROXTV_SHIM_TV2)
+        run([CXX, *OPT, "-std=c++11", "-w", "-DNOMATLAB", f"-I{src}", "-o", str(lib), str(shim),
+             *[str(src / f) for f in ("TVL2opt.cpp", "utils.cpp")], "-llapack"
+             if platform.system() != "Darwin" else "-framework",
+             *([] if platform.system() != "Darwin" else ["Accelerate"])])
     return lib
 
 
@@ -181,6 +204,26 @@ def weighted_tv_solvers():
     except (subprocess.CalledProcessError, OSError) as e:
         print(f"proxTV unavailable: {e}", file=sys.stderr)
     return solvers
+
+
+def tv_l2_solvers():
+    """name -> (f(x, lam, out), dtype) for the prox of lam ||D z||_2."""
+    f64 = np.float64
+    solvers = {"fastprox": (lambda x, lam, out: fp.tv1d_l2(x, lam, out=out, threads=1), f64)}
+    try:
+        ptv = ctypes.CDLL(str(build_proxtv_tv2()))
+        ptv.shim_more_tv2.argtypes = [DBL, ctypes.c_int, ctypes.c_double, DBL]
+        solvers["proxTV more_TV2"] = (
+            lambda x, lam, out: ptv.shim_more_tv2(ptr(x), x.size, lam, ptr(out)), f64)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"proxTV unavailable: {e}", file=sys.stderr)
+    return solvers
+
+
+def unit_threshold(x):
+    """x scaled so that the prox of lam ||D z||_2 is constant exactly from lam = 1
+    on (the norm of the minimal dual, a cumulative sum, is 1)."""
+    return x / np.linalg.norm(np.cumsum(x - x.mean())[:-1])
 
 
 def simplex_solvers():
@@ -278,6 +321,12 @@ def main():
             print(f"\nWeighted 1D TV, {kind}, lambda = {lam} times edge weights in [0.5, 1.5]")
             weights = lambda n, lam=lam: lam * np.random.default_rng(7).uniform(0.5, 1.5, n - 1)
             table(wtv, lambda n, rng: signal(kind, n, rng), weights, sizes, args.quick)
+
+    tvl2 = tv_l2_solvers()
+    for kind in ("blocks", "random walk", "white noise"):
+        for frac in (1e-3, 0.1, 0.5, 0.9):
+            print(f"\n1D TV with l2 of differences, {kind} scaled to threshold 1, lambda = {frac}")
+            table(tvl2, lambda n, rng: unit_threshold(signal(kind, n, rng)), frac, sizes, args.quick)
 
     print("\nSimplex projection, radius 1")
     sx = {k: (f, np.float64) for k, f in simplex_solvers().items()}

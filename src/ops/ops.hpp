@@ -54,6 +54,9 @@ fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out);
 // tv_ball.cpp
 fp_status make_tv1d_ball(double alpha, Vec w, fp_op **out);
 
+// tv1d_l2.cpp
+fp_status make_tv1d_l2(Vec w, fp_op **out);
+
 // nonconvex.cpp
 fp_status make_l0(double lambda, Vec w, fp_op **out);
 fp_status make_lq(double lambda, double q, Vec w, fp_op **out);
