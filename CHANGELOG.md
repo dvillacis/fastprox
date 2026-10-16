@@ -26,6 +26,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The log barrier −λ Σ log zᵢ (`fp_op_log_barrier`, `LogBarrier`, `prox_log_barrier`; Beck 2017, Lemma 6.5), stable for x < 0 and huge |x| or γλ; ℓ1 over a box (`fp_op_l1_box`, `L1Box`, `prox_l1_box`; Beck, Example 6.23, here for any interval and per-entry weights and bounds); and the projection onto the second-order cone with t first (`fp_op_soc`, `SOC`, `project_soc`; Beck, Example 6.37). All with derivatives; 0.7–0.9 ns per entry on Apple M5.
 - Group Huber, group SCAD and group MCP by norm composition (`fp_op_group_huber`, `fp_op_group_scad`, `fp_op_group_mcp`, `GroupHuber`, `GroupSCAD`, `GroupMCP` and their functions; Beck, Theorem 6.18 and Example 6.66): each group is scaled by the scalar prox of its norm at the step γc_g, with groups and weights as for group ℓ2 and derivatives in x, γ, the scalar parameters and the group weights. The kernel wraps the scalar operator, so its formulas and kink rules are shared. Group SCAD and MCP check a > 1 + γ max c and b > γ max c at call time. Cost is that of group ℓ2 (about 3.5 ns per entry with group ids, 1 ns per entry on rows).
 - `tests/python/test_radial.py`: stationarity of the log barrier over 9 orders of magnitude, ℓ1 over a box and the group penalties against minimisation on refined grids, the cone's KKT conditions and polar conjugate, Beck's closed form for group Huber, kink rules, NaN and infinity handling and errors. The new operators are also in `CASES`, the C derivative cases and the fuzzer.
+- Tree-structured group norms l₁‖z‖₁ + Σ_g η_g ‖z_g‖₂ for nested or disjoint groups (`fp_op_tree_l2`, `TreeL2`, `tree_soft_threshold`), and the sparse group lasso as the case of a partition (`TreeL2.sparse_group`, `sparse_group_soft_threshold`). The prox composes soft thresholding and the group shrinks from the smallest group up (Bach, Jenatton, Mairal and Obozinski 2012, (3.8)). Groups come as CSR arrays in any order, and the tree condition is checked when the operator is built. Derivatives in x, γ, l₁ and the group weights follow the chain of shrinks. About 1 ns per entry for the sparse group lasso with groups of 16, and 8 ns for a depth-8 tree at n = 10⁶.
+- Projection onto the 1D TV ball {Σ wᵢ|zᵢ₊₁ − zᵢ| ≤ α} (`fp_op_tv1d_ball`, `TV1DBall`, `project_tv1d_ball`; Beck 2017, Theorem 6.30). This is the 1D TV prox at the step where the TV equals α. Safeguarded Newton steps find that step: they start from γ = 0⁺, are taken in log–log scale while far from the root, and are exact on the final structure. Derivatives in x, α and the weights come by implicit differentiation of TV(z) = α. It takes 4–15 1D TV solves per row, 40–135 ns per entry on Apple M5.
+- `tests/python/test_tree_ball.py` covers:
+  - random trees against block coordinate descent on the dual, and order independence;
+  - the operators the tree norm generalises (group ℓ2, soft thresholding, the sparse group lasso);
+  - the TV ball on its sphere up to n = 10⁵, against bisection on the step, with zero weights;
+  - the projection inequality, special cases and the α gradient against finite differences;
+  - errors.
+
+  The new operators are also in `CASES`, the C derivative cases and the fuzzer.
 
 ## [0.1.0] — 2026-10-16
 

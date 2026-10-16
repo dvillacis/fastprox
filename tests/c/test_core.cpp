@@ -311,6 +311,18 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
     av[4] = 0.0;  // an entry outside the constraint
     keep.emplace_back(std::vector<int64_t>{n}, av);
     fp_array *aa = &keep.back().a;
+    // A tree over the first 10 entries: leaves, a subtree, a singleton, the root.
+    static const int64_t tree_ptr[] = {0, 2, 5, 10, 11, 15, 25};
+    static const int64_t tree_idx[] = {0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                                       0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    static std::vector<int64_t> sg_ptr, sg_idx;  // the partition (i * 7) % 3 as a tree
+    sg_ptr.assign({0});
+    sg_idx.clear();
+    for (int64_t g = 0; g < 3; ++g) {
+        for (int64_t i = 0; i < n; ++i)
+            if ((i * 7) % 3 == g) sg_idx.push_back(i);
+        sg_ptr.push_back(static_cast<int64_t>(sg_idx.size()));
+    }
     static std::vector<int64_t> groups;
     groups.resize(static_cast<size_t>(n));
     for (int64_t i = 0; i < n; ++i) groups[i] = (i * 7) % 3;
@@ -352,6 +364,11 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
          [=](fp_op **o) { return fp_op_group_scad(1.0, 3.7, n, groups.data(), 3, nullptr, o); }, 0.8},
         {"group_mcp",
          [=](fp_op **o) { return fp_op_group_mcp(1.0, 3.0, n, groups.data(), 3, nullptr, o); }, 0.8},
+        {"tree_l2", [](fp_op **o) { return fp_op_tree_l2(0.2, 6, tree_ptr, tree_idx, nullptr, o); }, 0.9},
+        {"sparse_group",
+         [](fp_op **o) { return fp_op_tree_l2(0.3, 3, sg_ptr.data(), sg_idx.data(), nullptr, o); }, 0.9},
+        {"tv1d_ball", [](fp_op **o) { return fp_op_tv1d_ball(2.0, nullptr, o); }, 1.0},
+        {"tv1d_ball_w", [=](fp_op **o) { return fp_op_tv1d_ball(1.5, wm, o); }, 1.0},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},

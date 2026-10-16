@@ -41,6 +41,8 @@ __all__ = [
     "project_hyperplane", "project_halfspace",
     "LogBarrier", "L1Box", "SOC", "GroupHuber", "GroupSCAD", "GroupMCP", "prox_log_barrier",
     "prox_l1_box", "project_soc", "group_huber", "group_scad", "group_mcp",
+    "TreeL2", "tree_soft_threshold", "sparse_group_soft_threshold", "TV1DBall",
+    "project_tv1d_ball",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -305,6 +307,37 @@ class GroupL2(Operator):
         self._layout = [("group_weights", 1 if c is None else c.size, c is None)]
 
 
+class TreeL2(Operator):
+    """g(z) = l1 ||z||_1 + sum_g eta_g ||z_g||_2 along the axis, for groups that
+    are pairwise nested or disjoint (a tree; Bach et al. 2012, (3.8)). ``groups``
+    is a sequence of index arrays, in any order; ValueError when two groups
+    overlap without nesting. ``group_weights``: None (eta = 1), a scalar, or one
+    per group. Parameters: l1, group_weights (eta)."""
+
+    def __init__(self, groups=(), group_weights=None, l1=0.0):
+        parts = [np.asarray(g, np.int64).reshape(-1) for g in groups]
+        ptr = np.zeros(len(parts) + 1, np.int64)
+        ptr[1:] = np.cumsum([p.size for p in parts], dtype=np.int64)
+        idx = np.concatenate(parts) if parts else np.zeros(0, np.int64)
+        eta = None if group_weights is None else np.atleast_1d(np.asarray(group_weights,
+                                                                          np.float64))
+        super().__init__(_C.tree_l2(float(l1), ptr, np.ascontiguousarray(idx), _vec(eta)))
+        self._layout = [("l1", 1, True),
+                        ("group_weights", 1 if eta is None else eta.size,
+                         eta is None or np.ndim(group_weights) == 0)]
+
+    @classmethod
+    def sparse_group(cls, l1=1.0, lam=1.0, groups=None, group_weights=None):
+        """The sparse group lasso l1 ||z||_1 + lam sum_g c_g ||z_g||_2 for a
+        group id per entry (as in GroupL2); eta = lam c."""
+        groups = np.asarray(groups, np.int64).reshape(-1)
+        ng = int(groups.max()) + 1 if groups.size else 0
+        members = [np.flatnonzero(groups == g) for g in range(ng)]
+        c = np.ones(1) if group_weights is None else np.atleast_1d(
+            np.asarray(group_weights, np.float64))
+        return cls(members, lam * c if c.size > 1 else float(lam * c[0]), l1)
+
+
 class Box(Operator):
     """Projection onto lower <= z <= upper (scalars or per-entry along the
     axis; infinities allowed). Parameters: lower, upper."""
@@ -529,6 +562,18 @@ class TV1D(Operator):
         super().__init__(_C.tv1d(w, _TV1D_METHODS[method]))
         self._layout = [("weights", 1 if w is None else w.size,
                          weights is None or np.ndim(weights) == 0)]
+
+
+class TV1DBall(Operator):
+    """Projection onto {z : sum_i w_i |z_{i+1} - z_i| <= alpha} along the axis
+    (Beck, Theorem 6.30): x when inside, else the 1D TV prox at the step where
+    the TV equals alpha. Weights as in TV1D. Parameters: alpha, weights."""
+
+    def __init__(self, alpha=1.0, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.tv1d_ball(float(alpha), w))
+        self._layout = [("alpha", 1, True),
+                        ("weights", 1 if w is None else w.size, w is None or w.size == 1)]
 
 
 class _ImageOperator(Operator):
@@ -918,3 +963,22 @@ def group_mcp(x, lam=1.0, b=3.0, gamma=1.0, *, groups=None, group_weights=None, 
     """prox of gamma * sum_g c_g MCP(||z_g||_2) along the axis."""
     op = GroupMCP(lam, b, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def tree_soft_threshold(x, groups, group_weights=None, l1=0.0, gamma=1.0, *, axis=-1, out=None,
+                        threads=0, copy=False):
+    """prox of gamma * (l1 ||z||_1 + sum_g eta_g ||z_g||_2) for tree-structured groups."""
+    op = TreeL2(groups, group_weights, l1)
+    return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def sparse_group_soft_threshold(x, l1=1.0, lam=1.0, gamma=1.0, *, groups=None, group_weights=None,
+                                axis=-1, out=None, threads=0, copy=False):
+    """prox of gamma * (l1 ||z||_1 + lam sum_g c_g ||z_g||_2), one group id per entry."""
+    op = TreeL2.sparse_group(l1, lam, groups, group_weights)
+    return _once(op._op, x, gamma, axis, out, threads, copy)
+
+
+def project_tv1d_ball(x, alpha=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=False):
+    """Projection onto {z : sum_i w_i |z_{i+1} - z_i| <= alpha} along the axis."""
+    return _once(_C.tv1d_ball(float(alpha), _vec(weights)), x, 1.0, axis, out, threads, copy)

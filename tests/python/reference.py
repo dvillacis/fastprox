@@ -223,3 +223,52 @@ def group_radial(x, gamma, scalar, groups, c):
         if s > 0:
             z[m] = scalar.prox(np.array([s]), gamma * c[g if c.size > 1 else 0])[0] / s * x[m]
     return z
+
+
+def tree_l2(x, gamma, l1, groups, eta, sweeps=20000):
+    """prox of gamma (l1 ||z||_1 + sum_g eta_g ||z_g||) by block coordinate
+    descent on the dual, min ||x - sum_g xi_g||^2 / 2 over ||xi_g|| <= gamma eta_g
+    (singletons for l1), in a fixed scrambled order: independent of the
+    composition rule, which it reaches as the sweeps converge."""
+    blocks = [np.array([i]) for i in range(x.size)] if l1 > 0 else []
+    radii = [gamma * l1] * len(blocks)
+    for g, e in zip(groups, np.broadcast_to(eta, (len(groups),))):
+        blocks.append(np.asarray(g))
+        radii.append(gamma * e)
+    perm = np.random.default_rng(0).permutation(len(blocks))
+    xi = [np.zeros(b.size) for b in blocks]
+    z = x.astype(float).copy()
+    for _ in range(sweeps):
+        z_old = z.copy()
+        for k in perm:
+            b = blocks[k]
+            v = z[b] + xi[k]
+            nv = np.linalg.norm(v)
+            new = v if nv <= radii[k] else v * (radii[k] / nv)
+            z[b] = v - new
+            xi[k] = new
+        if np.array_equal(z, z_old):
+            break
+    return z
+
+
+def tv1d_ball(x, alpha, w=1.0):
+    """Projection onto {sum w |Dz| <= alpha} by bisection on the step of the 1D
+    TV prox (Beck, Theorem 6.30)."""
+    import fastprox as fp
+    tv = lambda z: float(np.sum(w * np.abs(np.diff(z))))
+    if tv(x) <= alpha:
+        return x.copy()
+    wv = None if np.ndim(w) == 0 else w
+    lo, hi = 0.0, 1.0
+    while tv(fp.tv1d(x, hi, weights=wv)) > alpha:
+        hi *= 2
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if mid in (lo, hi):
+            break
+        if tv(fp.tv1d(x, mid, weights=wv)) > alpha:
+            lo = mid
+        else:
+            hi = mid
+    return fp.tv1d(x, hi, weights=wv)

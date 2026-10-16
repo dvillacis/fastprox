@@ -533,6 +533,28 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
     });
 }
 
+FP_API fp_status fp_op_tree_l2(double l1, int64_t ngroups, const int64_t *group_ptr,
+                               const int64_t *group_idx, const fp_array *group_weights,
+                               fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        if (ngroups < 0 || (!group_ptr && ngroups > 0)) return FP_EPARAM;
+        std::vector<int64_t> ptr(1, 0), idx;
+        if (ngroups > 0) {
+            ptr.assign(group_ptr, group_ptr + ngroups + 1);
+            if (ptr[0] != 0 || ptr.back() < 0) return FP_EPARAM;
+            if (ptr.back() > 0 && !group_idx) return FP_EPARAM;
+            for (int64_t g = 0; g < ngroups; ++g)
+                if (ptr[g + 1] < ptr[g]) return FP_EPARAM;
+            idx.assign(group_idx, group_idx + ptr.back());
+        }
+        Vec e;
+        if (fp_status s = fp::read_vec(group_weights, e)) return s;
+        return fp::make_tree_l2(l1, std::move(ptr), std::move(idx), std::move(e), out);
+    });
+}
+
 FP_API fp_status fp_op_box(double lo, double hi, const fp_array *lower, const fp_array *upper,
                            fp_op **out) {
     return guard([&] {
@@ -669,6 +691,16 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
         Vec w;
         if (fp_status s = fp::read_vec(edge_weights, w)) return s;
         return fp::make_tv1d(std::move(w), method, out);
+    });
+}
+
+FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(edge_weights, w)) return s;
+        return fp::make_tv1d_ball(alpha, std::move(w), out);
     });
 }
 

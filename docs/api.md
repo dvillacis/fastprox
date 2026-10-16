@@ -28,6 +28,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Elastic net | l₁‖z‖₁ + (l₂/2)‖z‖² | `fp_op_elastic_net(l1, l2)` | `ElasticNet`, `elastic_net` | (l₁, l₂) |
 | Huber | λ Σ h_δ(zᵢ), h_δ(t) = t²/(2δ) for \|t\| ≤ δ, \|t\| − δ/2 otherwise | `fp_op_huber(λ, δ)` | `Huber`, `huber` | (λ, δ) |
 | Group ℓ2 | λ Σ_g c_g ‖z_g‖₂ | `fp_op_group_l2(λ, n, groups, G, c)` | `GroupL2(lam, groups, group_weights)`, `group_soft_threshold`, `prox_l2` | c (scalar or one per group) |
+| Tree-structured group ℓ2 (*since 0.2*) | l₁‖z‖₁ + Σ_g η_g ‖z_g‖₂, groups nested or disjoint | `fp_op_tree_l2(l1, G, ptr, idx, η)` | `TreeL2(groups, group_weights, l1)`, `TreeL2.sparse_group`, `tree_soft_threshold`, `sparse_group_soft_threshold` | (l₁, η…) |
 | Box | lo ≤ z ≤ hi | `fp_op_box(lo, hi, lower, upper)` | `Box(lower, upper)`, `project_box` | (lower…, upper…) |
 | Nonnegative orthant | z ≥ 0 | `fp_op_nonneg()` | `NonNeg`, `project_nonneg` | none |
 | ℓ2 ball | ‖z‖₂ ≤ r | `fp_op_l2_ball(r)` | `L2Ball`, `project_l2_ball` | (r) |
@@ -45,6 +46,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Group SCAD, group MCP (*since 0.2*) | Σ_g c_g ρ(‖z_g‖₂), ρ the SCAD or MCP penalty | `fp_op_group_scad(λ, a, …)`, `fp_op_group_mcp(λ, b, …)` | `GroupSCAD`, `GroupMCP`, `group_scad`, `group_mcp` | (λ, a or b, c…) |
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
+| 1D TV ball (*since 0.2*) | Σ wᵢ \|zᵢ₊₁ − zᵢ\| ≤ α | `fp_op_tv1d_ball(α, w)` | `TV1DBall(alpha, weights)`, `project_tv1d_ball` | (α, w…) |
 | ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
 | ℓq, 0 < q < 1 (*since 0.2*) | λ Σ wᵢ \|zᵢ\|^q | `fp_op_lq(λ, q, w)` | `Lq(lam, q, weights)`, `lq` | w (scalar or per entry) |
 | SCAD (*since 0.2*) | Fan and Li's penalty, threshold λ, concavity a | `fp_op_scad(λ, a)` | `SCAD(lam, a)`, `scad` | (λ, a) |
@@ -87,6 +89,18 @@ Notes:
   group is the scalar map. SCAD needs a > 1 + γ max c and MCP b > γ max c,
   checked at each call (`FP_EPARAM`). Group SCAD and MCP are nonconvex, but
   their prox is single-valued under these conditions, so there is no tie rule.
+- **Tree-structured group norms.** Any two groups must be nested or disjoint
+  (else `FP_EPARAM`), given in any order as CSR arrays (`ptr` of length G + 1
+  from 0, indices into the axis); entries may belong to no group. The prox
+  composes soft thresholding and the group shrinks from the smallest group up
+  (Bach, Jenatton, Mairal and Obozinski 2012, (3.8)), so it costs the total size
+  of the groups. A partition is the sparse group lasso (`TreeL2.sparse_group`
+  in Python, η = λc), and a repeated group adds its weights.
+- **1D TV ball.** α ≥ 0, weights as for 1D TV. Outside the ball the result is
+  the 1D TV prox at the step γ* where the TV equals α (Beck, Theorem 6.30);
+  γ* comes from safeguarded Newton steps on that equation, each a 1D TV
+  solve. Rows took 4 to 15 solves in tests, so the projection costs 6–20
+  times a 1D TV prox. α = 0 gives the mean of each piece between zero weights.
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
@@ -234,6 +248,9 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | ℓ1 over a box | \|xᵢ\| equal to the threshold; soft(xᵢ) on a bound | thresholded: 0; interior (soft's Jacobian) |
 | group Huber, SCAD, MCP | ‖x_g‖ at a breakpoint of the scalar map | the scalar map's rule (Huber: inner branch; SCAD, MCP: the branch below) |
 | group Huber, SCAD, MCP | x_g = 0 | φ′(0) I, the limit of φ(s)/s |
+| tree-structured group ℓ2 | ‖z_g‖ equal to the threshold at a shrink; \|xᵢ\| at the ℓ1 threshold | group set to zero; thresholded |
+| 1D TV ball | TV(x) = α | inside: identity |
+| 1D TV ball | adjacent segments with equal values | as for 1D TV, at the step γ* |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
@@ -434,6 +451,12 @@ zb = fp.prox_log_barrier(x, lam=0.1)                 # > 0
 zl = fp.prox_l1_box(x, lam=0.2, lower=-1.0, upper=1.0)
 groups = np.arange(1000) // 10                       # one group id per entry of the axis
 zg = fp.group_scad(x, lam=1.0, a=3.7, groups=groups)
+
+# Tree-structured groups and level sets (since 0.2).
+tree = [range(0, 10), range(10, 20), range(0, 20), range(20, 1000)]
+zt = fp.tree_soft_threshold(x, tree, group_weights=[0.5, 0.5, 1.0, 2.0], l1=0.1)
+zs = fp.sparse_group_soft_threshold(x, l1=0.1, lam=0.5, groups=groups)
+zv = fp.project_tv1d_ball(x, alpha=5.0)              # sum |z_{i+1} - z_i| <= 5 per row
 
 # Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
 img = np.random.default_rng(1).normal(size=(256, 256))

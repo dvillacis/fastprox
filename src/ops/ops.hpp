@@ -25,6 +25,8 @@ fp_status make_l1_box(double lambda, Vec w, Vec lo, Vec hi, fp_op **out);
 // group.cpp
 fp_status make_group_l2(double lambda, std::vector<int64_t> groups, int64_t ngroups, Vec c,
                         fp_op **out);
+fp_status make_tree_l2(double l1, std::vector<int64_t> ptr, std::vector<int64_t> idx, Vec eta,
+                       fp_op **out);
 
 // radial.cpp: norm composition of a scalar map (Huber, SCAD, MCP; scalar is
 // owned and deleted on failure) and the second-order cone.
@@ -48,6 +50,9 @@ fp_status make_isotonic(Vec w, bool increasing, fp_op **out);
 
 // tv1d.cpp
 fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out);
+
+// tv_ball.cpp
+fp_status make_tv1d_ball(double alpha, Vec w, fp_op **out);
 
 // nonconvex.cpp
 fp_status make_l0(double lambda, Vec w, fp_op **out);

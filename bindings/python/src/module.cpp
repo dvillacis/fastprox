@@ -190,6 +190,13 @@ NB_MODULE(_fastprox, m) {
         const int64_t *g = groups ? groups->data() : nullptr;
         return make([&](fp_op **o) { return fp_op_group_l2(lam, n, g, ngroups, pc.get(), o); });
     }, "lam"_a, "groups"_a.none(), "ngroups"_a, "group_weights"_a.none());
+    m.def("tree_l2", [](double l1, IdArr ptr, IdArr idx, std::optional<Params> eta) {
+        const ParamView pe(eta);
+        const int64_t G = static_cast<int64_t>(ptr.shape(0)) - 1;
+        return make([&](fp_op **o) {
+            return fp_op_tree_l2(l1, G, ptr.data(), idx.data(), pe.get(), o);
+        });
+    }, "l1"_a, "ptr"_a, "idx"_a, "group_weights"_a.none());
     m.def("box", [](double lo, double hi, std::optional<Params> lower,
                     std::optional<Params> upper) {
         const ParamView pl(lower), pu(upper);
@@ -238,6 +245,10 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_isotonic(pw.get(), increasing, o); });
     }, "weights"_a.none(), "increasing"_a);
+    m.def("tv1d_ball", [](double alpha, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_tv1d_ball(alpha, pw.get(), o); });
+    }, "alpha"_a, "weights"_a.none());
     m.def("tv1d", [](std::optional<Params> w, int method) {
         const ParamView pw(w);
         return make([&](fp_op **o) {
