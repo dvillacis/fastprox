@@ -423,3 +423,20 @@ is about even with proxTV's classic taut string on Neoverse-N2 (0.97 from
 the kernel timings, 1.04–1.06 in `bench`), and ahead elsewhere: 0.64 on
 Apple M5 and 0.73–0.74 on AMD EPYC 9V74 against all proxTV solvers, 0.80–0.84
 on Intel against the linearized and hybrid ones.
+
+## 2026-10-16, Google Cloud c4a-standard-16: parallel scaling at 16 cores
+
+Neoverse-V2, 16 physical cores (1 thread per core), Ubuntu 24.04, `master`
+at f2bc650 built by `uv sync` (GCC 13). `bench/bench_python.py` plus two
+larger batches; 1D TV at λ = 1, best of 7.
+
+| Batch | 2 threads | 4 | 8 | 12 | 16 |
+| --- | --- | --- | --- | --- | --- |
+| 64 rows of 10⁴ (spec target ≥ 0.7) | 2.00 (1.00) | 3.99 (1.00) | 7.98 (1.00) | — | 15.86 (0.99) |
+| 256 rows of 10⁴ | 2.04 (1.02) | 4.08 (1.02) | 8.19 (1.02) | 11.97 (1.00) | 16.27 (1.02) |
+| 64 rows of 10⁵ | 1.99 (1.00) | 3.96 (0.99) | 7.81 (0.98) | 10.43 (0.87) | 15.57 (0.97) |
+
+Speed-up over one thread, efficiency in parentheses. The dip at 12 threads
+on 64 rows is the split: 64 rows over 12 threads leave the slowest with 6,
+which bounds efficiency at 0.89. Python call overhead at n = 100 was
+1.4–1.8 µs (target 5 µs).
