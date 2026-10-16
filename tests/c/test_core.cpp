@@ -40,6 +40,11 @@ void *operator new(std::size_t n) {
     if (void *p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
+// libstdc++'s std::get_temporary_buffer (std::stable_sort) uses this form.
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
+    ++g_allocs;
+    return std::malloc(n ? n : 1);
+}
 void operator delete(void *p) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 #endif
