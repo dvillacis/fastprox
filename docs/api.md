@@ -34,6 +34,10 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Simplex | z ≥ 0, Σ z = r | `fp_op_simplex(r)` | `Simplex`, `project_simplex` | (r) |
 | Weighted ℓ1 ball | Σ wᵢ\|zᵢ\| ≤ r | `fp_op_l1_ball(r, w)` | `L1Ball(radius, weights)`, `project_l1_ball` | (r) |
 | ℓ∞ norm | λ‖z‖∞ | `fp_op_linf(λ)` | `LInf`, `prox_linf` | (λ) |
+| Maximum (*since 0.2*) | λ maxᵢ zᵢ | `fp_op_max(λ)` | `Max(lam)`, `prox_max` | (λ) |
+| Sum of the k largest (*since 0.2*) | λ Σ of the k largest zᵢ (or \|zᵢ\|) | `fp_op_sum_largest(λ, k, absolute)` | `SumLargest(lam, k, absolute)`, `prox_sum_largest` | (λ) |
+| Hyperplane ∩ box (*since 0.2*) | aᵀz = b, lo ≤ z ≤ hi | `fp_op_hyperplane(a, b, lo, hi, lower, upper, 0)` | `Hyperplane(a, b, lower, upper)`, `project_hyperplane` | (b, a…, lower…, upper…) |
+| Half-space ∩ box (*since 0.2*) | aᵀz ≤ b, lo ≤ z ≤ hi | `fp_op_hyperplane(a, b, lo, hi, lower, upper, 1)` | `HalfSpace(a, b, lower, upper)`, `project_halfspace` | (b, a…, lower…, upper…) |
 | Monotone cone | z₁ ≤ … ≤ zₙ (or ≥), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
 | 1D total variation | Σ wᵢ \|zᵢ₊₁ − zᵢ\| | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
 | ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
@@ -50,6 +54,20 @@ Notes:
   uses the threshold γλwᵢ and 1D TV the edge thresholds γwᵢ. Projections ignore γ.
 - **Weighted ℓ1 ball:** weights must be positive with min/max ≥ 1e-100 (only
   their ratios matter; smaller ratios are rejected with `FP_EPARAM`).
+- **Maximum and the sum of the k largest** are support functions (of the
+  simplex and of {Σ y = k, 0 ≤ y ≤ 1}, or {‖y‖₁ ≤ k, ‖y‖∞ ≤ 1} for absolute
+  values), so their prox is x − P(x) with P the projection onto the set
+  scaled by γλ. The maximum clips x from above at the simplex threshold
+  (min(x, τ), the cost of a simplex projection). The sum of the k largest
+  entries needs k ≤ n; for absolute values any k ≥ 1 works, and k ≥ n gives
+  λ‖z‖₁.
+- **Hyperplane ∩ box.** a is a scalar or per entry (`NULL`/`None`: all ones),
+  the box as for `Box`, unbounded by default; a = 1 with the box [0, 1] is the
+  capped simplex. The set is checked at each call for the axis length (b must
+  lie in the range of aᵀz over the box, or above its lower end for the
+  half-space), and `FP_EPARAM` reports an empty one. Since only the ratios of
+  (a, b) matter, nonzero |aᵢ| / max |a| must be at least 1e-100. The
+  half-space keeps the box projection when it meets aᵀz ≤ b.
 - **Isotonic regression** minimises Σ wᵢ(zᵢ − xᵢ)², which is the Euclidean
   projection only for unit weights.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
@@ -187,6 +205,10 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | ℓ1 ball | weighted ℓ1 norm of x equal to r | inside: identity |
 | ℓ∞ norm | \|xᵢ\| = τ | entry not clipped: 1 |
 | ℓ∞ norm | ‖x‖₁ = γλ | z = 0: 0 |
+| maximum | xᵢ = τ | entry not clipped: 1 |
+| sum of the k largest | xᵢ − μ on 0 or γλ (an end of the scaled cap) | entry at the shared level μ |
+| hyperplane, half-space ∩ box | xᵢ − μaᵢ on a bound | interior (free) |
+| half-space ∩ box | aᵀP_box(x) = b | box projection (constraint inactive) |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
@@ -315,7 +337,7 @@ y − σ prox_{g/σ}(y/σ). σ = 0 returns y.
 | `FP_EDTYPE` | dtype other than float32/float64, or mismatched dtypes |
 | `FP_ESHAPE` | mismatched shapes or parameter lengths |
 | `FP_ENOMEM` | out of memory |
-| `FP_EPARAM` | invalid parameter or step (negative γ, negative radius, …) |
+| `FP_EPARAM` | invalid parameter or step (negative γ, negative radius, …), or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of k > n largest entries) |
 | `FP_EINTERNAL` | any other internal error |
 
 No function prints, aborts or keeps global error state. NaN in the input
@@ -373,6 +395,13 @@ zq = fp.lq(x, lam=0.1, q=0.5, gamma=1.0, tie="nonzero")
 zs = fp.scad(x, lam=0.2, a=3.7, gamma=1.0)          # needs a > 1 + gamma
 z0, ctx = fp.L0(0.3).prox(x, 1.0, keep=True, tie="zero")
 ctx.info.ties                                       # entries exactly on the threshold
+
+# Support functions and planes (since 0.2), along the axis.
+zm = fp.prox_max(x, lam=0.5)                         # min(x, tau)
+zk = fp.prox_sum_largest(x, lam=0.5, k=3)            # absolute=True for |x|
+w = np.linspace(0.5, 1.5, 1000)                     # one a_i per entry of the axis
+zp = fp.project_hyperplane(x, a=w, b=100.0, lower=0.0, upper=1.0)
+zh = fp.project_halfspace(x, a=w, b=1.0)
 
 # Image operators (since 0.2): the last 2 or 3 axes, with a certificate.
 img = np.random.default_rng(1).normal(size=(256, 256))

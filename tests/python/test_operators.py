@@ -18,6 +18,9 @@ WE = _rng.uniform(0.2, 1.5, N - 1)
 LO = _rng.uniform(-1.0, 0.0, N)
 HI = _rng.uniform(0.0, 1.0, N)
 GROUPS = np.arange(N) * 7 % 3
+AV = _rng.uniform(0.5, 1.5, N) * np.where(np.arange(N) % 3 == 1, -1.0, 1.0)
+AV[4] = 0.0  # an entry outside the constraint
+UNBOUNDED = np.array([-np.inf, np.inf])
 
 
 # name: (build(theta) -> Operator, theta0, reference, gamma[, convex]).
@@ -57,6 +60,29 @@ CASES = {
     "tv1d": (lambda t: fp.TV1D(t), np.array([1.0]), None, 0.6),
     "tv1d_w": (lambda t: fp.TV1D(t), WE, None, 0.6),
     "tv1d_taut": (lambda t: fp.TV1D(t, method="taut_string"), np.array([1.0]), None, 0.6),
+    "max": (lambda t: fp.Max(t[0]), np.array([0.7]), lambda x, g, t: ref.prox_max(x, g * t[0]), 0.9),
+    "sum_largest": (lambda t: fp.SumLargest(t[0], 3), np.array([0.6]),
+                    lambda x, g, t: ref.prox_sum_largest(x, g * t[0], 3), 0.9),
+    # gamma lam > 1: Beck's form c P_C(x / c) rather than the scaled set.
+    "sum_largest_abs": (lambda t: fp.SumLargest(t[0], 3, absolute=True), np.array([2.5]),
+                        lambda x, g, t: ref.prox_sum_largest(x, g * t[0], 3, True), 0.9),
+    # theta = (b, a..., lower..., upper...).
+    "hyperplane": (lambda t: fp.Hyperplane(t[1:N + 1], t[0], t[N + 1], t[N + 2]),
+                   np.concatenate([[0.4], AV, UNBOUNDED]),
+                   lambda x, g, t: ref.hyperplane_box(x, t[1:N + 1], t[0]), 1.0),
+    "hyperplane_box": (lambda t: fp.Hyperplane(t[1:N + 1], t[0], t[N + 1:2 * N + 1], t[2 * N + 1:]),
+                       np.concatenate([[0.4], AV, LO, HI]),
+                       lambda x, g, t: ref.hyperplane_box(x, t[1:N + 1], t[0], t[N + 1:2 * N + 1],
+                                                          t[2 * N + 1:]), 1.0),
+    "capped_simplex": (lambda t: fp.Hyperplane(t[1], t[0], t[2], t[3]), np.array([3.0, 1.0, 0.0, 1.0]),
+                       lambda x, g, t: ref.hyperplane_box(x, t[1], t[0], t[2], t[3]), 1.0),
+    "halfspace": (lambda t: fp.HalfSpace(t[1:N + 1], t[0], t[N + 1], t[N + 2]),
+                  np.concatenate([[0.2], AV, UNBOUNDED]),
+                  lambda x, g, t: ref.hyperplane_box(x, t[1:N + 1], t[0], inequality=True), 1.0),
+    "halfspace_box": (lambda t: fp.HalfSpace(t[1:N + 1], t[0], t[N + 1:2 * N + 1], t[2 * N + 1:]),
+                      np.concatenate([[0.2], AV, LO, HI]),
+                      lambda x, g, t: ref.hyperplane_box(x, t[1:N + 1], t[0], t[N + 1:2 * N + 1],
+                                                         t[2 * N + 1:], inequality=True), 1.0),
     "l0": (lambda t: fp.L0(0.3, t), W,
            ("objective", lambda t: lambda z: 0.3 * t[0] * (z != 0)), 0.8, False),
     "lq_half": (lambda t: fp.Lq(0.4, 0.5, t), W,

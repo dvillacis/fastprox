@@ -85,7 +85,7 @@ fp_array vec(std::vector<double> &v) {
 
 // Builds an operator from the bytes; params are sized for axis length n.
 fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 20;
+    const int kind = b.u8() % 23;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -160,6 +160,28 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
         case 17: return fp_op_scad(b.param(), 1.0 + b.param(), &c.op);
         case 18: return fp_op_mcp(b.param(), b.param(), &c.op);
         case 19: return fp_op_log(b.param(), b.param(), &c.op);
+        case 20: return fp_op_max(b.param(), &c.op);
+        case 21: return fp_op_sum_largest(b.param(), static_cast<int64_t>(b.u8() % 40) - 2, b.u8() % 2, &c.op);
+        case 22: {  // hyperplane or half-space with a box; b often infeasible
+            fill(c.params[0], pick);
+            for (auto &v : c.params[0]) {
+                if (b.u8() % 4 == 0) v = -v;
+                else if (b.u8() % 8 == 0) v = 0.0;
+                // The projection scales like |b| / |a_i|: count 1 / |a_i| as a
+                // parameter size for the finite-output check.
+                if (v != 0.0 && !(1.0 / std::fabs(v) <= b.max_param)) b.max_param = 1.0 / std::fabs(v);
+            }
+            fill(c.params[1], b.u8() % 2 ? n : 1);
+            s0[0] = static_cast<int64_t>(c.params[0].size());
+            s1[0] = static_cast<int64_t>(c.params[1].size());
+            a0 = fp_array{c.params[0].data(), FP_F64, 1, s0, nullptr, FP_DEVICE_CPU};
+            a1 = fp_array{c.params[1].data(), FP_F64, 1, s1, nullptr, FP_DEVICE_CPU};
+            const double lo = b.u8() % 3 ? -b.param() : -INFINITY, hi = b.u8() % 3 ? b.param() : INFINITY;
+            const bool upper = b.u8() % 2;  // per-entry upper bounds from params[1]
+            const double rhs = (b.u8() % 2 ? -1.0 : 1.0) * b.param();
+            return fp_op_hyperplane(b.u8() % 4 ? &a0 : nullptr, rhs, lo, hi, nullptr,
+                                    upper ? &a1 : nullptr, b.u8() % 2, &c.op);
+        }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);
             if (b.u8() % 4 == 0)  // zero weights split the row

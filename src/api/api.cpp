@@ -547,6 +547,38 @@ FP_API fp_status fp_op_linf(double lambda, fp_op **out) {
     });
 }
 
+FP_API fp_status fp_op_max(double lambda, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_max(lambda, out);
+    });
+}
+
+FP_API fp_status fp_op_sum_largest(double lambda, int64_t k, int absolute, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        return fp::make_sum_largest(lambda, k, absolute != 0, out);
+    });
+}
+
+FP_API fp_status fp_op_hyperplane(const fp_array *a, double b, double lo, double hi,
+                                  const fp_array *lower, const fp_array *upper, int inequality,
+                                  fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec va, l, h;
+        if (fp_status s = fp::read_vec(a, va)) return s;
+        if (fp_status s = fp::read_vec(lower, l)) return s;
+        if (fp_status s = fp::read_vec(upper, h)) return s;
+        if (!lower) l.assign(1, lo);
+        if (!upper) h.assign(1, hi);
+        return fp::make_hyperplane(std::move(va), b, std::move(l), std::move(h), inequality != 0, out);
+    });
+}
+
 FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;

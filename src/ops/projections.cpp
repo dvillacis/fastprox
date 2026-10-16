@@ -568,6 +568,79 @@ struct LInf final : RowOp<LInf> {
     }
 };
 
+// ---------------------------------------------------------------------------
+
+// prox of gamma lambda max_i x_i. max is the support function of the unit
+// simplex (Beck 2017, Example 6.49), so by the Moreau identity
+// z = x - P_{c Delta}(x) with c = gamma lambda and c Delta the simplex of
+// radius c: with tau its threshold, z = min(x, tau). The scaled form avoids
+// Beck's x / c, which overflows for small c.
+struct Max final : RowOp<Max> {
+    double lambda;
+    explicit Max(double l) : lambda(l) {}
+    const char *name() const noexcept override { return "max"; }
+    int64_t nparams() const noexcept override { return 1; }
+    fp_status check_n(int64_t) const noexcept override { return FP_OK; }
+    size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }
+
+    template <class T>
+    int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
+        auto nonfinite = [&]() {
+            bool nan;
+            if (scan_row(x, n, nan) != kRowOk) return static_cast<int>(kRowNonFinite);
+            if (nan) fill_nan(z, n);
+            else std::memmove(z, x, static_cast<size_t>(n) * sizeof(T));  // z may be x
+            if (code) std::memset(code, 0, static_cast<size_t>(n));
+            return static_cast<int>(kRowOk);
+        };
+        const double c = gamma * lambda;
+        if (c == 0.0) return nonfinite();  // the identity unless the row has NaN or an infinity
+        double *v = static_cast<double *>(scr);
+        bool finite;
+        const double tau = condat_tau_unit(
+            n, [x](int64_t i) { return static_cast<double>(x[i]); }, c, v, v + n, &finite);
+        if (!finite) return nonfinite();
+        for (int64_t i = 0; i < n; ++i) {
+            const double xi = static_cast<double>(x[i]);
+            const bool top = xi > tau;
+            z[i] = top ? static_cast<T>(tau) : x[i];
+            if (code) code[i] = top;
+        }
+        return kRowOk;
+    }
+    // On S = {x_i > tau}: z_i = tau with sum_S (x_i - tau) = c, so
+    // dz_S = (sum_S dx - dc) / |S|; dz = dx off S.
+    template <class T>
+    void jvp(const T *, const T *, const uint8_t *code, const T *dx, T *dz, int64_t n,
+             double gamma, double dgamma, const double *dp, void *) const noexcept {
+        double sum = 0.0;
+        int64_t k = 0;
+        for (int64_t i = 0; i < n; ++i)
+            if (code[i]) {
+                sum += static_cast<double>(dx[i]);
+                ++k;
+            }
+        const double dc = lambda * dgamma + gamma * (dp ? dp[0] : 0.0);
+        const double dt = k ? (sum - dc) / static_cast<double>(k) : 0.0;
+        for (int64_t i = 0; i < n; ++i) dz[i] = code[i] ? static_cast<T>(dt) : dx[i];
+    }
+    template <class T>
+    void vjp(const T *, const T *, const uint8_t *code, const T *g, T *gx, int64_t n,
+             double gamma, double *acc, void *) const noexcept {
+        double sum = 0.0;
+        int64_t k = 0;
+        for (int64_t i = 0; i < n; ++i)
+            if (code[i]) {
+                sum += static_cast<double>(g[i]);
+                ++k;
+            }
+        const double m = k ? sum / static_cast<double>(k) : 0.0;
+        for (int64_t i = 0; i < n; ++i) gx[i] = code[i] ? static_cast<T>(m) : g[i];
+        acc[0] += -gamma * m;
+        acc[1] += -lambda * m;
+    }
+};
+
 }  // namespace
 
 fp_status make_l2_ball(double radius, fp_op **out) {
@@ -602,6 +675,12 @@ fp_status make_l1_ball(double radius, Vec w, fp_op **out) {
 fp_status make_linf(double lambda, fp_op **out) {
     if (!finite_nonneg(lambda)) return FP_EPARAM;
     *out = new LInf(lambda);
+    return FP_OK;
+}
+
+fp_status make_max(double lambda, fp_op **out) {
+    if (!finite_nonneg(lambda)) return FP_EPARAM;
+    *out = new Max(lambda);
     return FP_OK;
 }
 

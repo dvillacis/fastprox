@@ -518,3 +518,42 @@ scikit-image's cheap first iterations are 25–45% faster to 1e-2 at
 take over 50 minutes); the 512² images of the anisotropic benchmark were
 left out for the same reason. At 128² and 32³ (`--quick`), fastprox was 2.7–18×
 faster from 1e-3 on, and scikit-image 1.3× faster to 1e-2 at 128², γ = 0.1.
+
+## 2026-10-16, Apple M5 Pro: support functions and hyperplane ∩ box
+
+Single thread, operators built once, one row of normal entries, best of 25
+calls through Python (ns per entry; the call overhead is included, so the
+n = 10⁴ column carries about 0.15 ns of it). NumPy's sort of the same row is
+there for scale.
+
+| Operator | n = 10⁴ | n = 10⁶ |
+| --- | --- | --- |
+| simplex (Condat, for scale) | 0.34 | 0.32 |
+| max | 0.34 | 0.32 |
+| sum of k = 1 largest | 4.52 | 5.19 |
+| sum of k = n/10 largest | 5.10 | 5.08 |
+| sum of k = n/10 largest \|x\| | 5.21 | 4.46 |
+| capped simplex k = n/10, random walk | 4.85 | 4.71 |
+| hyperplane, no box (closed form) | 3.52 | 4.60 |
+| hyperplane ∩ box [−0.5, 0.5] | 5.66 | 7.85 |
+| hyperplane ∩ per-entry box | 4.48 | 7.99 |
+| half-space ∩ box, active | 4.21 | 8.52 |
+| `np.sort` (for scale) | 16.95 | 25.18 |
+
+- **Max** is min(x, τ) with τ from Condat's simplex threshold, so it costs a
+  simplex projection.
+- **The plane solver** went through four versions. It started by sorting the
+  2n breakpoints and bisecting with full evaluations of φ: 40–60 ns per entry,
+  more than sorting the row. An exact median search over the breakpoints
+  (`nth_element`, folding decided entries into running sums) came to 42–48 ns:
+  one exact median of 2n doubles already costs about 14 ns per entry. Newton
+  steps on φ inside a shrinking bracket, with the median as the fallback, took
+  3–6 passes on most rows, but 15 passes for k = 1 (the root deep in the upper
+  tail, approached from one side with short steps) and 7 on random walks
+  (12–16 ns). The final version adds branch-free passes over the contiguous
+  row, with no folding, which mostly kept entries anyway because one end of the
+  bracket stays infinite. For rows of 8192 entries or more it also starts from
+  the root of the problem on every 16th entry. That brings every case to
+  3–5 passes.
+- **The per-entry box** costs more at n = 10⁶ because each pass reads three
+  arrays (a, lo, hi) besides x.

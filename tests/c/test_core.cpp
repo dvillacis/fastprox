@@ -306,6 +306,11 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
     fp_array *la = &keep.back().a;
     keep.emplace_back(std::vector<int64_t>{n}, hi);
     fp_array *ha = &keep.back().a;
+    Vec av(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) av[i] = (i % 3 == 1 ? -1.0 : 1.0) * unif(0.5, 1.5);
+    av[4] = 0.0;  // an entry outside the constraint
+    keep.emplace_back(std::vector<int64_t>{n}, av);
+    fp_array *aa = &keep.back().a;
     static std::vector<int64_t> groups;
     groups.resize(static_cast<size_t>(n));
     for (int64_t i = 0; i < n; ++i) groups[i] = (i * 7) % 3;
@@ -325,6 +330,16 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"l1_ball", [](fp_op **o) { return fp_op_l1_ball(1.1, nullptr, o); }, 1.0},
         {"l1_ball_w", [=](fp_op **o) { return fp_op_l1_ball(1.1, wn, o); }, 1.0},
         {"linf", [](fp_op **o) { return fp_op_linf(0.9, o); }, 1.0},
+        {"max", [](fp_op **o) { return fp_op_max(0.7, o); }, 0.9},
+        {"sum_largest", [](fp_op **o) { return fp_op_sum_largest(0.6, 3, 0, o); }, 0.9},
+        {"sum_largest_abs", [](fp_op **o) { return fp_op_sum_largest(2.5, 3, 1, o); }, 0.9},  // gamma lam > 1
+        {"hyperplane",
+         [=](fp_op **o) { return fp_op_hyperplane(aa, 0.4, -INFINITY, INFINITY, nullptr, nullptr, 0, o); },
+         1.0},
+        {"hyperplane_box", [=](fp_op **o) { return fp_op_hyperplane(aa, 0.2, 0, 0, la, ha, 0, o); }, 1.0},
+        {"capped_simplex", [](fp_op **o) { return fp_op_hyperplane(nullptr, 3.0, 0, 1, nullptr, nullptr, 0, o); },
+         1.0},
+        {"halfspace_box", [=](fp_op **o) { return fp_op_hyperplane(aa, 0.2, 0, 0, la, ha, 1, o); }, 1.0},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},

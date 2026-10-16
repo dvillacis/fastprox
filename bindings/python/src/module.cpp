@@ -10,6 +10,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/tuple.h>
 
+#include <cmath>
 #include <memory>
 #include <new>
 #include <optional>
@@ -208,6 +209,20 @@ NB_MODULE(_fastprox, m) {
     m.def("linf", [](double lam) {
         return make([&](fp_op **o) { return fp_op_linf(lam, o); });
     }, "lam"_a);
+    m.def("max", [](double lam) {
+        return make([&](fp_op **o) { return fp_op_max(lam, o); });
+    }, "lam"_a);
+    m.def("sum_largest", [](double lam, int64_t k, bool absolute) {
+        return make([&](fp_op **o) { return fp_op_sum_largest(lam, k, absolute, o); });
+    }, "lam"_a, "k"_a, "absolute"_a);
+    m.def("hyperplane", [](std::optional<Params> a, double b, std::optional<Params> lower,
+                           std::optional<Params> upper, bool inequality) {
+        const ParamView pa(a), pl(lower), pu(upper);
+        return make([&](fp_op **o) {
+            return fp_op_hyperplane(pa.get(), b, -INFINITY, INFINITY, pl.get(), pu.get(),
+                                    inequality, o);
+        });
+    }, "a"_a.none(), "b"_a, "lower"_a.none(), "upper"_a.none(), "inequality"_a);
     m.def("isotonic", [](std::optional<Params> w, bool increasing) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_isotonic(pw.get(), increasing, o); });
