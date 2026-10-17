@@ -801,3 +801,37 @@ are 2–19% slower than before: 1e-4 except on 256² at λ = 0.1 (7–12%), 1e-3
 λ = 0.5 (11–19%), and 1e-2 and 1e-3 in 3D (2–8%). There the old end-of-solve polish, which merged jumps below
 a threshold, happened to land closer to the solution; fastprox is still ahead
 of proxTV at all of them. proxTV's DR2 stays quicker to 1e-2 at λ = 0.1.
+
+## 2026-10-17, Apple M5 Pro: parallel polish for anisotropic TV
+
+Cost of one polish on 64³ (λ = 0.1, 200 iterations with a polish at every
+gap check against none, divided by the extra polishes), and whole solves to a
+gap of 1e-12 (best of 2). The polish's output is bit-identical to the serial
+version: all 72 outputs (z, dual and iteration count) of 8 shapes × 3
+tolerances match on 1 and 8 threads.
+
+| | serial polish | parallel polish |
+| --- | --- | --- |
+| one polish, 1 thread | 7.1 ms | 6.5 ms |
+| one polish, 8 threads | 3.9 ms | 1.8 ms |
+
+Per phase, on 8 threads (ms): edge marks 0.16, runs 0.08, unions within
+slabs 0.28, crossing unions (serial) 0.40, roots 0.14, labels 0.11, region
+sums 0.08 plus the crossing components (serial, over a list of their
+entries) 0.20, gap 0.06. The two serial steps are now 40% of the cost. The edge pass
+had not vectorised: inside the `parallel_for` lambda its pointers were
+captures, not `restrict` parameters. As a separate function it went from
+3.56 to 0.64 ms on one thread.
+
+| Image, threads | λ = 0.1, serial → parallel | λ = 0.5, serial → parallel |
+| --- | --- | --- |
+| 64³, 1 | 2369 → 2227 | 1179 → 1145 |
+| 64³, 8 | 394 → 379 | 223 → 217 |
+| 128³, 1 | 34933 → 33687 | 14557 → 14188 |
+| 128³, 8 | 5406 → 5173 | 2461 → 2380 |
+| 1024², 1 | 1262 → 1246 | 5132 → 5080 |
+| 1024², 8 | 215 → 183 | 799 → 770 |
+
+Solves run only a few polishes (one per tenfold fall of the gap), so the
+whole-solve gain is 1–6% on one thread and 3–15% on eight. Polishing more
+often (every threefold fall) was within ±5% either way and was not adopted.

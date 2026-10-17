@@ -97,19 +97,22 @@ def test_special_cases():
         fp.tv_aniso(xb, 0.5)
 
 
-@pytest.mark.parametrize("shape,k", [((20, 24, 40), 3), ((96, 120), 2)])
-def test_tight_solves_threads_and_warm(shape, k):
+@pytest.mark.parametrize("shape,k,w", [((20, 24, 40), 3, 0.8), ((96, 120), 2, 0.8), ((37, 21, 30), 3, 0.8),
+                                       ((131, 77), 2, 0.8), ((37, 21, 30), 3, [0.0, 0.8, 0.8])])
+def test_tight_solves_threads_and_warm(shape, k, w):
     """Tight solves on images large enough that the passes and the polish
-    split over threads: the same bits for any thread count, an independent
-    certificate, and a warm start from the dual returned stops at once."""
+    split over threads (and its slabs along axis 0 over several, uneven or
+    with no axis-0 edges): the same bits for any thread count, an
+    independent certificate, and a warm start from the dual returned stops
+    at once."""
     x = image(shape, 10)
-    op = fp.TVAniso(k, 0.8)
+    op = fp.TVAniso(k, w)
     runs = [op.solve(x, 0.3, tol=1e-12, max_iter=100000, threads=t) for t in (1, 3, 8)]
     z, info = runs[0]
     assert info.converged
     for zt, it in runs[1:]:
         assert np.array_equal(z, zt) and np.array_equal(info.dual, it.dual) and it.iters == info.iters
-    gap, feas = certificate(x, z, info.dual, 0.3, 0.8, k)
+    gap, feas = certificate(x, z, info.dual, 0.3, w, k)
     half = 0.5 * (x ** 2).sum()
     assert feas <= 1e-12 * (1 + np.abs(x).max())
     assert -1e-12 * half <= gap <= 1e-12 * half * (1 + 1e-6)
