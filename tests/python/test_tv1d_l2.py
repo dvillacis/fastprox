@@ -118,6 +118,24 @@ def test_special_cases():
     np.testing.assert_array_equal(y, fp.tv1d_l2(x, 3.0))
 
 
+def test_tiny_weights_on_constant_pieces():
+    # The nightly fuzzer: constant pieces whose running mean rounds, with a
+    # weight of 2e-53 inside one of them, gave NaN (the rounding residual over
+    # w^2 posed as a dual of 1e38). Constant pieces add nothing to the norm,
+    # so they stay as they are and the varying piece is solved on its own.
+    w = np.array([0.46875] * 5 + [0, 0, 2.2334456681412216e-53] + [0.46875] * 5 + [3.3125])
+    x = np.full(15, 29.1132812)
+    x[6] = -0.00390625
+    for g in (0.515625, 1.0, 1e3):
+        np.testing.assert_array_equal(fp.tv1d_l2(x, g, weights=w), x)
+    assert np.isfinite(fp.TV1DL2(w).prox_conj(x, 0.515625)).all()
+    x[:6] = np.random.default_rng(8).normal(size=6) + 29.0
+    for g in (0.1, 0.5, 2.0):
+        z = fp.tv1d_l2(x, g, weights=w)
+        np.testing.assert_array_equal(z[6:], x[6:])
+        np.testing.assert_allclose(z[:6], fp.tv1d_l2(x[:6], g, weights=w[:5]), rtol=1e-14, atol=1e-13)
+
+
 def test_float32():
     rng = np.random.default_rng(5)
     x = np.cumsum(rng.normal(size=(8, 1000)), axis=1)

@@ -131,16 +131,21 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         }
         return S;
     }
-    // xc <- x minus its piece means.
+    // xc <- x minus its piece means, taken relative to the piece's first entry,
+    // so that the rounding scales with the variation within the piece and a
+    // constant piece gives exactly zero. The inside test divides running sums
+    // of xc by w_e^2: a rounding residual of eps |x| over a tiny weight would
+    // otherwise pass for a huge dual (found by fuzzing: NaN at w_e = 2e-53).
     template <class T>
     void center(const T *x, double *xc, int64_t n) const noexcept {
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e < n - 1 && ae(e) != 0.0) continue;
-            double m = 0.0;  // piece [s, e]
-            for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]);
+            const double x0 = static_cast<double>(x[s]);  // piece [s, e]
+            double m = 0.0;
+            for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]) - x0;
             m /= static_cast<double>(e - s + 1);
-            for (int64_t i = s; i <= e; ++i) xc[i] = static_cast<double>(x[i]) - m;
+            for (int64_t i = s; i <= e; ++i) xc[i] = (static_cast<double>(x[i]) - x0) - m;
             s = e + 1;
         }
     }
@@ -205,12 +210,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             }
         }
         const double rho0 = std::sqrt(rho0sq);
-        if (rho0 <= gamma) {
+        double L = 0.0, R = norm_wd(xc, n) / gamma;
+        // R = 0: no differences across nonzero weights, so x is its own
+        // piecewise mean whatever rounding left in rho0.
+        if (rho0 <= gamma || !(R > 0.0)) {
             for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i]);
             if (code) code[0] = kInside;
             return kRowOk;
         }
-        double L = 0.0, R = norm_wd(xc, n) / gamma;
         double mu = (rho0 / gamma - 1.0) * rho0sq / kap0;  // Newton from mu = 0
         if (!(mu > L && mu < R)) mu = 0.5 * (L + R);
         // zc = (sigma I + kappa K)^{-1} sigma xc at mu, returning s; y likewise
