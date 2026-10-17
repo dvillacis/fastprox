@@ -372,6 +372,26 @@ def test_jvp_finite_differences(name, conj):
         np.testing.assert_allclose(dz, fd, rtol=1e-5, atol=1e-5 * (1 + np.abs(fd).max()))
 
 
+@pytest.mark.parametrize("conj", [False, True])
+@pytest.mark.parametrize("name", NAMES)
+def test_jacobian_diag(name, conj):
+    """ctx.jacobian_diag() is jvp(ctx, ones) for the elementwise operators,
+    and then jvp(ctx, dx) = diag * dx for any dx; the others refuse it."""
+    _, _, _, op, x, _, ctx, rng = _derivative_setup(name, conj, 0)
+    if not op._elementwise:
+        with pytest.raises(ValueError):
+            ctx.jacobian_diag()
+        return
+    d = ctx.jacobian_diag()
+    assert d.shape == x.shape and d.dtype == x.dtype
+    np.testing.assert_array_equal(d, op.jvp(ctx, np.ones_like(x)))
+    dx = rng.normal(size=x.shape)
+    if conj:  # dx - sigma p'(t) dx / sigma: linear in dx up to rounding
+        np.testing.assert_allclose(op.jvp(ctx, dx), d * dx, rtol=1e-14, atol=1e-15 * np.abs(dx).max())
+    else:
+        np.testing.assert_array_equal(op.jvp(ctx, dx), d * dx)
+
+
 def test_named_grads():
     w = np.linspace(0.5, 1.5, N - 1)
     op = fp.TV1D(w)
