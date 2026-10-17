@@ -76,7 +76,7 @@ Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 - [x] Example `examples/weighted_glasso.py` (2026-10-17): weighted graphical lasso by ADMM, with the −log det step as `eigh` plus `LogBarrier` on the eigenvalues and the penalty step as weighted `Soft` or weighted `MCP` on the packed upper triangle (each pair counted twice in the penalty and in the Frobenius term, so the per-entry prox at step 1/r solves the usual Σ_{i≠j} form). The graphical lasso, adaptive weights from a first estimate and weighted MCP compared on edge recovery and error, with the KKT residual of the convex solves; run by the Python tests
 
 - [x] Gate met (2026-10-17): the iterative operators meet `gap ≤ tol · ½‖x‖²` with the gap recomputed independently in `tests/python/test_tv_aniso.py`, `test_tv_iso.py` and the C tests; the nonconvex maps are verified against a refined grid in `tests/python/test_nonconvex.py`, with exact tie flags
-- [ ] Release 0.2.0: version 0.2.0, a TestPyPI dry run, then the `v0.2.0` tag
+- [x] Published 0.2.0 to PyPI (2026-10-17): https://pypi.org/project/fastprox/0.2.0/, 5 abi3 wheels and the sdist, uploaded by trusted publishing from the `v0.2.0` tag after a TestPyPI dry run; checked by installing from TestPyPI and from PyPI into fresh environments and running the examples
 
 **Gate:** iterative operators meet `gap ≤ tol · ½‖x‖²` with the gap recomputed independently in tests; nonconvex maps verified against a dense grid with refinement, tie flags exact at thresholds.
 
