@@ -10,7 +10,8 @@ behind a plain-C API, with Python bindings.
   found.
 - **Differentiable.** Jacobian-vector and vector-Jacobian products in the
   input, the step and the operator's parameters, for bilevel learning and
-  implicit differentiation.
+  implicit differentiation, also inside PyTorch and JAX programs
+  (`fastprox.torch`, `fastprox.jax`, since 0.3).
 - **Batched.** Applied along any axis of a float32 or float64 array, with rows
   processed in parallel on fastprox's own threads (no OpenMP runtime to clash
   with PyTorch or others) and results bit-identical for any number of threads.
@@ -66,7 +67,7 @@ which entries sit at a breakpoint, and their derivatives can be taken on either 
 ## Documentation
 
 - [API reference](https://github.com/dvillacis/fastprox/blob/master/docs/api.md) (C and Python)
-- [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, image denoising, proximal gradient, sparse recovery, group sparsity, the weighted graphical lasso, derivatives, bilevel learning
+- [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, image denoising, proximal gradient, sparse recovery, group sparsity, the weighted graphical lasso, derivatives, bilevel learning, PyTorch and JAX
 - [Benchmarks](https://github.com/dvillacis/fastprox/blob/master/docs/benchmarks.md) against proxTV and Condat's C code
 - [Design specification](https://github.com/dvillacis/fastprox/blob/master/docs/spec.md)
 - [Roadmap](https://github.com/dvillacis/fastprox/blob/master/ROADMAP.md) and [changelog](https://github.com/dvillacis/fastprox/blob/master/CHANGELOG.md)

@@ -663,6 +663,64 @@ v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)
   `TypeError` (dtype), `MemoryError` and `RuntimeError`. The GIL is released
   during every computation.
 
+### PyTorch and JAX (*since 0.3*)
+
+`fastprox.torch` and `fastprox.jax` make any operator a differentiable
+function of its input, its step and its parameters. The gradients come from
+the library's own VJP (and JVP), not from differentiating through
+iterations, so the iterative operators cost one solve and one derivative
+pass.
+
+```python
+import torch, jax, jax.numpy as jnp
+import fastprox as fp
+import fastprox.torch as fpt
+import fastprox.jax as fpj
+
+x = torch.randn(64, 1000, dtype=torch.float64, requires_grad=True)
+w = torch.full((999,), 0.8, dtype=torch.float64, requires_grad=True)
+z = fpt.prox(fp.TV1D, x, 0.5, weights=w)       # a class and its parameters
+z.pow(2).sum().backward()                      # x.grad, w.grad
+v = fpt.prox(fp.TVIso(), torch.randn(8, 64, 64), 0.1, tol=1e-6)   # an operator
+c = fpt.prox_conj(fp.Simplex(), x, 2.0, axis=-1)
+
+xj = jnp.asarray(x.detach().numpy(), jnp.float32)
+loss = lambda w: jnp.sum(fpj.prox(fp.TV1D, xj, 0.5, weights=w) ** 2)
+g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
+```
+
+- **`prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params)`**
+  and `prox_conj(op, y, sigma, ...)`. `op` is an operator, whose
+  parameters are then constants, or an operator class with its constructor
+  arguments as keywords. `axis` (row operators), `tol` and `max_iter`
+  (iterative operators) are passed on when given.
+- **Parameter gradients.** A parameter gets the gradient of the `Grads` field
+  of the same name (see `Operator.vjp`): in PyTorch, float tensors that
+  require grad; in JAX, JAX float arrays (Python and NumPy values are
+  constants). PyTorch raises `ValueError` for a tensor that requires grad
+  and has no gradient field (`L0`'s `lam`, `Isotonic`'s weights); JAX, which
+  computes every cotangent, returns NaN for it. Integer arguments (groups,
+  edges) are constants and must be concrete under `jax.jit`.
+- **PyTorch**: a `torch.autograd.Function` with `backward` (the VJP) and
+  `jvp` (the JVP, for `torch.autograd.forward_ad`; only for parameters that
+  are part of θ, so not `Soft`'s `lam`). Not twice differentiable, and not
+  under the `torch.func` transforms (`grad`, `jvp`, `vmap`), which pass the
+  derivatives wrapped tensors that cannot be read as NumPy arrays. Checked
+  with `torch.autograd.gradcheck` in both modes. `torch.compile` breaks the
+  graph at the call.
+- **JAX**: `jax.custom_vjp` over `jax.pure_callback`, so it works under
+  `jit`, `grad` and `vmap` (one call per batch element, as
+  `vmap_method="sequential"`); reverse mode only. The backward pass
+  recomputes the prox to rebuild its structure, so a gradient costs two
+  prox calls and one VJP. Float64 needs `jax_enable_x64`.
+- **Devices and dtypes.** The computation runs on the CPU in float32 or
+  float64. PyTorch tensors on another device are copied to the CPU and the
+  result back; other dtypes raise `TypeError`. A device-native path for image
+  TV is planned (ROADMAP, 0.3).
+- **Install** PyTorch or JAX yourself; fastprox does not depend on them. In
+  this repository, `uv sync --group interop` installs both (PyTorch's CPU
+  wheels on Linux).
+
 ## Conventions
 
 - Derivatives are an element of the generalized Jacobian, chosen by the

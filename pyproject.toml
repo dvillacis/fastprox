@@ -42,6 +42,7 @@ ref = [
     "clarabel>=0.11.1",
     "cvxpy>=1.9.3",
 ]
+interop = ["torch>=2.4", "jax>=0.4.34"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -60,6 +61,15 @@ result = "{value}{suffix}"
 [tool.scikit-build.cmake.define]
 FASTPROX_PYTHON = "ON"
 FASTPROX_BUILD_TESTS = "OFF"
+
+# PyTorch's CPU wheels on Linux: the PyPI ones pull in the CUDA libraries.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.uv]
 # Rebuild the extension whenever the C++ sources change.

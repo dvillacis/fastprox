@@ -87,6 +87,19 @@ jobs:
       - run: uv sync --python ${{ matrix.python }}
       - run: uv run pytest -q
 
+  interop:
+    name: PyTorch and JAX ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --group interop
+      - run: uv run --group interop pytest -q tests/python/test_torch.py tests/python/test_jax.py
+
   wheels:
     name: Wheels ${{ matrix.os }}
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
