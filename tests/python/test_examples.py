@@ -68,3 +68,12 @@ def test_weighted_glasso_beats_the_graphical_lasso():
     assert a_extra < g_extra / 2 and a_missed <= g_missed + 2 and m_missed <= a_missed
     assert m_err < a_err < g_err
     assert max(res["kkt"].values()) < 1e-5     # the convex solves are optimal
+
+
+def test_autodiff_frameworks_learn():
+    pytest.importorskip("torch")
+    pytest.importorskip("jax")
+    (before, after, found), (gamma, best) = _load("autodiff_frameworks").main()
+    ex = _load("autodiff_frameworks")
+    assert found == ex.JUMPS and after < before / 3
+    assert abs(gamma / best - 1) < 0.1           # grid spacing is 7%
