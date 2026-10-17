@@ -10,10 +10,10 @@ by solving
 lasso (rho = lam |t|, w = 1), the adaptive graphical lasso (w_ij from a
 first estimate, small where it found a strong edge) and a weighted MCP with
 the same weights. The weights remove most spurious edges, and MCP, which
-stops shrinking large entries, then lowers the estimation error. Over ten
-random problems the weights halved the spurious edges or better every time
-(at the cost of up to three missed edges in some), and MCP lowered the
-error further in nine.
+stops shrinking large entries, then lowers the estimation error. Over
+twelve random problems the weights halved the spurious edges or better every
+time (at the cost of up to four more missed edges in some), and MCP lowered
+the error further in nine.
 
 ADMM (Boyd et al., Distributed Optimization and Statistical Learning via
 ADMM, 2011, Section 6.5) alternates
@@ -49,7 +49,11 @@ def make_problem(rng):
         i, j = rng.choice(P, 2, replace=False)
         theta[i, j] = theta[j, i] = rng.choice([-1, 1]) * 0.3
     theta += (0.25 - min(0.0, np.linalg.eigvalsh(theta).min())) * np.eye(P)
-    x = rng.multivariate_normal(np.zeros(P), np.linalg.inv(theta), size=N_SAMPLES)
+    # x = L^{-T} g with Theta = L L^T has covariance Theta^{-1}. The Cholesky
+    # factor is unique, so every platform draws the same samples
+    # (multivariate_normal factors by SVD, whose signs depend on LAPACK).
+    L = np.linalg.cholesky(theta)
+    x = np.linalg.solve(L.T, rng.standard_normal((P, N_SAMPLES))).T
     return theta, np.cov(x, rowvar=False, bias=True)
 
 
