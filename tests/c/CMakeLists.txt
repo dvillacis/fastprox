@@ -10,3 +10,8 @@ add_test(NAME header_c99 COMMAND test_header)
 add_executable(test_core test_core.cpp)
 target_link_libraries(test_core PRIVATE fastprox::fastprox)
 add_test(NAME core COMMAND test_core)
+
+# The max-flow engine is internal: tested from its header.
+add_executable(test_maxflow test_maxflow.cpp)
+target_include_directories(test_maxflow PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME maxflow COMMAND test_maxflow)
