@@ -194,12 +194,20 @@ image-by-image calls, for any thread count.
   when its gap is at most `tol`·‖x‖²/2 (default 1e-6), or after `max_iter`
   iterations (default 1000), in which case the call returns `FP_ENOTCONV`
   with the last iterate written. `fp_info.gap` is the sum over the batch,
-  `fp_info.iters` the maximum.
+  `fp_info.iters` the maximum. In 2D the iterate checked is the second
+  block step of an iteration, so a check is one sweep over the image; checks
+  come after iterations 1 and 2, then when the gap's rate of fall predicts
+  the tolerance, and at least every 4 iterations, so a loose solve can stop
+  after one or two iterations. In 3D the gap is
+  checked every 4 iterations. An unpolished z returned is x − Σₐ q_a for
+  the dual returned.
 - **Polish.** The constant regions of the solution are read off the dual:
   an edge whose 1D dual lies strictly inside its bound has no jump at the
   solution. The values on those regions have a closed form, from the input
-  and the dual's signs on their boundary. At the gap checks (first, then each
-  time the iterate's gap has fallen tenfold, and at the end) this polished
+  and the dual's signs on their boundary. At the gap checks (the first, in
+  2D from iteration 4 of a cold start; then once the iterate's gap has
+  fallen tenfold, or sooner when the last attempt predicts success; and at
+  the end) this polished
   point is formed and its gap, with the same dual, computed; the solve stops
   as soon as that gap meets the tolerance and is at most 1/100 of the
   iterate's (a larger gap means the regions are not yet right, and such a
@@ -218,7 +226,10 @@ image-by-image calls, for any thread count.
   feasible first: a fiber whose running sums leave [−γwₐ, γwₐ] or do not end
   at 0 (beyond rounding) is rebuilt from its running sums clipped to that
   interval, and non-finite ones set to 0. Duals from earlier calls are
-  feasible and are used unchanged.
+  feasible and are used unchanged, and the output and the polish are
+  functions of the input and the dual, so a warm start from the dual of a
+  solve of the same input returns its output bit for bit after 0
+  iterations.
 - **Derivatives** are exact for the identified regions: averaging over each
   region, with γ and weight terms from the jump signs on its boundary. They
   cost O(n), with no linear solve.

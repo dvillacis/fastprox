@@ -15,6 +15,8 @@
 //        y+   = w - u + prox_{g2}(u - w)
 //        w    = y+ + (t_k - 1) / t_{k+1} (y+ - y),   t_{k+1} = (1 + sqrt(1 + 4 t_k^2)) / 2
 //    and the primal z = prox_{g1}(d + y), with |z - z*|^2 <= 4 |y0 - y*|^2 / (k+1)^2.
+//    The point certified and returned is instead the second block step of
+//    the iteration, whose gap needs no further 1D pass (see adbpg).
 //  * Three active axes: the fast dual proximal gradient method for a sum of
 //    p = 3 terms, Beck (2017) Algorithm 9 (Section 12.5.1): with u = d + sum w_i,
 //        y_i+ = w_i - u / p + prox_{p g_i}(u - p w_i) / p,
@@ -66,7 +68,8 @@
 namespace fp {
 namespace {
 
-constexpr int kCheck = 4;  // iterations between gap checks
+// Iterations between restart tests, and between gap checks (in 2D, at most).
+constexpr int kCheck = 4;
 // A polish is retried once the gap of the iterate has fallen by this factor.
 constexpr double kPolishDrop = 0.1;
 // Edges whose 1D dual is within this relative distance of its bound count as
@@ -243,12 +246,11 @@ struct TVAniso final : ImageOp<TVAniso> {
             return s;
         });
         const double target = c.tol * 0.5 * dn2;
-        // The iterate z is a block step along exact_axis, exactly piecewise
-        // constant there; a polished z is not.
+        // The iterate z is a block step along exact_axis, piecewise constant
+        // there (exactly in 3D, up to rounding in 2D); a polished z is not.
         int exact_axis;
         if (na == 2) {
-            exact_axis = g.S[act[0]] < g.S[act[1]] ? act[0] : act[1];
-            if (adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target)) exact_axis = -1;
+            exact_axis = adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target);
         } else {
             exact_axis = 2;
             if (fdpg3(g, c, lam, d, zz, u, y, wv, pb, part, target)) exact_axis = -1;
@@ -276,21 +278,64 @@ struct TVAniso final : ImageOp<TVAniso> {
     // When to polish: at the first gap check, then after each failed attempt
     // (iterate gap gp, candidate gap pz) once the iterate's gap has fallen by
     // kPolishDrop, or sooner if the ratio pz / gp of that attempt predicts
-    // that the candidate meets the target. A last attempt at the end keeps
-    // the candidate if its gap is at most kPolishRatio of the iterate's.
+    // that the candidate meets the target. Where a polish costs more than an
+    // iteration (2D: about 1.2 on one thread, against a third in 3D), only
+    // ratios of at most kPolishRatio predict: larger ones are not taken, and
+    // at lambda = 0.5 they stayed at 0.1-0.4 for 50-90 iterations. In 3D the
+    // eager retries reach 1e-4 error 20% sooner, and in 2D the restricted ones
+    // 2-16% sooner at 1e-3 and 1e-4. A last attempt at the end keeps the
+    // candidate if its gap is at most kPolishRatio of the iterate's.
     struct PolishSchedule {
+        bool eager;
         double next = std::numeric_limits<double>::infinity();
+        explicit PolishSchedule(bool e) : eager(e) {}
         bool due(double gp) const { return gp <= next; }
         void done(double gp, double pz, double target) {
             next = gp * kPolishDrop;
-            if (pz > 0.0 && pz < gp) next = std::max(next, target * gp / pz);
+            if (pz > 0.0 && pz < (eager ? 1.0 : kPolishRatio) * gp) next = std::max(next, target * gp / pz);
         }
     };
 
-    // Two active axes a1 (primal axis, the one with the smaller stride) and a2.
-    bool adbpg(const Geom &g, ImageCall &c, const int *act, const double *lam, const double *d,
-               double *z, double *u, double *y, double *wv, const PolishBuf &pb, double *part,
-               double target) const {
+    // When to check the gap (ADBPG, where a check is one sweep over z):
+    // after the first two iterations, then when the gap's rate of fall
+    // between the last two checks predicts that it meets the target, and at
+    // least every kCheck iterations.
+    struct CheckSchedule {
+        int next = 1, prev_it = -1;
+        double prev = 0.0;
+        void done(int it, double gp, double target) {
+            int step = 1;
+            if (prev_it >= 0) {
+                step = kCheck;
+                if (gp < prev && gp > target) {
+                    const double n = std::log(target / gp) / std::log(gp / prev) * (it - prev_it);
+                    if (n < kCheck) step = std::max(1, static_cast<int>(n));
+                }
+            }
+            prev_it = it;
+            prev = gp;
+            next = it + step;
+        }
+    };
+
+    // Two active axes a1 (the one with the smaller stride) and a2. Returns
+    // the axis along which the returned z is a block step (piecewise constant
+    // up to rounding), or -1.
+    //
+    // The iterate checked is the second block step of an iteration,
+    // r = prox_{g2}(u - w) with u = prox_{g1}(d + w), not z(y+) =
+    // prox_{g1}(d + y+): with q1 = d + w - u (the residual of the first
+    // step) and q2 = -y+ = u - w - r (of the second), both feasible and
+    // d - r = q1 + q2, the gap of r is a certificate, and it costs one sweep
+    // over r instead of another 1D pass. On the 2D benchmark images its gap
+    // is 0.2-1.7 times that of z(y+), mostly below 1 at lambda = 0.5. In
+    // terms of y+, q1 = d + y+ - r.
+    //
+    // The z returned unpolished is d - q1 - q2 for the dual returned, which
+    // is r up to rounding, so that a warm start from that dual rebuilds it
+    // bit for bit; the polish depends on (d, q) alone as well.
+    int adbpg(const Geom &g, ImageCall &c, const int *act, const double *lam, const double *d, double *z,
+              double *u, double *y, double *wv, const PolishBuf &pb, double *part, double target) const {
         const int64_t N = g.N;
         const int a1 = g.S[act[0]] < g.S[act[1]] ? act[0] : act[1];
         const int a2 = a1 == act[0] ? act[1] : act[0];
@@ -302,35 +347,48 @@ struct TVAniso final : ImageOp<TVAniso> {
             std::fill(y, y + N, 0.0);
         std::memcpy(wv, y, static_cast<size_t>(N) * sizeof(double));
 
-        // z = prox_{g1}(d + y), and the gap of (z, q1 = d + y - z, q2 = -y).
-        auto primal = [&]() {
-            pass(g, a1, lam[a1], c, [&](int64_t o) { return d[o] + y[o]; },
-                 [&](int64_t o, double zo, double) { z[o] = zo; });
-            return gap(g, c, lam, d, z, part);
-        };
-        auto dual = [&]() {
+        // The dual of (y, z), and zo = d - q1 - q2 from it.
+        auto dual = [&](double *zo) {
             for (int64_t i = 0; i < N; ++i) {
                 q1[i] = d[i] + y[i] - z[i];
                 q2[i] = -y[i];
+                zo[i] = d[i] - q1[i] - q2[i];
             }
         };
         double t = 1.0;
         int it = 0;
         Restart restart;
-        PolishSchedule sched;
+        PolishSchedule sched(false);
+        CheckSchedule checks;
         bool polished = false;
-        // At a gap check: the gap of z(y), and a polish when one is due.
-        auto check = [&]() {
-            double gz = primal();
-            if (!(gz <= target) && sched.due(gz)) {
-                dual();
-                double pz;
-                if (try_polish(g, c, lam, d, z, pb, part, target, gz, pz)) polished = true;
-                else sched.done(gz, pz, target);
-            }
+        // A polish from the dual of (y, z). Not at the first checks of a cold
+        // start, whose candidates never had the right regions (a warm start's
+        // often have them from the start), and always at max_iter.
+        auto polish = [&](double gz) {
+            const bool last = it == c.max_iter;
+            if (gz <= target || !(last || ((c.warm || it >= kCheck) && sched.due(gz)))) return gz;
+            if (it > 0) dual(z);  // at it = 0 it is already the dual of z
+            double pz;
+            if (try_polish(g, c, lam, d, z, pb, part, last ? gz : target, gz, pz)) polished = true;
+            else sched.done(gz, pz, target);
             return gz;
         };
-        double gp = c.warm ? check() : std::numeric_limits<double>::infinity();
+        // A warm start first tries d - q1 - q2 for the dual given and its
+        // polish, which give the z of a solve of the same d from its dual. If
+        // neither certifies, it continues as from z(y) = prox_{g1}(d + y) and
+        // its dual (with y = 0 when max_iter is 0): for a nearby d, q1 is then
+        // fitted to the new data, which certifies more often.
+        double gp = std::numeric_limits<double>::infinity();
+        if (c.warm) {
+            for (int64_t i = 0; i < N; ++i) z[i] = d[i] - q1[i] - q2[i];
+            gp = polish(gap(g, c, lam, d, z, part));
+        }
+        if (!(gp <= target) && (c.warm || c.max_iter == 0)) {
+            pass(g, a1, lam[a1], c, [&](int64_t o) { return d[o] + y[o]; },
+                 [&](int64_t o, double zo, double) { z[o] = zo; });
+            dual(z);
+            gp = polish(gap(g, c, lam, d, z, part));
+        }
         while (!(gp <= target) && it < c.max_iter) {
             pass(g, a1, lam[a1], c, [&](int64_t o) { return d[o] + wv[o]; },
                  [&](int64_t o, double zo, double) { u[o] = zo; });
@@ -342,6 +400,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                 const double r = (wv[o] - yn) * (yn - y[o]);
                 wv[o] = yn + beta * (yn - y[o]);
                 y[o] = yn;
+                z[o] = zo;
                 return r;
             };
             auto in = [&](int64_t o) { return u[o] - wv[o]; };
@@ -354,18 +413,26 @@ struct TVAniso final : ImageOp<TVAniso> {
                 t = 1.0;
             }
             ++it;
-            if (it % kCheck == 0 || it == c.max_iter) gp = check();
+            if (it == checks.next || it == c.max_iter) {
+                gp = polish(gap(g, c, lam, d, z, part));
+                checks.done(it, gp, target);
+            }
         }
-        if (!std::isfinite(gp)) gp = primal();
-        if (!polished) {
-            dual();
-            double pz;
-            if (!(gp <= target)) polished = try_polish(g, c, lam, d, z, pb, part, gp, gp, pz);
+        int exact = polished || it == 0 ? -1 : a2;
+        if (!polished && it > 0) {
+            // d - q1 - q2 in place of r, unless rounding alone takes its gap
+            // over the target.
+            dual(pb.zp);
+            const double gw = gap(g, c, lam, d, pb.zp, part);
+            if (gw <= target || !(gp <= target)) {
+                std::memcpy(z, pb.zp, static_cast<size_t>(N) * sizeof(double));
+                gp = gw;
+            }
         }
         c.gap = std::max(gp, 0.0);
         c.iters = it;
         c.converged = gp <= target;
-        return polished;
+        return exact;
     }
 
     // Three active axes (k == 3). y holds y_0..2 (y_i = -q_i), wv the
@@ -400,7 +467,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         double t = 1.0;
         int it = 0;
         Restart restart;
-        PolishSchedule sched;
+        PolishSchedule sched(true);
         bool polished = false;
         // At a gap check: the gap of z(y), and a polish when one is due.
         auto check = [&]() {
@@ -511,7 +578,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     // For every edge e = (i, j = i + S[a]) along axis a: the 1D dual on it,
     // recovered from q_a = D_a^T p_a as p_e = -(sum of q_a along the fiber up
     // to i); bit a of flag[i] when |p_e| < lam (1 - eta), and otherwise
-    // delta_e = lam sign(p_e) - p_e added to v[i] and taken from v[j]. Each
+    // lam sign(p_e) added to v[i] and taken from v[j]. Each
     // entry is touched only by the edges of its own fiber, so the fixed chunks
     // of fibers run in parallel.
     static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, double eta, const double *qa,
@@ -544,39 +611,41 @@ struct TVAniso final : ImageOp<TVAniso> {
                 acc[r] += q[o + r];
                 const double pe = -acc[r];
                 const bool inside = std::fabs(pe) < in;
-                const double delta = inside ? 0.0 : std::copysign(lam, pe) - pe;
+                const double ls = inside ? 0.0 : std::copysign(lam, pe);
                 flag[o + r] |= inside ? bit : uint8_t{0};
-                v[o + r] += delta;
-                v[o + r + s] -= delta;
+                v[o + r] += ls;
+                v[o + r + s] -= ls;
             }
         }
     }
 
-    // A candidate from the dual q = c.dual, with d - z = sum_a q_a. An edge
-    // whose 1D dual lies strictly inside its bound, |p_e| < lam_a (1 - eta),
-    // is flat at the solution (complementary slackness: a jump forces
-    // p_e = lam_a sign(jump)), so the solution is constant on the connected
-    // components C of those edges. With p_e replaced by lam_a sign(p_e) on the
-    // other edges, the optimality condition z - d + sum_a D_a^T p_a = 0 summed
-    // over C gives
-    //     zp_C = mean_C(z) + (sum_{e=(i,j): i in C} delta_e - sum_{e=(i,j): j in C} delta_e) / |C|,
-    // delta_e = lam_a sign(p_e) - p_e, which is the exact solution once the
-    // components are right. Its gap with the same dual,
-    //     P(zp) - D(q),   D(q) = <d, s> - |s|^2 / 2,  s = d - z,
+    // A candidate from the dual q = c.dual. An edge whose 1D dual lies
+    // strictly inside its bound, |p_e| < lam_a (1 - eta), is flat at the
+    // solution (complementary slackness: a jump forces p_e = lam_a
+    // sign(jump)), so the solution is constant on the connected components C
+    // of those edges. With p_e replaced by lam_a sign(p_e) on the other edges,
+    // the optimality condition z - d + sum_a D_a^T p_a = 0 summed over C
+    // gives (the edges inside C cancel)
+    //     zp_C = (sum_C d + sum_{e=(i,j): i in C} lam_e sign(p_e) - sum_{e=(i,j): j in C} lam_e sign(p_e)) / |C|,
+    // which is the exact solution once the components are right. Its gap
+    // with the same dual,
+    //     P(zp) - D(q),   D(q) = <d, s> - |s|^2 / 2,  s = sum_a q_a,
     // still bounds |zp - z*|^2 / 2. pz is that gap; when it is at most accept
     // and at most kPolishRatio gp, z and gp take the candidate and it returns
-    // true. Uses u (the union-find
-    // parents) and the polish scratch.
+    // true. The candidate and pz depend on d and q alone, so a warm start
+    // from the dual of a polished solve polishes to the same bits. Uses u
+    // (the union-find parents) and the polish scratch.
     bool try_polish(const Geom &g, const ImageCall &c, const double *lam, const double *d, double *z,
                     const PolishBuf &pb, double *part, double accept, double &gp, double &pz) const {
         const int64_t N = g.N;
         int32_t *parent = pb.parent, *label = pb.label, *cnt = pb.cnt;
         double *zp = pb.zp, *sum = pb.sum;
         // Inside edges as bit a of flag[i] for the edge (i, i + S[a]), and in
-        // zp the sum of the delta_e over the edges at each entry (+ at i, - at j).
+        // zp, d plus the lam_e sign(p_e) of the other edges at each entry (+ at
+        // i, - at j).
         uint8_t *flag = reinterpret_cast<uint8_t *>(label);
         std::memset(flag, 0, static_cast<size_t>(N));
-        std::fill(zp, zp + N, 0.0);
+        std::memcpy(zp, d, static_cast<size_t>(N) * sizeof(double));
         for (int a = 0; a < g.k; ++a)
             if (lam[a] > 0.0) mark_edges(g, c, a, lam[a], kPolishEta, c.dual + a * N, flag, zp);
         // Components by union-find with union by the smaller root, so every
@@ -701,7 +770,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                         list[m++] = static_cast<int32_t>(i);
                         continue;
                     }
-                    sum[label[i]] += z[i] + zp[i];
+                    sum[label[i]] += zp[i];
                     ++cnt[label[i]];
                 }
                 xin[t] = m;
@@ -710,19 +779,21 @@ struct TVAniso final : ImageOp<TVAniso> {
         for (int64_t t = 0; t < nslab; ++t)
             for (int64_t m = 0; m < xin[t]; ++m) {
                 const int64_t i = parent[slab_lo(t) + m];
-                sum[label[i]] += z[i] + zp[i];
+                sum[label[i]] += zp[i];
                 ++cnt[label[i]];
             }
         row_for(g, c, [&](int64_t r) {
             for (int64_t i = r * n; i < (r + 1) * n; ++i) zp[i] = sum[label[i]] / cnt[label[i]];
         });
 
+        const double *q = c.dual;
         pz = row_sum(g, c, part, [&](int64_t r) {
             const int64_t b = r * n;
             double acc = 0.0;
             for (int64_t j = 0; j < n; ++j) {
                 const double e = zp[b + j] - d[b + j];
-                const double sj = d[b + j] - z[b + j];
+                double sj = q[b + j];
+                for (int a = 1; a < g.k; ++a) sj += q[a * N + b + j];
                 acc += 0.5 * e * e - (d[b + j] * sj - 0.5 * sj * sj);
             }
             if (lam[g.k - 1] > 0.0)
@@ -744,10 +815,10 @@ struct TVAniso final : ImageOp<TVAniso> {
     // ---- structure ----------------------------------------------------------
 
     // Saved for jvp/vjp: the components of the graph of flat edges of z
-    // (|z_j - z_i| <= tau along an active axis; exactly equal along
+    // (|z_j - z_i| <= tau along an active axis; equal up to rounding along
     // exact_axis, where z is a block step and so piecewise constant by
-    // construction) and the boundary sign sums S_{C,a} on every axis. Uses u
-    // as scratch.
+    // construction, or d - q1 - q2 for the q of one) and the boundary sign
+    // sums S_{C,a} on every axis. Uses u as scratch.
     void structure(const Geom &g, ImageCall &c, const double *lam, int exact_axis, const double *d,
                    const double *z, double *u) const {
         const int64_t N = g.N;
@@ -768,9 +839,12 @@ struct TVAniso final : ImageOp<TVAniso> {
         double scale = 0.0;
         for (int64_t i = 0; i < N; ++i) scale = std::max(scale, std::fabs(d[i]));
         const double rms = std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N));
+        // The entries of d - q1 - q2 are within a few ulps of
+        // max(|d|, |q1|, |q2|), and |q_a| <= 2 lam_a.
+        const double ulps = 64.0 * 2.2e-16 * (scale + 2.0 * (lam[0] + lam[1] + lam[2]));
         for (int a = 0; a < g.k; ++a) {
             if (lam[a] == 0.0) continue;
-            const double tau = a == exact_axis ? 0.0 : 8.0 * rms + 64.0 * 2.2e-16 * scale;
+            const double tau = a == exact_axis ? ulps : 8.0 * rms + 64.0 * 2.2e-16 * scale;
             const int64_t s = g.S[a], L = g.L[a];
             for (int64_t i = 0; i < N; ++i) {
                 if ((i / s) % L == L - 1) continue;

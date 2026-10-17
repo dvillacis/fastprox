@@ -835,3 +835,91 @@ captures, not `restrict` parameters. As a separate function it went from
 Solves run only a few polishes (one per tenfold fall of the gap), so the
 whole-solve gain is 1–6% on one thread and 3–15% on eight. Polishing more
 often (every threefold fall) was within ±5% either way and was not adopted.
+
+## 2026-10-17, Apple M5 Pro: anisotropic TV in 2D, gap checks without a 1D pass
+
+`bench/compare_tv_aniso.py` on the same images and reference, with finer
+sweeps for every solver: fastprox's tolerance in quarter decades from 1e-1
+to 1e-12 (decades before) and proxTV's iteration cap in half powers of two
+from 1 to 1024 (powers of two before). A solver that stops exactly when its
+gap meets the tolerance lands, on a decade grid, at an error up to 10×
+below the target it was run for, so the coarse grid misjudged the change
+below. "Before" is master run with the same script, so both rows use the
+same sweeps. Its numbers differ from the earlier tables by that alone (64³,
+λ = 0.1 to 1e-6: 2245 → 1343 ms, an early polish that the decade grid did
+not sample).
+
+Three changes, in 2D (ADBPG) unless noted:
+
+- **The gap is checked on the second block step** r = prox_{g2}(u − w) of
+  the iteration, whose duals (d + w − u for the first block, −y⁺ for the
+  second) are feasible and sum to d − r. A check is then one sweep over r;
+  before, it formed z(y) = prox_{g1}(d + y) with another 1D pass, about 60%
+  of an iteration. The gap of r is 0.2–1.7 times that of z(y) on these
+  images, mostly below 1 at λ = 0.5.
+- **Checks are scheduled**: after iterations 1 and 2, then when the rate at
+  which the gap fell between the last two checks predicts that it meets the
+  target, and at least every 4 iterations. Before, the first check was at
+  iteration 4, so no solve stopped sooner: at λ = 0.1 even tol = 1e-1 ran 4
+  iterations, while 2 reach 1e-2 error.
+- **Polish retries** (2D and 3D share the schedule). After a failed attempt,
+  the next one waited for a tenfold fall of the gap, or less when the
+  attempt's ratio pz/gp predicted success. At λ = 0.5 that ratio stayed at
+  0.1–0.4 for 50–90 iterations, which would never be accepted (the cap is
+  0.01), so the prediction retried at nearly every check, each attempt
+  costing about 1.2 iterations. In 2D only ratios up to 0.01 now predict.
+  In 3D, where a polish costs a third of an iteration, the eager retries
+  stay: restricting them there made 1e-4 error 20% slower.
+
+The z returned unpolished is d − q₁ − q₂ for the dual returned (r up to
+rounding), and the polish is computed from d and the dual alone. So a warm
+start from the dual of a solve still returns its z bit for bit after 0
+iterations. A warm start also polishes at its first checks, which a cold
+start skips. Warm starts from the dual for d on d + ε sin 7d (λ = 0.5;
+40×50, 96×120 and 256²), in iterations:
+
+| tol, ε | before | now |
+| --- | --- | --- |
+| 1e-6, 10⁻⁴ and 10⁻³ | 0 | 0 |
+| 1e-6, 10⁻² | 4–12 | 1–2 |
+| 1e-10, 10⁻⁴ | 4 | 1 |
+| 1e-10, 10⁻³ | 4, 16, 4 | 6, 18, 6 |
+| 1e-10, 10⁻² | 20, 20, 36 (cold 24, 36, 44) | 22, 22, 38 (cold 22, 38, 38) |
+
+At ε = 10⁻² and tol 1e-10 the dual stalls for a while and a warm start
+gains little; on 256² nothing.
+
+**ms to reach the error**, single thread
+
+| Image, λ | Solver | 1e-2 | 1e-3 | 1e-4 | 1e-6 |
+| --- | --- | --- | --- | --- | --- |
+| 256², 0.1 | fastprox, before | 4.60 | 10.52 | **14.77** | 32.21 |
+|  | fastprox, now | **2.55** | **8.33** | 16.48 | **22.75** |
+|  | best proxTV | 4.02 (DR2) | 12.19 (DR2) | 37.35 (DR2) | 271.90 (Yang2) |
+| 256², 0.5 | fastprox, before | **3.10** | 19.58 | 41.55 | 77.07 |
+|  | fastprox, now | 5.27 | **19.51** | **39.41** | **72.91** |
+|  | best proxTV | 6.42 (DR2) | 28.83 (DR2) | 83.63 (DR2) | 426.98 (Yang2) |
+| 512², 0.1 | fastprox, before | 20.50 | 45.61 | **65.86** | 161.56 |
+|  | fastprox, now | **10.51** | **35.43** | 72.85 | **135.65** |
+|  | best proxTV | 17.68 (DR2) | 52.08 (DR2) | 178.99 (DR2) | 1296.29 (Yang2) |
+| 512², 0.5 | fastprox, before | 12.54 | 101.83 | 224.61 | 430.58 |
+|  | fastprox, now | **9.76** | **92.65** | **203.07** | **383.16** |
+|  | best proxTV | 20.51 (DR2) | 134.16 (DR2) | 419.57 (DR2) | 4549.14 (DR2) |
+
+proxTV from the master run; the branch run gave 1–5% different times. In
+3D the three-block method takes the same iterations as before at every
+accuracy, and the times are within 1–3% (64³, λ = 0.1: 70.7, 248, 564 and
+1314 ms; λ = 0.5: 49.1, 212, 448 and 772 ms).
+
+fastprox is now fastest at every accuracy on every image. At 1e-2 and
+λ = 0.1 it is 1.6–1.7× faster than DR2, which was 14–16% faster before
+(on the decade grid, 17–20%). Against master, 1e-2 at λ = 0.1 is 1.8–2.0×
+faster, 1e-3 0–22% and 1e-6 5–29%. Two cells are slower:
+
+- **1e-4 at λ = 0.1** (11–12%): r reaches it at iteration 13 and z(y) at 12.
+  At small λ the gap and the error of r are a little larger than those of
+  z(y).
+- **1e-2 on 256² at λ = 0.5** (3.10 → 5.27 ms): the grid samples it badly.
+  r has error 1.08e-2 at iteration 3 and 8.8e-3 at iteration 4, but no
+  quarter-decade tolerance stops at 4: the closest stop at 3 or at 5. On an
+  eighth-decade grid the times are 3.19 and 3.09 ms.

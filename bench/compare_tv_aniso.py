@@ -4,10 +4,11 @@ proxTV's solvers, single thread.
     uv run python bench/compare_tv_aniso.py [--quick]
 
 The solvers stop on different criteria, so each one is run with a range of
-settings (fastprox: the gap tolerance; proxTV: the iteration cap) and the
-error |z - z*| / |z*| of every run is measured against a reference solved to
-a gap of 1e-15 relative. The table gives, for each target error, the fastest
-run that reached it ("-" when none did).
+settings (fastprox: the gap tolerance, in quarter decades from 1e-1 to
+1e-12; proxTV: the iteration cap, in half powers of two from 1 to 1024) and
+the error |z - z*| / |z*| of every run is measured against a reference
+solved to a gap of 1e-15 relative. The table gives, for each target error,
+the fastest run that reached it ("-" when none did).
 
 proxTV is fetched and compiled into build/external/ as in compare_external.py
 (BSD; only compiled and called here), without OpenMP, so it runs on one
@@ -133,14 +134,14 @@ def table(lib, k, shape, lam, reps, targets):
     err = lambda z: np.linalg.norm(z - zref) / nref  # noqa: E731
     curves = {}
     pts = []
-    for tol in 10.0 ** -np.arange(2, 13):
+    for tol in 10.0 ** -(1 + np.arange(45) / 4):
         t, z = best_time(lambda: fp.tv_aniso(x, lam, ndim=k, tol=tol, max_iter=10**6,
                                              threads=1)[0], reps)
         pts.append((t, err(z)))
     curves["fastprox (ADBPG)" if k == 2 else "fastprox (FDPG, 3 blocks)"] = pts
     for name, f in solvers(lib, k, shape).items():
         pts = []
-        for it in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024):
+        for it in sorted({round(2 ** (j / 2)) for j in range(21)}):
             t, z = best_time(lambda: f(x, lam, it), reps)
             if np.all(np.isfinite(z)):
                 e = min(err(z), err(z.T) if k == 2 else np.inf)  # orientation-proof
