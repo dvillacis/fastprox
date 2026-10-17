@@ -278,6 +278,22 @@ FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **
  * gradients (fp_workspace_set_deriv_tol, fp_workspace_deriv_info). */
 FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **out);
 
+/* Graph TV (since 0.3): g(z) = sum_e w_e |z_u - z_v| over the m edges
+ * e = (u, v) of a graph on n nodes. It acts on the last axis, of length n,
+ * and is batched over the others (fp_options.axis is ignored). edges: 2m
+ * node indices (u_0, v_0, u_1, v_1, ...) with u != v; repeated edges add.
+ * edge_weights: NULL (w = 1), length 1, or m, all >= 0. theta = w.
+ * By parametric max-flow, each part of the graph cut at its mean value: the
+ * result is exact up to rounding where a part ends at a trivial cut, else
+ * within tol * (max x - min x) of the solution at every node. fp_info.gap is
+ * the duality gap with the flow as the dual, iters the number of max-flow
+ * solves (FP_ENOTCONV after max_iter, every unfinished part at its mean).
+ * The workspace dual (shape (1, *x.shape)) is q = D^T f, with z = x - q at
+ * the solution; warm starts have no effect. jvp and vjp are exact: averages
+ * over the regions where z is constant. */
+FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges,
+                                const fp_array *edge_weights, fp_op **out);
+
 FP_API void        fp_op_free(fp_op *op);
 FP_API int64_t     fp_op_nparams(const fp_op *op);
 FP_API const char *fp_op_name(const fp_op *op);

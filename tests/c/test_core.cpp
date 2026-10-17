@@ -1297,6 +1297,167 @@ static void test_kinks() {
     fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- graph TV
+// A ring over n nodes plus `chords` random chords, as 2m endpoints.
+static std::vector<int64_t> graph_edges(int64_t n, int64_t chords, unsigned seed) {
+    std::mt19937_64 g(seed);
+    std::vector<int64_t> e;
+    for (int64_t i = 0; i < n && n > 2; ++i) {
+        e.push_back(i);
+        e.push_back((i + 1) % n);
+    }
+    for (int64_t k = 0; k < chords && n > 1; ++k) {
+        const int64_t a = static_cast<int64_t>(g() % static_cast<uint64_t>(n));
+        const int64_t b = (a + 1 + static_cast<int64_t>(g() % static_cast<uint64_t>(n - 1))) % n;
+        e.push_back(a);
+        e.push_back(b);
+    }
+    return e;
+}
+
+static void test_graph_tv() {
+    fp_info info;
+    // Chains are weighted 1D TV.
+    for (int64_t n : {2, 9, 200, 3000})
+        for (double gamma : {0.01, 0.5, 4.0}) {
+            Vec x = randn(n, 2.0), w(static_cast<size_t>(n - 1));
+            for (int64_t i = 1; i < n; ++i) x[i] += x[i - 1];
+            std::vector<int64_t> e;
+            for (int64_t i = 0; i + 1 < n; ++i) {
+                e.push_back(i);
+                e.push_back(i + 1);
+                w[i] = unif(0.0, 2.0);
+            }
+            Arr wa({n - 1}, w), xa({n}, x), za({n});
+            fp_op *g, *t;
+            CHECK_OK(fp_op_graph_tv(n, n - 1, e.data(), &wa.a, &g));
+            CHECK_OK(fp_op_tv1d(&wa.a, FP_TV1D_AUTO, &t));
+            fp_options o = opts();
+            o.tol = 0.0;
+            CHECK_OK(fp_prox(g, gamma, &xa.a, &za.a, &o, nullptr, &info));
+            const Vec zt = prox(t, gamma, x);
+            double err = 0;
+            for (int64_t i = 0; i < n; ++i) err = std::max(err, std::fabs(za.data[i] - zt[i]));
+            CHECK(err <= 1e-12 * (1 + maxabs(x)));
+            CHECK(info.gap <= 1e-12 * (1 + maxabs(x)));
+            CHECK(info.iters >= 1 || n == 2);
+            fp_op_free(g);
+            fp_op_free(t);
+        }
+    // 4-neighbour grids are anisotropic TV.
+    for (std::vector<int64_t> sh : {std::vector<int64_t>{17, 23}, std::vector<int64_t>{40, 9}}) {
+        const int64_t N = sh[0] * sh[1];
+        std::vector<int64_t> e;
+        for (int64_t i = 0; i < sh[0]; ++i)
+            for (int64_t j = 0; j < sh[1]; ++j) {
+                if (j + 1 < sh[1]) e.insert(e.end(), {i * sh[1] + j, i * sh[1] + j + 1});
+                if (i + 1 < sh[0]) e.insert(e.end(), {i * sh[1] + j, (i + 1) * sh[1] + j});
+            }
+        Vec x = randn(N);
+        for (int64_t i = 0; i < N; ++i) x[i] += (i / 37) % 2;
+        Arr xa({N}, x), za({N}), xi(sh, x), zi(sh);
+        fp_op *g, *a;
+        CHECK_OK(fp_op_graph_tv(N, static_cast<int64_t>(e.size()) / 2, e.data(), nullptr, &g));
+        CHECK_OK(fp_op_tv_aniso(2, nullptr, &a));
+        fp_options o = opts();
+        o.tol = 0.0;
+        CHECK_OK(fp_prox(g, 0.3, &xa.a, &za.a, &o, nullptr, &info));
+        fp_options oa = opts();
+        oa.tol = 1e-15;
+        oa.max_iter = 1000000;
+        CHECK_OK(fp_prox(a, 0.3, &xi.a, &zi.a, &oa, nullptr, nullptr));
+        double err = 0;
+        for (int64_t i = 0; i < N; ++i) err = std::max(err, std::fabs(za.data[i] - zi.data[i]));
+        CHECK(err <= 1e-7);
+        // Precision: within tol * (max x - min x) of the exact result.
+        double lo = x[0], hi = x[0];
+        for (double v : x) lo = std::min(lo, v), hi = std::max(hi, v);
+        for (double tol : {1e-9, 1e-4, 1e-1}) {
+            Arr zt({N});
+            fp_options ot = opts();
+            ot.tol = tol;
+            fp_info it;
+            CHECK_OK(fp_prox(g, 0.3, &xa.a, &zt.a, &ot, nullptr, &it));
+            double d = 0;
+            for (int64_t i = 0; i < N; ++i) d = std::max(d, std::fabs(zt.data[i] - za.data[i]));
+            CHECK(d <= tol * (hi - lo));
+            CHECK(it.iters <= info.iters);
+        }
+        // max_iter stops early and says so; every node still has a value.
+        fp_options o1 = opts();
+        o1.tol = 0.0;
+        o1.max_iter = 1;
+        CHECK(fp_prox(g, 0.3, &xa.a, &za.a, &o1, nullptr, &info) == FP_ENOTCONV);
+        bool finite_all = true;
+        for (double v : za.data) finite_all = finite_all && std::isfinite(v);
+        CHECK(finite_all && info.iters == 1);
+        fp_op_free(g);
+        fp_op_free(a);
+    }
+    // Derivatives: adjointness and finite differences, unit and per-edge weights.
+    static const std::vector<int64_t> e12 = graph_edges(12, 8, 5);
+    static Arr w12({static_cast<int64_t>(e12.size()) / 2},
+                   Vec(e12.size() / 2, 0.8));
+    for (size_t k = 0; k < w12.data.size(); ++k) w12.data[k] = 0.4 + 0.1 * static_cast<double>(k % 7);
+    const std::vector<OpCase> cases = {
+        {"graph_tv", [](fp_op **o) { return fp_op_graph_tv(12, static_cast<int64_t>(e12.size()) / 2, e12.data(), nullptr, o); }, 0.6},
+        {"graph_tv_w", [](fp_op **o) { return fp_op_graph_tv(12, static_cast<int64_t>(e12.size()) / 2, e12.data(), &w12.a, o); }, 0.6},
+    };
+    for (int rep = 0; rep < 10; ++rep)
+        for (const auto &c : cases) {
+            check_derivatives(c, false);
+            check_derivatives(c, true);
+        }
+    // Batches: each signal on its own, for any thread count.
+    {
+        const std::vector<int64_t> e = graph_edges(40, 70, 9);
+        const int64_t m = static_cast<int64_t>(e.size()) / 2;
+        fp_op *g;
+        CHECK_OK(fp_op_graph_tv(40, m, e.data(), nullptr, &g));
+        Arr x({50, 40}, randn(2000, 2.0));
+        std::vector<Vec> outs;
+        for (int t : {1, 3, 8}) {
+            Arr z({50, 40});
+            fp_options o = opts(-1, t);
+            o.tol = 0.0;
+            CHECK_OK(fp_prox(g, 0.8, &x.a, &z.a, &o, nullptr, nullptr));
+            outs.push_back(z.data);
+        }
+        CHECK(outs[0] == outs[1] && outs[0] == outs[2]);
+        Vec row(x.data.begin() + 40 * 7, x.data.begin() + 40 * 8);
+        Arr ra({40}, row), rz({40});
+        fp_options o = opts();
+        o.tol = 0.0;
+        CHECK_OK(fp_prox(g, 0.8, &ra.a, &rz.a, &o, nullptr, nullptr));
+        CHECK(std::equal(rz.data.begin(), rz.data.end(), outs[0].begin() + 40 * 7));
+        // The wrong length, and infinities.
+        Arr bad({41});
+        CHECK(fp_prox(g, 0.8, &bad.a, &bad.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        ra.data[3] = INFINITY;
+        CHECK(fp_prox(g, 0.8, &ra.a, &rz.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+        ra.data[3] = NAN;
+        CHECK_OK(fp_prox(g, 0.8, &ra.a, &rz.a, nullptr, nullptr, nullptr));
+        CHECK(std::isnan(rz.data[0]) && std::isnan(rz.data[39]));
+        fp_op_free(g);
+    }
+    // Constructor errors.
+    {
+        fp_op *g = nullptr;
+        const int64_t loop[] = {0, 1, 1, 1}, out[] = {0, 3}, ok[] = {0, 1, 1, 2};
+        CHECK(fp_op_graph_tv(3, 2, loop, nullptr, &g) == FP_EPARAM);
+        CHECK(fp_op_graph_tv(3, 1, out, nullptr, &g) == FP_EPARAM);
+        CHECK(fp_op_graph_tv(3, 1, nullptr, nullptr, &g) == FP_EINVAL);
+        CHECK(fp_op_graph_tv(-1, 0, nullptr, nullptr, &g) == FP_EINVAL);
+        Arr neg({2}, {1.0, -1.0}), three({3}, {1.0, 1.0, 1.0});
+        CHECK(fp_op_graph_tv(3, 2, ok, &neg.a, &g) == FP_EPARAM);
+        CHECK(fp_op_graph_tv(3, 2, ok, &three.a, &g) == FP_ESHAPE);
+        CHECK(g == nullptr);
+        CHECK_OK(fp_op_graph_tv(3, 0, nullptr, nullptr, &g));
+        CHECK(fp_op_nparams(g) == 1 && std::string(fp_op_name(g)) == "graph_tv");
+        fp_op_free(g);
+    }
+}
+
 static void test_no_allocation() {
     fp_op *op;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
@@ -1368,6 +1529,30 @@ static void test_no_allocation() {
         CHECK(g_allocs.load() == ibefore);
         fp_workspace_free(iws);
         fp_op_free(iop);
+    }
+
+    // Graph TV: a batch of signals on one graph, with weight gradients.
+    {
+        const std::vector<int64_t> edges = graph_edges(40, 60, 3);
+        const int64_t m = static_cast<int64_t>(edges.size()) / 2;
+        Arr wa({m}, Vec(static_cast<size_t>(m), 0.7));
+        fp_op *gop;
+        CHECK_OK(fp_op_graph_tv(40, m, edges.data(), &wa.a, &gop));
+        Arr gxa({64, 40}, randn(2560)), gza({64, 40}), gga({64, 40}, randn(2560)), ggx({64, 40}), gpa({m});
+        fp_options go = opts(-1, 4, 1);
+        go.tol = 0.0;
+        fp_workspace *gws;
+        CHECK_OK(fp_workspace_create(gop, &gxa.a, &go, &gws));
+        CHECK_OK(fp_prox(gop, 0.5, &gxa.a, &gza.a, &go, gws, nullptr));
+        const long gbefore = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_prox(gop, 0.5, &gxa.a, &gza.a, &go, gws, nullptr));
+            CHECK_OK(fp_jvp(gop, gws, &gxa.a, 0.1, &gpa.a, &ggx.a));
+            CHECK_OK(fp_vjp(gop, gws, &gga.a, &ggx.a, &gg, &gpa.a));
+        }
+        CHECK(g_allocs.load() == gbefore);
+        fp_workspace_free(gws);
+        fp_op_free(gop);
     }
 }
 
@@ -1483,6 +1668,7 @@ int main() {
     test_batching();
     test_tv_aniso();
     test_tv_iso();
+    test_graph_tv();
     test_nonconvex();
     test_kinks();
     test_no_allocation();

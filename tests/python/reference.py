@@ -307,3 +307,64 @@ def tv1d_l2(x, gamma, w=1.0):
         else:
             hi = mid
     return z(np.exp(0.5 * (lo + hi)))
+
+
+def _max_flow(cap, s, t):
+    """Edmonds-Karp on a dense capacity matrix (small graphs only)."""
+    from collections import deque
+
+    r = np.array(cap, float)
+    flow = 0.0
+    while True:
+        prev = np.full(len(r), -1)
+        prev[s] = s
+        q = deque([s])
+        while q and prev[t] < 0:
+            a = q.popleft()
+            for b in np.flatnonzero(r[a] > 0):
+                if prev[b] < 0:
+                    prev[b] = a
+                    q.append(b)
+        if prev[t] < 0:
+            return flow
+        d, b = np.inf, t
+        while b != s:
+            d = min(d, r[prev[b], b])
+            b = prev[b]
+        b = t
+        while b != s:
+            r[prev[b], b] -= d
+            r[b, prev[b]] += d
+            b = prev[b]
+        flow += d
+
+
+def graph_tv_kkt_residual(x, z, gamma, edges, w):
+    """Largest violation of the optimality conditions of graph TV, relative
+    to scale: z is the prox iff x - z = D^T f for some f with |f_e| <= gamma w_e
+    and f_e = gamma w_e sign(z_u - z_v) on every edge where z jumps. The jumps
+    fix their f_e; whether flows on the flat edges can make up the rest of
+    x - z is a max-flow question, answered by Edmonds-Karp."""
+    x = np.asarray(x, float)
+    z = np.asarray(z, float)
+    e = np.asarray(edges, int).reshape(-1, 2)
+    n = x.size
+    lam = gamma * np.broadcast_to(np.asarray(w, float), (len(e),))
+    scale = 1.0 + np.abs(x).max()
+    tol = 1e-9 * scale
+    b = x - z  # required net outflow of each node
+    s, t = n, n + 1
+    cap = np.zeros((n + 2, n + 2))
+    for (u, v), c in zip(e, lam):
+        dz = z[u] - z[v]
+        if abs(dz) > tol:
+            f = c * np.sign(dz)
+            b[u] -= f
+            b[v] += f
+        else:
+            cap[u, v] += c
+            cap[v, u] += c
+    cap[s, :n] = np.maximum(b, 0.0)
+    cap[:n, t] = np.maximum(-b, 0.0)
+    need = cap[s, :n].sum()
+    return (need - _max_flow(cap, s, t) + abs(b.sum())) / scale
