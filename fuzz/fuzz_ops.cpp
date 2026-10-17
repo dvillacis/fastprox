@@ -50,6 +50,12 @@ struct Bytes {
         }
     }
     double max_param = 0.0;  // largest magnitude handed out by param()
+    // Raises max_param to m. NaN sticks: a plain !(m <= max_param) test let a
+    // NaN replace an infinity and the next finite value replace the NaN, which
+    // lost an a of 6e-322 for the plane and flagged its genuine overflow.
+    void raise(double m) {
+        if (!std::isnan(max_param) && !(m <= max_param)) max_param = m;
+    }
     double param() {
         double v;
         switch (u8() % 6) {
@@ -57,7 +63,7 @@ struct Bytes {
             case 1: v = 0.0; break;
             default: v = (u8() + 1) / 64.0;
         }
-        if (!(std::fabs(v) <= max_param)) max_param = std::fabs(v);  // NaN sticks
+        raise(std::fabs(v));
         return v;
     }
 };
@@ -169,7 +175,7 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
                 else if (b.u8() % 8 == 0) v = 0.0;
                 // The projection scales like |b| / |a_i|: count 1 / |a_i| as a
                 // parameter size for the finite-output check.
-                if (v != 0.0 && !(1.0 / std::fabs(v) <= b.max_param)) b.max_param = 1.0 / std::fabs(v);
+                if (v != 0.0) b.raise(1.0 / std::fabs(v));
             }
             fill(c.params[1], b.u8() % 2 ? n : 1);
             s0[0] = static_cast<int64_t>(c.params[0].size());
