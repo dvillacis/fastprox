@@ -27,9 +27,10 @@ TREE = [[0, 1], [2, 3, 4], [0, 1, 2, 3, 4], [5], [6, 7, 8, 9], list(range(N))]
 
 # name: (build(theta) -> Operator, theta0, reference, gamma[, convex]).
 # reference: reference(x_row, gamma, theta) -> z, None (1D TV: optimality
-# residual), or ("objective", psi(theta)) for the nonconvex maps (the
-# minimum on a refined grid, see reference.grid_prox). convex defaults to
-# True; nonconvex maps are not firmly nonexpansive.
+# residual), or for the nonconvex maps ("objective", psi(theta)) or, with
+# per-entry parameters, ("objective_entry", psi(theta, j)) (the minimum on a
+# refined grid, see reference.grid_prox). convex defaults to True; nonconvex
+# maps are not firmly nonexpansive.
 CASES = {
     "soft": (lambda t: fp.Soft(0.4, t), W, lambda x, g, t: ref.soft(x, g * 0.4 * t), 0.8),
     # theta is the weight vector (here a broadcast scalar), not lam.
@@ -136,6 +137,13 @@ CASES = {
              ("objective", lambda t: ref.scad_psi(*t)), 0.8, False),
     "mcp": (lambda t: fp.MCP(*t), np.array([0.5, 3.0]),
             ("objective", lambda t: ref.mcp_psi(*t)), 0.8, False),
+    # theta = (lam, a or b, w...): per-entry weights, a > 1 + gamma max w.
+    "scad_w": (lambda t: fp.SCAD(t[0], t[1], t[2:]), np.r_[0.5, 3.7, W],
+               ("objective_entry", lambda t, j: lambda z: t[2 + j] * ref.scad_psi(t[0], t[1])(z)),
+               0.8, False),
+    "mcp_w": (lambda t: fp.MCP(t[0], t[1], t[2:]), np.r_[0.5, 3.0, W],
+              ("objective_entry", lambda t, j: lambda z: t[2 + j] * ref.mcp_psi(t[0], t[1])(z)),
+              0.8, False),
     "log": (lambda t: fp.LogPenalty(*t), np.array([0.8, 0.5]),
             ("objective", lambda t: lambda z: t[0] * np.log1p(np.abs(z) / t[1])), 0.8, False),
 }
@@ -160,10 +168,14 @@ def test_matches_reference(name):
         if isinstance(reference, tuple):  # nonconvex: a global minimiser, entry by entry
             # theta is the per-entry weight vector for l0 and lq_half, else the
             # map's parameters; psi(z) for one entry j.
+            # ("objective_entry", f) gives psi for entry j as f(theta, j).
             per_entry = theta.size == N and name in ("l0", "lq_half")
             for row in range(2):  # the grid reference is slow: two rows per scale
                 for j in range(N):
-                    psi = reference[1](np.array([theta[j]]) if per_entry else theta)
+                    if reference[0] == "objective_entry":
+                        psi = reference[1](theta, j)
+                    else:
+                        psi = reference[1](np.array([theta[j]]) if per_entry else theta)
                     xj, zj = x[row, j], z[row, j]
                     zg = ref.grid_prox(np.array([xj]), gamma, psi)[0]
                     fz = ref.nonconvex_objective(zj, xj, gamma, psi)

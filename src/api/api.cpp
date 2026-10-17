@@ -520,7 +520,7 @@ FP_API fp_status fp_op_group_huber(double lambda, double delta, int64_t n, const
 FP_API fp_status fp_op_group_scad(double lambda, double a, int64_t n, const int64_t *groups,
                                   int64_t ngroups, const fp_array *group_weights, fp_op **out) {
     return guard([&] {
-        return fp::group_radial([&](fp_op **h) { return fp::make_scad(lambda, a, h); },
+        return fp::group_radial([&](fp_op **h) { return fp::make_scad(lambda, a, Vec{}, h); },
                             "group_scad", n, groups, ngroups, group_weights, out);
     });
 }
@@ -528,7 +528,7 @@ FP_API fp_status fp_op_group_scad(double lambda, double a, int64_t n, const int6
 FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64_t *groups,
                                  int64_t ngroups, const fp_array *group_weights, fp_op **out) {
     return guard([&] {
-        return fp::group_radial([&](fp_op **h) { return fp::make_mcp(lambda, b, h); },
+        return fp::group_radial([&](fp_op **h) { return fp::make_mcp(lambda, b, Vec{}, h); },
                             "group_mcp", n, groups, ngroups, group_weights, out);
     });
 }
@@ -734,19 +734,23 @@ FP_API fp_status fp_op_lq(double lambda, double q, const fp_array *weights, fp_o
     });
 }
 
-FP_API fp_status fp_op_scad(double lambda, double a, fp_op **out) {
+FP_API fp_status fp_op_scad(double lambda, double a, const fp_array *weights, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;
         *out = nullptr;
-        return fp::make_scad(lambda, a, out);
+        Vec w;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        return fp::make_scad(lambda, a, std::move(w), out);
     });
 }
 
-FP_API fp_status fp_op_mcp(double lambda, double b, fp_op **out) {
+FP_API fp_status fp_op_mcp(double lambda, double b, const fp_array *weights, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;
         *out = nullptr;
-        return fp::make_mcp(lambda, b, out);
+        Vec w;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        return fp::make_mcp(lambda, b, std::move(w), out);
     });
 }
 

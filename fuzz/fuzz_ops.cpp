@@ -163,8 +163,16 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             const double qs[5] = {0.5, 2.0 / 3.0, 0.1, 0.9, b.f64()};  // closed forms, Newton, junk
             return fp_op_lq(b.param(), qs[b.u8() % 5], b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
-        case 17: return fp_op_scad(b.param(), 1.0 + b.param(), &c.op);
-        case 18: return fp_op_mcp(b.param(), b.param(), &c.op);
+        case 17: {
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            return fp_op_scad(b.param(), 1.0 + b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 18: {
+            fill(c.params[0], pick);
+            a0 = vec(c.params[0]);
+            return fp_op_mcp(b.param(), b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
         case 19: return fp_op_log(b.param(), b.param(), &c.op);
         case 20: return fp_op_max(b.param(), &c.op);
         case 21: return fp_op_sum_largest(b.param(), static_cast<int64_t>(b.u8() % 40) - 2, b.u8() % 2, &c.op);

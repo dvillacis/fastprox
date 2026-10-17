@@ -758,23 +758,32 @@ class Lq(_Pointwise):
 
 
 class SCAD(_Pointwise):
-    """SCAD penalty (Fan and Li 2001) with threshold lam and concavity a > 1;
-    the prox needs a > 1 + gamma (ValueError otherwise). Parameters: lam, a."""
+    """g(z) = sum_i w_i SCAD(z_i), the SCAD penalty (Fan and Li 2001) with
+    threshold lam and concavity a > 1; entry i is the unweighted map at the
+    step gamma w_i. The prox needs a > 1 + gamma max(w) (ValueError
+    otherwise). Parameters: lam, a, and weights when given (a scalar or one
+    per element along the axis)."""
 
-    _layout = [("lam", 1, True), ("a", 1, True)]
-
-    def __init__(self, lam=1.0, a=3.7):
-        super().__init__(_C.scad(float(lam), float(a)))
+    def __init__(self, lam=1.0, a=3.7, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.scad(float(lam), float(a), w))
+        self._layout = [("lam", 1, True), ("a", 1, True)]
+        if w is not None:
+            self._layout.append(("weights", w.size, w.size == 1))
 
 
 class MCP(_Pointwise):
-    """Minimax concave penalty (Zhang 2010) with threshold lam and concavity
-    b > 0; the prox needs b > gamma (ValueError otherwise). Parameters: lam, b."""
+    """g(z) = sum_i w_i MCP(z_i), the minimax concave penalty (Zhang 2010)
+    with threshold lam and concavity b > 0 (w MCP(lam, b) = MCP(w lam, b/w)).
+    The prox needs b > gamma max(w) (ValueError otherwise). Parameters: lam,
+    b, and weights when given."""
 
-    _layout = [("lam", 1, True), ("b", 1, True)]
-
-    def __init__(self, lam=1.0, b=3.0):
-        super().__init__(_C.mcp(float(lam), float(b)))
+    def __init__(self, lam=1.0, b=3.0, weights=None):
+        w = _vec(weights)
+        super().__init__(_C.mcp(float(lam), float(b), w))
+        self._layout = [("lam", 1, True), ("b", 1, True)]
+        if w is not None:
+            self._layout.append(("weights", w.size, w.size == 1))
 
 
 class LogPenalty(_Pointwise):
@@ -929,14 +938,14 @@ def lq(x, lam=1.0, q=0.5, gamma=1.0, *, weights=None, tie="nonzero", out=None, a
                                     tie=tie)
 
 
-def scad(x, lam=1.0, a=3.7, gamma=1.0, *, out=None, threads=0, copy=False):
-    """prox of gamma * SCAD(lam, a); needs a > 1 + gamma."""
-    return SCAD(lam, a).prox(x, gamma, out=out, threads=threads, copy=copy)
+def scad(x, lam=1.0, a=3.7, gamma=1.0, *, weights=None, out=None, axis=-1, threads=0, copy=False):
+    """prox of gamma * sum_i w_i SCAD(lam, a)(z_i); needs a > 1 + gamma max(w)."""
+    return SCAD(lam, a, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy)
 
 
-def mcp(x, lam=1.0, b=3.0, gamma=1.0, *, out=None, threads=0, copy=False):
-    """prox of gamma * MCP(lam, b); needs b > gamma."""
-    return MCP(lam, b).prox(x, gamma, out=out, threads=threads, copy=copy)
+def mcp(x, lam=1.0, b=3.0, gamma=1.0, *, weights=None, out=None, axis=-1, threads=0, copy=False):
+    """prox of gamma * sum_i w_i MCP(lam, b)(z_i); needs b > gamma max(w)."""
+    return MCP(lam, b, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy)
 
 
 def prox_log(x, lam=1.0, eps=1.0, gamma=1.0, *, tie="nonzero", out=None, threads=0, copy=False):
