@@ -209,7 +209,11 @@ image-by-image calls, for any thread count.
   `fp_workspace_set_dual` seeds the next call with a dual, for example one
   from a nearby problem. After `fp_workspace_set_warm(ws, 1)`, every call
   starts from the dual of the previous call, as in a PDHG or bilevel loop.
-  Without either, each call starts from zero.
+  Without either, each call starts from zero. A starting dual is made
+  feasible first: a fiber whose running sums leave [−γwₐ, γwₐ] or do not end
+  at 0 (beyond rounding) is rebuilt from its running sums clipped to that
+  interval, and non-finite ones set to 0. Duals from earlier calls are
+  feasible and are used unchanged.
 - **Derivatives** are exact for the identified regions: averaging over each
   region, with γ and weight terms from the jump signs on its boundary. They
   cost O(n), with no linear solve.

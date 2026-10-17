@@ -744,6 +744,20 @@ static void test_tv_aniso() {
         CHECK_OK(fp_workspace_set_dual(ws, &q.a));
         CHECK_OK(fp_prox(op, 0.5, &x2.a, &z.a, &o, ws, &w2));
         CHECK(w2.iters < c2.iters);
+        // An infeasible seed is made feasible before use: q_0 = x - mean(x),
+        // q_1 = 0 would otherwise give z = mean(x) with gap 0 at once.
+        {
+            Arr qb({2, 40, 50}, Vec(4000, 0.0));
+            double mean = 0.0;
+            for (double v : x.data) mean += v / 2000.0;
+            for (int i = 0; i < 2000; ++i) qb.data[i] = x.data[i] - mean;
+            fp_info ib;
+            CHECK_OK(fp_workspace_set_dual(ws, &qb.a));
+            CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, &ib));
+            CHECK_OK(fp_workspace_get_dual(ws, &qb.a));
+            const AnisoCheck r = aniso_certificate(2, {40, 50}, 0.5, {1.0}, x.data, z.data, qb.data);
+            CHECK(ib.iters > 0 && r.feas <= 1e-12 && r.gap <= 1e-10 * r.dn2 / 2 * (1 + 1e-6));
+        }
         Arr bad({3, 40, 50});
         CHECK(fp_workspace_set_dual(ws, &bad.a) == FP_ESHAPE);
         q.data[5] = INFINITY;

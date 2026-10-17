@@ -174,6 +174,42 @@ def test_warm_starts():
         op.solve(x, 0.5, warm_start=np.zeros((3, 40, 50)))
 
 
+@pytest.mark.parametrize("shape,k", [((30, 40), 2), ((10, 12, 14), 3)])
+def test_infeasible_warm_start(shape, k):
+    """A warm dual is made feasible before use. Unchecked, q = (x - mean(x),
+    0, ...) gives z = mean(x) with gap 0, a wrong point certified at once. Random and huge duals must not break the result either, nor the NaN
+    dual a NaN image leaves for the next warm call; a non-finite seed is
+    rejected."""
+    x = image(shape, 11)
+    op = fp.TVAniso(k)
+    z0, _ = op.solve(x, 0.4, tol=1e-12, max_iter=100000)
+    half = 0.5 * (x ** 2).sum()
+    rng = np.random.default_rng(12)
+
+    def check(z, info):
+        assert info.converged and np.isfinite(z).all()
+        gap, feas = certificate(x, z, info.dual, 0.4, 1.0, k)
+        assert feas <= 1e-12 * (1 + np.abs(x).max())
+        assert -1e-12 * half <= gap <= 1e-12 * half * (1 + 1e-6)
+        assert np.linalg.norm(z - z0) <= 2e-6 * np.linalg.norm(x)
+
+    bad = np.zeros((k, *shape))
+    bad[0] = x - x.mean()
+    for warm in (bad, 50.0 * rng.normal(size=(k, *shape))):
+        z, info = op.solve(x, 0.4, tol=1e-12, max_iter=100000, warm_start=warm)
+        assert info.iters > 0
+        check(z, info)
+    nonfinite = rng.normal(size=(k, *shape))
+    nonfinite[0, 2, 3] = np.nan
+    with pytest.raises(ValueError):
+        op.solve(x, 0.4, warm_start=nonfinite)
+    xn = x.copy()
+    xn[2, 3] = np.nan
+    _, ctx = op.prox(xn, 0.4, keep=True, tol=1e-12, max_iter=100000)
+    z, ctx = op.prox(x, 0.4, keep=True, ctx=ctx, warm=True, tol=1e-12, max_iter=100000)
+    check(z, ctx.info)
+
+
 def test_not_converged_is_reported():
     z, info = fp.tv_aniso(image((40, 50), 9), 0.5, tol=1e-14, max_iter=2)
     assert not info.converged and info.iters == 2 and np.isfinite(z).all() and info.gap > 0

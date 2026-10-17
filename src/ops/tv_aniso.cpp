@@ -215,6 +215,10 @@ struct TVAniso final : ImageOp<TVAniso> {
         // Inactive axes carry a zero dual (the warm start reads the active ones).
         for (int a = 0; a < k; ++a)
             if (lam[a] == 0.0 || na < 2) std::fill(q + a * N, q + (a + 1) * N, 0.0);
+        // The certificate needs a feasible dual, so a given one is made so.
+        if (c.warm && na >= 2)
+            for (int a = 0; a < k; ++a)
+                if (lam[a] > 0.0) feasible_dual(g, c, a, lam[a], q + a * N);
 
         if (na == 0) {
             for (int64_t i = 0; i < N; ++i) z[i] = x[i];
@@ -447,6 +451,58 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.iters = it;
         c.converged = gp <= target;
         return polished;
+    }
+
+    // ---- warm starts -----------------------------------------------------------
+
+    // Makes q_a, a warm-start dual for axis a, feasible: q_a = D_a^T p_a with
+    // |p_e| <= lam on every edge, that is, along each fiber the running sums
+    // -p_e of q_a stay within lam and the full sum is 0. A fiber that already
+    // satisfies this up to rounding (tolerance 1e-10 lam + 16 eps sum|q_a|)
+    // is left as it is, so the dual of an earlier solve restarts it bit for
+    // bit; any other is rebuilt from its running sums clipped to [-lam, lam]
+    // (non-finite ones set to 0). Without this, an infeasible dual could
+    // certify a wrong point: q_1 = 0, q_2 = x - mean(x) gives z = mean(x)
+    // with gap 0 in 2D. Fibers are independent, so chunks run in parallel.
+    static void feasible_dual(const Geom &g, const ImageCall &c, int a, double lam, double *__restrict qa) {
+        constexpr int64_t W = kEdgeChunk;
+        const int64_t s = g.S[a], L = g.L[a], outer = g.N / (L * s);
+        const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
+        parallel_for(c.nt, outer * per, std::max<int64_t>(1, kChunk / (L * std::min(s, W))),
+                     [&](int, int64_t u0, int64_t u1) {
+            double acc[kEdgeChunk], mass[kEdgeChunk], peak[kEdgeChunk];
+            for (int64_t u = u0; u < u1; ++u) {
+                const int64_t oo = u / per, r0 = (u % per) * W;
+                const int64_t w = std::min(W, s - r0);
+                const int64_t b = oo * L * s + r0;
+                for (int64_t r = 0; r < w; ++r) acc[r] = mass[r] = peak[r] = 0.0;
+                for (int64_t l = 0; l < L; ++l) {
+                    const int64_t o = b + l * s;
+                    for (int64_t r = 0; r < w; ++r) {
+                        acc[r] += qa[o + r];
+                        mass[r] += std::fabs(qa[o + r]);
+                        // NaN in a fiber makes peak NaN and Inf makes mass Inf,
+                        // and either fails the test below.
+                        const double e = l + 1 < L ? std::fabs(acc[r]) : 0.0;
+                        peak[r] = e > peak[r] || e != e ? e : peak[r];
+                    }
+                }
+                for (int64_t r = 0; r < w; ++r) {
+                    const double tau = 1e-10 * lam + 16.0 * std::numeric_limits<double>::epsilon() * mass[r];
+                    if (std::isfinite(mass[r]) && peak[r] <= lam + tau && std::fabs(acc[r]) <= tau) continue;
+                    // q_i = p_{i-1} - p_i, p_e = clip(-(running sum)).
+                    double run = 0.0, prev = 0.0;
+                    for (int64_t l = 0; l < L; ++l) {
+                        double &qi = qa[b + l * s + r];
+                        run += qi;
+                        double pe = 0.0;
+                        if (l + 1 < L && std::isfinite(run)) pe = std::clamp(-run, -lam, lam);
+                        qi = prev - pe;
+                        prev = pe;
+                    }
+                }
+            }
+        });
     }
 
     // ---- polish -------------------------------------------------------------

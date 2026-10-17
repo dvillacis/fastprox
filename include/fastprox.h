@@ -286,9 +286,12 @@ FP_API void      fp_workspace_free(fp_workspace *ws);
 /* Iterative image operators keep their dual in the workspace: an array of
  * shape (ndim, *x.shape) whose blocks q_a are feasible for the conjugate of
  * the term along axis a, with z = x - sum_a q_a at the solution. get copies
- * out the dual of the last call (FP_EINVAL before any call); set seeds it,
- * and the next call starts from it; with set_warm(ws, 1) every call starts
- * from the dual left by the previous one. Other operators: FP_EINVAL. */
+ * out the dual of the last call (FP_EINVAL before any call); set seeds it
+ * (FP_EINVAL if it is not finite), and the next call starts from it; with
+ * set_warm(ws, 1) every call starts from the dual left by the previous one.
+ * A starting dual that is not feasible is first made so (clipped to the
+ * operator's bounds), so any seed gives a valid certificate. Other
+ * operators: FP_EINVAL. */
 FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out);
 FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual);
 FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on);
