@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- A max-flow engine for graph TV (`src/maxflow/`, internal): Boykov–Kolmogorov augmenting paths on two search trees, written from the paper, whose trees and flow carry over between solves when terminal or edge residuals change. It runs in caller memory without allocating and is tested by optimality certificates and against Dinic's algorithm (`tests/c/test_maxflow.cpp`). Not yet reachable from the API.
+
 ## [0.2.0] — 2026-10-17
 
 Image operators, nonconvex penalties and more exact operators, with

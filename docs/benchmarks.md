@@ -923,3 +923,59 @@ faster, 1e-3 0–22% and 1e-6 5–29%. Two cells are slower:
   r has error 1.08e-2 at iteration 3 and 8.8e-3 at iteration 4, but no
   quarter-decade tolerance stops at 4: the closest stop at 3 or at 5. On an
   eighth-decade grid the times are 3.19 and 3.09 ms.
+
+## 2026-10-17, Apple M5 Pro: the max-flow engine on graph TV cuts
+
+`bench/bench_maxflow.cpp` (single thread, `-O3`; build line in the file), on
+a synthetic image (a ramp with disks and a square, Gaussian noise 0.1, values
+about [0, 1]). Each cut problem is graph TV at a level t: terminal x_p − t,
+edges γ both ways (diagonals γ/√2 with 8 neighbours). The Dinic baseline is
+written in the benchmark (arcs by tail, BFS levels, DFS with current-arc
+pointers). Medians of 3 runs, one run for the level sequences.
+
+**One cut at the median level, ms.** Flows agree to 1e-11 or better.
+
+| Grid | γ = 0.02 | | γ = 0.1 | | γ = 0.5 | |
+| --- | --- | --- | --- | --- | --- | --- |
+| | engine | Dinic | engine | Dinic | engine | Dinic |
+| 256², 4 | 2.8 | 10.8 | 2.7 | 11.9 | 18.2 | 43.5 |
+| 512², 4 | 6.6 | 26.6 | 12.3 | 90.2 | 87.7 | 324.6 |
+| 1024², 4 | 27.3 | 144.8 | 47.2 | 516.0 | 320.3 | 1933.8 |
+| 512², 8 | 22.2 | 72.3 | 57.5 | 300.2 | 802.0 | 1310.5 |
+| 64³, 6 | 13.5 | 61.0 | 63.0 | 293.1 | 539.9 | 353.3 |
+
+**16 levels of divide and conquer, ms.** Every part of the image is cut at
+the middle of its interval in the same solve, down to 2⁻¹⁶ of the value
+range. *Reuse* keeps the flow and the trees between levels (the edges across
+each cut removed, the terminals shifted), *replant* keeps the flow and
+rebuilds the trees, *scratch* builds every level anew with the boundary
+terms in the terminals. All three find the same cuts at every level.
+
+| Grid | γ | reuse | replant | scratch |
+| --- | --- | --- | --- | --- |
+| 256², 4 | 0.02 | 52 | 49 | 43 |
+| | 0.1 | 134 | 136 | 215 |
+| | 0.5 | 643 | 629 | 749 |
+| 512², 4 | 0.02 | 192 | 199 | 184 |
+| | 0.1 | 799 | 805 | 1078 |
+| | 0.5 | 4623 | 4754 | 5772 |
+| 1024², 4 | 0.02 | 790 | 813 | 750 |
+| | 0.1 | 3928 | 3964 | 5141 |
+| | 0.5 | 33215 | 33650 | 39228 |
+| 512², 8 | 0.02 | 462 | 476 | 697 |
+| | 0.1 | 2928 | 2957 | 5543 |
+| | 0.5 | 9966 | 10579 | 20177 |
+| 64³, 6 | 0.02 | 339 | 353 | 418 |
+| | 0.1 | 1951 | 1941 | 4336 |
+| | 0.5 | 8974 | 9267 | 15406 |
+
+Keeping the flow saves up to 2.2× at γ ≥ 0.1; at γ = 0.02 starting over is
+as fast or faster (0.83–0.95× on the 4-neighbour grids). Keeping the trees saves at most 6% over replanting them. A level costs more
+than the first cut: on 512² at γ = 0.5, levels 1–15 take 1–2 × 10⁵
+augmentations each, over paths of 35–480 arcs that lengthen with depth, and
+each augmentation empties one terminal. The level shift changes the sign of
+small terminal residuals all over the flat regions of the solution, and their
+flow has to cross the region again. Growth is about 5% of the time and
+augmentation most of the rest, so tree reuse cannot help here. Graph TV
+should cut each part at its own mean level and freeze the parts that come
+out constant (see ROADMAP).
