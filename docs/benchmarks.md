@@ -740,3 +740,64 @@ these γ restarts first fire near a gap of 1e-6. At 1e-6 they now save 12–32%.
 | 256², 0.1 | 141.42 | 124.38 | – |
 | 256², 0.3 | 1080.47 | 868.04 | – |
 | 64³, 0.1 | 824.43 | 562.33 | – |
+
+## 2026-10-17, Apple M5 Pro: anisotropic TV with restarts and a polish from the dual
+
+`bench/compare_tv_aniso.py` as in the 2026-10-16 section (single thread, the
+same images, sweeps and reference). Two changes to both solvers (ADBPG in 2D,
+the three-block FDPG in 3D):
+
+- **Gradient restarts** (O'Donoghue and Candès), as in isotropic TV. The dual
+  is a quadratic over a polyhedron, so restarted FISTA converges linearly.
+  On 32³ at λ = 0.5 the iterations to a gap of 1e-10 fell from 644 to 208, and
+  to 1e-12 from 2256 to 360.
+- **A polish from the dual's regions**, tried at the gap checks. An edge whose
+  1D dual is strictly inside its bound is flat at the solution, and the
+  solution on given regions has a closed form. The old polish ran only at the
+  end and took its regions from jumps of z below a threshold; it merged small
+  true jumps and, on 64³ at λ = 0.1, made the output worse (3.2e-6 → 7.8e-5
+  relative error at tol 1e-8). The new polished point is the exact solution
+  (error 4e-16) after 256 iterations at λ = 0.1. Its gap is then the dual's
+  suboptimality only, 1e-4 or less of the iterate's gap. A polished point is
+  kept only when its gap is at most 1/100 of the iterate's: at loose
+  tolerances, polished points with gap ratios of 0.03–0.4 met the target with
+  2–4× the iterate's error.
+
+With restarts in place, the polish takes the iterations to a gap of 1e-12 on
+64³ from 516 to 256 at λ = 0.1 and from 448 to 208 at λ = 0.5. A polish costs about as much as one iteration on one thread (6.5 ms on
+64³, mostly a serial union-find) and about five on eight threads. Attempts are
+spaced by a tenfold fall of the gap, so they add a few percent per solve.
+
+**ms to reach the error.** Before: the 2026-10-16 run.
+
+| Image, λ | Solver | 1e-2 | 1e-3 | 1e-4 | 1e-6 |
+| --- | --- | --- | --- | --- | --- |
+| 256², 0.1 | fastprox, before | 6.13 | 11.14 | 40.71 | 88.14 |
+|  | fastprox, now | 5.00 | **11.13** | **21.34** | **37.84** |
+|  | best proxTV | **4.13** (DR2) | 12.16 (DR2) | 39.53 (DR2) | 274.82 (Yang2) |
+| 256², 0.5 | fastprox, before | 4.01 | 17.54 | 42.80 | 193.01 |
+|  | fastprox, now | **3.25** | **20.79** | **48.15** | **78.65** |
+|  | best proxTV | 8.47 (DR2) | 29.55 (DR2) | 87.88 (DR2) | 582.91 (Yang2) |
+| 512², 0.1 | fastprox, before | 25.92 | 46.96 | 87.15 | 429.61 |
+|  | fastprox, now | 21.43 | **47.55** | **93.27** | **165.81** |
+|  | best proxTV | **18.05** (DR2) | 52.45 (DR2) | 182.76 (DR2) | 1291.54 (Yang2) |
+| 512², 0.5 | fastprox, before | 16.00 | 90.94 | 255.08 | 1239.12 |
+|  | fastprox, now | **12.73** | **100.79** | **278.46** | **440.73** |
+|  | best proxTV | 19.89 (DR2) | 129.80 (DR2) | 420.39 (DR2) | 4452.59 (DR2) |
+| 64³, 0.1 | fastprox, before | 71.91 | 392.98 | 744.34 | 10461.08 |
+|  | fastprox, now | **73.81** | **400.14** | **617.82** | **2245.32** |
+|  | best proxTV | 167.15 (Dykstra) | 1315.82 (Dykstra) | 2046.40 (Yang3) | 4133.84 (Yang3) |
+| 64³, 0.5 | fastprox, before | 96.49 | 209.86 | 608.86 | 4332.43 |
+|  | fastprox, now | **103.75** | **215.18** | **477.75** | **777.42** |
+|  | best proxTV | 146.47 (Dykstra) | 1920.85 (Yang3) | 1920.85 (Yang3) | 3703.42 (Yang3) |
+
+Bold marks the fastest of the current runs (fastprox now and proxTV).
+
+In 3D fastprox is now fastest at every accuracy. At 1e-6 it is 1.8× faster
+than Yang's ADMM at λ = 0.1 and 4.8× at λ = 0.5 (it was 2.5× and 1.1× slower),
+and 4.7× and 5.6× faster than before. In 2D, 1e-6 is 2.3–2.8× faster than
+before and 7.3–10× faster than the best proxTV solver. Some medium accuracies
+are 2–19% slower than before: 1e-4 except on 256² at λ = 0.1 (7–12%), 1e-3 at
+λ = 0.5 (11–19%), and 1e-2 and 1e-3 in 3D (2–8%). There the old end-of-solve polish, which merged jumps below
+a threshold, happened to land closer to the solution; fastprox is still ahead
+of proxTV at all of them. proxTV's DR2 stays quicker to 1e-2 at λ = 0.1.

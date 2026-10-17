@@ -45,17 +45,20 @@ inline size_t fiber_thread_bytes(const fp_op &tv, const Geom &g) noexcept {
     return 2 * static_cast<size_t>(kFiberBlock * g.Lmax) * sizeof(double) + 64 + tv.scratch_bytes(g.Lmax);
 }
 
-// For every fiber along axis a: z = prox_{lam TV}(v) by the 1D TV operator tv
-// (unit weight), with v(o) = in(o) at each entry o of the fiber, then
-// out(o, z, v). lam == 0 is the identity.
-template <class In, class Out>
-void fiber_pass(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, In &&in,
-                Out &&out) {
+// Blocks of fibers along axis a that fiber_pass hands out: one per fiber for
+// the contiguous axis, else kFiberBlock neighbouring fibers.
+inline int64_t fiber_blocks(const Geom &g, int a) noexcept {
+    const int64_t s = g.S[a];
+    const int64_t outer = g.N / g.L[a] / s;
+    return outer * (s == 1 ? 1 : (s + kFiberBlock - 1) / kFiberBlock);
+}
+
+template <bool Sum, class In, class Out>
+double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, double *part,
+                       In &&in, Out &&out) {
     const int64_t L = g.L[a], s = g.S[a];
-    const int64_t nf = g.N / L;
-    const int64_t outer = nf / s;
     const int64_t bpo = s == 1 ? 1 : (s + kFiberBlock - 1) / kFiberBlock;
-    const int64_t nblk = outer * bpo;
+    const int64_t nblk = fiber_blocks(g, a);
     const bool ident = lam == 0.0 || L == 1;
     const int64_t width = s == 1 ? 1 : kFiberBlock;
     const int64_t grain = std::max<int64_t>(1, kChunk / std::max<int64_t>(1, L * width));
@@ -74,10 +77,37 @@ void fiber_pass(const fp_op &tv, const Geom &g, int a, double lam, const ImageCa
                 if (ident) std::memcpy(bout + q * L, bin + q * L, static_cast<size_t>(L) * sizeof(double));
                 else tv.prox_row(bin + q * L, bout + q * L, L, lam, scr, nullptr);
             }
+            double acc = 0.0;
             for (int64_t i = 0; i < L; ++i)
-                for (int64_t q = 0; q < W; ++q) out(base + i * s + q, bout[q * L + i], bin[q * L + i]);
+                for (int64_t q = 0; q < W; ++q) {
+                    if constexpr (Sum) acc += out(base + i * s + q, bout[q * L + i], bin[q * L + i]);
+                    else out(base + i * s + q, bout[q * L + i], bin[q * L + i]);
+                }
+            if constexpr (Sum) part[blk] = acc;
         }
     });
+    double s_ = 0.0;
+    if constexpr (Sum)
+        for (int64_t blk = 0; blk < nblk; ++blk) s_ += part[blk];
+    return s_;
+}
+
+// For every fiber along axis a: z = prox_{lam TV}(v) by the 1D TV operator tv
+// (unit weight), with v(o) = in(o) at each entry o of the fiber, then
+// out(o, z, v). lam == 0 is the identity.
+template <class In, class Out>
+void fiber_pass(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, In &&in,
+                Out &&out) {
+    fiber_pass_impl<false>(tv, g, a, lam, c, nullptr, in, out);
+}
+
+// fiber_pass whose out returns a double: their sum, per block into part
+// (fiber_blocks(g, a) entries) and then in block order, so it does not depend
+// on the thread count.
+template <class In, class Out>
+double fiber_pass_sum(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, double *part,
+                      In &&in, Out &&out) {
+    return fiber_pass_impl<true>(tv, g, a, lam, c, part, in, out);
 }
 
 // Sum over the rows (length L[k-1]) of f(r), formed in a fixed order.
