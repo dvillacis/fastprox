@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-17
+
+Image operators, nonconvex penalties and more exact operators, with
+derivatives. The C ABI only grows: every 0.1 declaration and struct is
+unchanged.
+
 ### Added
 
 - Anisotropic TV of 2D and 3D images (`fp_op_tv_aniso`, `fastprox.TVAniso`, `fastprox.tv_aniso`): the prox of γ Σₐ wₐ TVₐ on the last 2 or 3 axes, batched over the others. Dual methods with exact 1D TV steps along each axis: the accelerated dual block proximal gradient method for two axes (Beck 2017, §12.5.4; Chambolle and Pock 2015) and the fast dual proximal gradient method for three (Beck, Algorithm 9). It stops on a certified duality gap (`tol`·‖x‖²/2 per image, `FP_ENOTCONV` after `max_iter`), and recovers the solution's constant regions to polish it to the exact solution when they are identified. JVP and VJP in x, γ and the axis weights come from those regions in O(n). Bit-identical for any thread count, also inside a single image.

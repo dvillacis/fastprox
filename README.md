@@ -3,8 +3,11 @@
 Exact proximal operators and projections with derivatives. A C++17 core
 behind a plain-C API, with Python bindings.
 
-- **Exact.** Direct algorithms (Condat's 1D TV and simplex projection, the
-  taut string, pool-adjacent-violators) instead of iterative solvers.
+- **Exact or certified.** Direct algorithms (Condat's 1D TV and simplex
+  projection, the taut string, pool-adjacent-violators, closed forms) where
+  they exist. The image TV solvers stop on a certified duality gap, and
+  anisotropic TV is polished to the exact solution once its regions are
+  found.
 - **Differentiable.** Jacobian-vector and vector-Jacobian products in the
   input, the step and the operator's parameters, for bilevel learning and
   implicit differentiation.
@@ -43,17 +46,26 @@ gx, grads = op.vjp(ctx, g=x)              # vector-Jacobian product
 print(grads.gamma, grads.weights)         # gradients in the step and the weights
 ```
 
-## Operators (0.1)
+## Operators
 
-Soft thresholding (weighted), elastic net, Huber, group ℓ2, box,
-nonnegative orthant, ℓ2 ball, simplex, weighted ℓ1 ball, ℓ∞ norm, isotonic
-regression, and 1D total variation with per-edge weights. Each one has a
-conjugate prox through the Moreau identity.
+- **Elementwise:** soft thresholding (weighted), elastic net, Huber, box,
+  nonnegative orthant, log barrier, ℓ1 over a box.
+- **Nonconvex:** ℓ0, ℓq (0 < q < 1), SCAD and MCP (weighted), log penalty, with an explicit tie rule.
+- **Groups and trees:** group ℓ2, group Huber, group SCAD and MCP, tree-structured group norms and the sparse group lasso.
+- **Projections:** ℓ2 ball, simplex, weighted ℓ1 ball, hyperplane or
+  half-space intersected with a box, second-order cone. Also the ℓ∞ norm and
+  the support functions max and the sum of the k largest entries.
+- **Signals:** isotonic regression, 1D total variation with per-edge weights, its ℓ2-of-differences
+  variant, and the projection onto a 1D TV ball.
+- **Images:** anisotropic and isotropic total variation in 2D and 3D, with warm starts (since 0.2).
+
+Each one has a conjugate prox through the Moreau identity. The elementwise maps with kinks report
+which entries sit at a breakpoint, and their derivatives can be taken on either side of it.
 
 ## Documentation
 
 - [API reference](https://github.com/dvillacis/fastprox/blob/master/docs/api.md) (C and Python)
-- [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, proximal gradient, derivatives, bilevel learning
+- [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, image denoising, proximal gradient, sparse recovery, group sparsity, the weighted graphical lasso, derivatives, bilevel learning
 - [Benchmarks](https://github.com/dvillacis/fastprox/blob/master/docs/benchmarks.md) against proxTV and Condat's C code
 - [Design specification](https://github.com/dvillacis/fastprox/blob/master/docs/spec.md)
 - [Roadmap](https://github.com/dvillacis/fastprox/blob/master/ROADMAP.md) and [changelog](https://github.com/dvillacis/fastprox/blob/master/CHANGELOG.md)
