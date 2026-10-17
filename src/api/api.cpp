@@ -842,6 +842,17 @@ FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **ou
     });
 }
 
+FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges, const fp_array *edge_weights,
+                                fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(edge_weights, w)) return s;
+        return fp::make_graph_tv(n, m, edges, std::move(w), out);
+    });
+}
+
 FP_API void fp_op_free(fp_op *op) { delete op; }
 
 FP_API int64_t fp_op_nparams(const fp_op *op) { return op ? op->nparams() : -1; }

@@ -316,6 +316,11 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv_iso(ndim, pw.get(), o); });
     }, "ndim"_a, "weights"_a.none());
+    m.def("graph_tv", [](int64_t n, IdArr edges, std::optional<Params> w) {
+        const ParamView pw(w);
+        const int64_t m = static_cast<int64_t>(edges.shape(0)) / 2;
+        return make([&](fp_op **o) { return fp_op_graph_tv(n, m, edges.data(), pw.get(), o); });
+    }, "n"_a, "edges"_a, "weights"_a.none());
     m.def("set_deriv_tol", [](Workspace &ws, double tol, int max_iter) {
         check(fp_workspace_set_deriv_tol(ws.p, tol, max_iter));
     }, "ws"_a, "tol"_a, "max_iter"_a);

@@ -158,6 +158,24 @@ def _aniso_term(cp, z, g, p, shape):
                    for a in range(k) if shape[a] > 1)
 
 
+def _graph(rng, shape):
+    """A ring over the nodes plus random chords and one repeated edge, with
+    weights in [0, 2] (some zero)."""
+    n = shape[0]
+    ring = np.stack([np.arange(n), (np.arange(n) + 1) % n], 1)
+    a = rng.integers(0, n, n)
+    chords = np.stack([a, (a + rng.integers(1, n, n)) % n], 1)
+    e = np.concatenate([ring, chords, ring[:1]])
+    w = _pos(rng, len(e), 0.0, 2.0)
+    w[rng.random(len(e)) < 0.1] = 0.0
+    return {"n": np.array([float(n)]), "edges": e.astype(float), "weights": w}
+
+
+def _graph_term(cp, z, g, p, shape):
+    e = p["edges"].astype(int)
+    return g * cp.sum(cp.multiply(p["weights"], cp.abs(z[e[:, 0]] - z[e[:, 1]])))
+
+
 IMAGE_CASES = {
     "tv_aniso_2d": (
         lambda rng, shape: {"weights": _pos(rng, 2, 0.0, 2.0)},
@@ -179,6 +197,11 @@ IMAGE_CASES = {
         lambda p: fp.TVIso(3, p["weights"]),
         _iso_term,
     ),
+    "graph_tv": (
+        _graph,
+        lambda p: fp.GraphTV(int(p["n"][0]), p["edges"].astype(int), p["weights"]),
+        _graph_term,
+    ),
 }
 
 IMAGE_SHAPES = {
@@ -186,4 +209,5 @@ IMAGE_SHAPES = {
     "tv_aniso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
     "tv_iso_2d": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
     "tv_iso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
+    "graph_tv": ((3,), (8,), (30,), (120,)),
 }

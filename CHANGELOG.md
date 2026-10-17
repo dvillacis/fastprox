@@ -7,7 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- A max-flow engine for graph TV (`src/maxflow/`, internal): Boykov–Kolmogorov augmenting paths on two search trees, written from the paper, whose trees and flow carry over between solves when terminal or edge residuals change. It runs in caller memory without allocating and is tested by optimality certificates and against Dinic's algorithm (`tests/c/test_maxflow.cpp`). Not yet reachable from the API.
+- A max-flow engine for graph TV (`src/maxflow/`, internal): Boykov–Kolmogorov augmenting paths on two search trees, written from the paper, whose trees and flow carry over between solves when terminal or edge residuals change. It runs in caller memory without allocating and is tested by optimality certificates and against Dinic's algorithm (`tests/c/test_maxflow.cpp`).
+- Graph TV, `fp_op_graph_tv(n, m, edges, w)` and `fp.GraphTV(n, edges, weights)` / `fp.graph_tv`: the prox of γ Σ_e w_e |z_u − z_v| on any graph, on the last axis and batched over the others. Parametric max-flow (Chambolle and Darbon; Hochbaum) with each part cut at the mean of its solution, so a part whose cut is trivial ends exactly; every part is cut in one solve per round, reusing the flow and the search trees. Exact to rounding with `tol = 0` (the Python default), else within `tol`·(max x − min x) at every node; `fp_info.gap` is the duality gap with the flow as the dual. Derivatives (JVP, VJP, γ and per-edge weights) are exact averages over the regions where z is constant. Tested by an independent KKT check (`tests/python/test_graph_tv.py`), against 1D TV on chains, anisotropic TV on grids and CVXPY fixtures.
 
 ## [0.2.0] — 2026-10-17
 

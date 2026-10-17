@@ -979,3 +979,46 @@ flow has to cross the region again. Growth is about 5% of the time and
 augmentation most of the rest, so tree reuse cannot help here. Graph TV
 should cut each part at its own mean level and freeze the parts that come
 out constant (see ROADMAP).
+
+## 2026-10-17, Apple M5 Pro: graph TV
+
+`bench/compare_graph_tv.py` (single thread, medians of 3), on the synthetic
+images of the max-flow section and on k-nearest-neighbour graphs (k = 8, each
+pair once, weights exp(−d²/median d²)) of random points in the unit square
+carrying the same pattern plus noise 0.1. Graph TV is timed exact (`tol=0`)
+and at `tol=1e-4`; the number of max-flow solves is in parentheses. On
+4-neighbour grids graph TV is anisotropic TV, so `TVAniso` solves the same
+problem; its errors are against the exact graph TV result. Repeated runs of
+the 512² γ = 0.5 cases varied by up to 40%.
+
+**4-neighbour grids, ms.**
+
+| Image, γ | graph TV exact | graph TV 1e-4 (error) | TVAniso 1e-6 (error) | TVAniso 1e-10 (error) |
+| --- | --- | --- | --- | --- |
+| 256², 0.02 | 31.5 (19) | 32.2 (7e-5) | 11.7 (1e-3) | 20.4 (1e-5) |
+| 256², 0.1 | 171.0 (23) | 99.0 (7e-5) | 47.7 (6e-4) | 159.3 (2e-16) |
+| 256², 0.5 | 486.6 (18) | 375.3 (4e-5) | 117.9 (8e-4) | 138.0 (1e-5) |
+| 512², 0.02 | 128.6 (21) | 125.7 (9e-5) | 48.6 (9e-4) | 87.7 (1e-5) |
+| 512², 0.1 | 787.8 (20) | 525.2 (7e-5) | 208.7 (8e-4) | 1077.6 (1e-6) |
+| 512², 0.5 | 4264.6 (17) | 2977.1 (8e-5) | 940.2 (4e-4) | 1746.5 (3e-16) |
+
+**8-neighbour grids (diagonals 1/√2) and kNN graphs, ms.**
+
+| Graph, γ | 0.02 exact | 0.02 1e-4 | 0.1 exact | 0.1 1e-4 | 0.5 exact | 0.5 1e-4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256², 8 neighbours | 85.0 (25) | 80.1 | 425.1 (17) | 291.3 | 1106.8 (18) | 746.2 |
+| 512², 8 neighbours | 363.1 (23) | 341.5 | 3873.3 (21) | 2076.0 | 8753.4 (18) | 6477.2 |
+| kNN, 10⁴ points, 4.6 × 10⁴ edges | 12.4 (17) | 12.1 | 22.4 (18) | 21.1 | 29.9 (13) | 29.2 |
+| kNN, 10⁵ points, 4.6 × 10⁵ edges | 145.3 (21) | 142.4 | 300.9 (22) | 274.1 | 645.0 (18) | 518.4 |
+
+Every part is cut at the mean of its solution, so a part whose cut comes out
+trivial is finished exactly, and the exact solve takes 13–25 max-flow solves
+in every case. The time is in the solves: in the rounds where the large flat
+regions are still unfinished, each solve re-routes flow through them (on 512²
+at γ = 0.5, rounds 4–14 take 0.3–1.2 s each with nearly every node active).
+Restarting each round from zero flow or replanting the trees changes little.
+Starting every round from the exact dual (taken from a first solve) takes the
+max-flow part from 5.5 s to 0.12 s, but approximate duals from up to 400
+iterations of restarted FISTA on the edge dual gave no gain: the dual is far
+from unique, and a flow close in value is not close in shape. The
+bookkeeping between solves touches only the active nodes and their edges.

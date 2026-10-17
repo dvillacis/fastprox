@@ -58,6 +58,7 @@ print(grads.gamma, grads.weights)         # gradients in the step and the weight
 - **Signals:** isotonic regression, 1D total variation with per-edge weights, its ℓ2-of-differences
   variant, and the projection onto a 1D TV ball.
 - **Images:** anisotropic and isotropic total variation in 2D and 3D, with warm starts (since 0.2).
+- **Graphs:** total variation on any graph, exact, by parametric max-flow (since 0.3).
 
 Each one has a conjugate prox through the Moreau identity. The elementwise maps with kinks report
 which entries sit at a breakpoint, and their derivatives can be taken on either side of it.

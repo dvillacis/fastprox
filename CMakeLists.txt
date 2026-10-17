@@ -60,6 +60,7 @@ add_library(fastprox
   src/ops/tv1d_l2.cpp
   src/ops/tv_aniso.cpp
   src/ops/tv_iso.cpp
+  src/ops/graph_tv.cpp
 )
 add_library(fastprox::fastprox ALIAS fastprox)
 

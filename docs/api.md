@@ -55,6 +55,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
+| Graph TV (*since 0.3*) | Σ_e w_e \|z_u − z_v\| over the edges e = (u, v) of a graph, on the last axis | `fp_op_graph_tv(n, m, edges, w)` | `GraphTV(n, edges, weights)`, `graph_tv` | w (scalar or one per edge) |
 
 Notes:
 
@@ -265,6 +266,54 @@ TV_I.
   closed-form values.
 - FISTA converges like 1/k² in the dual, so very tight tolerances take
   many iterations (about 1/√tol); the default `tol` of 1e-6 is cheap.
+
+### Graph TV (*since 0.3*)
+
+Graph TV acts on the **last** axis, whose length must be the number of nodes
+n, and is batched over the leading axes; `fp_options.axis` is ignored. The m
+edges are given as 2m node indices (u₀, v₀, u₁, v₁, …), in Python an array of
+shape (m, 2); u ≠ v, and a repeated edge adds its weight. Each signal is solved
+on its own, sequentially, so a batch gives the same result as one call per
+signal, for any thread count; threads go to the batch.
+
+- **Algorithm.** Parametric max-flow (Chambolle and Darbon, IJCV 84, 2009;
+  Hochbaum, J. ACM 48, 2001). The set {z > t} of the solution is the
+  smallest minimum cut of a graph with terminal xₚ − t at node p and capacity
+  γw_e both ways on each edge. Each part of the graph is cut at the mean of
+  its solution, which is known in closed form: if that cut is trivial the
+  part is constant at its mean, exactly; otherwise it splits, the edges
+  across the cut become fixed terms of the two sides, and each side goes on
+  as its connected pieces. All parts are cut in one max-flow solve per round,
+  which starts from the previous round's flow and search trees (the engine
+  in `src/maxflow/`, Boykov and Kolmogorov, TPAMI 26, 2004). A level is
+  clamped into the middle half of the interval known to hold the part's
+  values, so the interval shrinks by at least a quarter per round.
+- **Precision.** A part whose values are known within `tol`·(max x − min x)
+  is set to its mean, which is then within that distance of the solution at
+  every node; `tol` = 0 asks for the solution to rounding. The Python
+  methods default to `tol=0`; in C, `fp_options.tol` defaults to 1e-6, so set
+  it to 0 for the exact result. On 512² images the exact solve takes about 20
+  rounds; a loose `tol` saves the last ones (1e-4: 10–50% of the time, 1e-2:
+  2–5×). `max_iter` caps the rounds: the call then returns `FP_ENOTCONV`,
+  with every unfinished part at its mean.
+- **Certificate.** The final flow is a dual: f_e with |f_e| ≤ γw_e and
+  divergence q = Dᵀf. `fp_info.gap` is the duality gap of (z, f), summed over
+  the batch, and `fp_info.iters` the largest number of max-flow solves. The
+  workspace dual, of shape `(1, *x.shape)`, is q, with z = x − q at the
+  solution. Warm starts are accepted and have no effect.
+- **Derivatives** are exact: z is constant on the regions joined by edges
+  with γw_e > 0 and equal values (to rounding), and each region's value is
+  its mean of x minus γ Σ w_e s_e / |R| over its boundary edges, s_e the sign
+  of the jump. The Jacobian averages over the regions, and the γ and weight
+  derivatives come from the boundary signs, in O(n + m).
+- **Special values** as for the image operators: a NaN makes that signal NaN,
+  ±Inf is rejected with `FP_EINVAL`. Graphs are limited to 2³¹ − 1 nodes and
+  2³⁰ − 1 edges.
+- **Cost.** Augmenting paths are fast on small and medium graphs and at small
+  γ; on large grids at large γ each round re-routes flow through the flat
+  regions. On 4-neighbour grids, where it is the same problem, `TVAniso` is
+  faster at moderate accuracy, and exact graph TV is comparable with it at a
+  gap tolerance of 1e-10 (see docs/benchmarks.md).
 
 ### Derivatives at kinks
 

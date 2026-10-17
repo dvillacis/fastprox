@@ -32,7 +32,7 @@ __version__ = _C.version()
 __all__ = [
     "Info", "IterInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
-    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso",
+    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso", "GraphTV", "graph_tv",
     "L0", "Lq", "SCAD", "MCP", "LogPenalty", "hard_threshold", "lq", "scad", "mcp", "prox_log",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
@@ -748,6 +748,53 @@ class TVAniso(_ImageOperator):
         super().__init__(_C.tv_aniso(int(ndim), _vec(weights)), ndim)
 
 
+class GraphTV(_ImageOperator):
+    """Total variation on a graph, on the last axis (length ``n``) and batched
+    over the others:
+
+        g(z) = sum_e w_e |z_u - z_v|   over the edges e = (u, v)
+
+    ``edges`` is an array of shape (m, 2) of node indices, u != v (repeated
+    edges add); ``weights`` a scalar or one per edge, all >= 0. By parametric
+    max-flow (Chambolle and Darbon; Hochbaum), each part of the graph cut at
+    its mean value: exact up to rounding where a part ends at a trivial cut,
+    else within ``tol * (max x - min x)`` at every node, so ``tol=0`` (the
+    default) asks for the solution to rounding. ``info.gap`` is the duality
+    gap with the flow as the dual, ``info.iters`` the number of max-flow
+    solves; ``info.dual`` (shape (1, *x.shape)) is q with z = x - q. Warm
+    starts have no effect. ``jvp`` and ``vjp`` are exact (averages over the
+    regions where z is constant). Parameters: weights."""
+
+    def __init__(self, n, edges, weights=None):
+        e = np.ascontiguousarray(edges, dtype=np.int64)
+        if e.size and (e.ndim != 2 or e.shape[1] != 2):
+            raise ValueError("edges must have shape (m, 2)")
+        w = _vec(weights)
+        if w is not None and w.size == 0 and e.size == 0:
+            w = None  # no edges: nothing to weigh
+        super().__init__(_C.graph_tv(int(n), e.reshape(-1), w), 1)
+        self.n = int(n)
+        self.edges = e.reshape(-1, 2)
+        self._w = np.ones(1) if w is None else w
+        self._layout = [("weights", self._w.size, w is None)]
+
+    def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
+             tol=0.0, max_iter=1000, warm_start=None, warm=False):
+        return super().prox(x, gamma, out=out, threads=threads, keep=keep, ctx=ctx, copy=copy,
+                            tol=tol, max_iter=max_iter, warm_start=warm_start, warm=warm)
+
+    def prox_conj(self, y, sigma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
+                  tol=0.0, max_iter=1000, warm_start=None, warm=False):
+        return super().prox_conj(y, sigma, out=out, threads=threads, keep=keep, ctx=ctx,
+                                 copy=copy, tol=tol, max_iter=max_iter, warm_start=warm_start,
+                                 warm=warm)
+
+    def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=0.0, max_iter=1000,
+              warm_start=None, ctx=None, warm=False):
+        return super().solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
+                             max_iter=max_iter, warm_start=warm_start, ctx=ctx, warm=warm)
+
+
 class TVIso(_ImageOperator):
     """Isotropic total variation of 2D or 3D images, on the last ``ndim`` axes
     and batched over the others:
@@ -1008,6 +1055,15 @@ def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_
     (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
     return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
                                       max_iter=max_iter, warm_start=warm_start)
+
+
+def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=0.0, max_iter=1000, out=None,
+             threads=0, copy=False):
+    """prox of gamma * sum_e w_e |z_u - z_v| over ``edges`` (pairs (u, v)) on
+    the last axis. Returns ``(z, info)`` as :func:`tv_aniso`."""
+    x = np.asarray(x)
+    return GraphTV(x.shape[-1] if n is None else n, edges, weights).solve(
+        x, gamma, out=out, threads=threads, copy=copy, tol=tol, max_iter=max_iter)
 
 
 def hard_threshold(x, lam=1.0, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,
