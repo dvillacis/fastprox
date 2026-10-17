@@ -32,21 +32,14 @@
 // to its mean, within eps of the solution at every node. All parts are cut
 // in the same max-flow solve, one solve per round.
 //
-// Certificate. The flow is a dual: f_e (net flow u -> v, |f_e| <= gamma w_e)
-// with divergence q_p = sum of f_e out of p. The duality gap of (z, f) is
-//     gap = 1/2 |z - x + q|^2 + sum_e (gamma w_e |z_u - z_v| - f_e (z_u - z_v)),
-// both terms nonnegative; it is zero up to rounding when every part ended
-// exactly. q is written as the workspace dual.
-//
-// Derivatives. The solution is constant on the regions R of the graph of
-// edges with gamma w_e > 0 and equal ends (up to rounding), and there
-//     z_R = (sum_R x_p - gamma sum_{e in dR} w_e s_{e,R}) / |R|,
-// s_{e,R} the sign of z_R minus the value across e. So the Jacobian averages
-// over regions and the parameter derivatives are O(n + m).
+// Certificate and derivatives (src/ops/edge_tv.hpp). The flow is the dual:
+// f_e = gamma w_e - (residual u -> v) on live edges, +-gamma w_e on deleted
+// ones; the gap is zero up to rounding when every part ended exactly.
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "maxflow/maxflow.hpp"
+#include "ops/edge_tv.hpp"
 #include "ops/ops.hpp"
 
 #include <algorithm>
@@ -62,19 +55,17 @@ namespace {
 using maxflow::Index;
 using MF = maxflow::MaxFlow<double>;
 
-constexpr double kEps = 2.220446049250313e-16;
+using edge_tv::find;
+using edge_tv::kEps;
+using edge_tv::round64;
+using edge_tv::unite;
 
-inline size_t round64(size_t b) noexcept { return (b + 63) / 64 * 64; }
-
-struct GraphTV final : ImageOp<GraphTV> {
-    int64_t n, m;
-    std::vector<int32_t> eu, ev;
-    Vec w;  // one shared weight or one per edge
+struct GraphTV final : edge_tv::Base<GraphTV> {
     maxflow::Graph g;
     std::vector<int32_t> edge_of;  // edge of each arc
 
     GraphTV(int64_t nn, std::vector<int32_t> u, std::vector<int32_t> v, Vec ww)
-        : n(nn), m(static_cast<int64_t>(u.size())), eu(std::move(u)), ev(std::move(v)), w(std::move(ww)) {
+        : Base(nn, std::move(u), std::move(v), std::move(ww)) {
         g.build(n, m, eu.data(), ev.data());
         edge_of.resize(2 * static_cast<size_t>(m));
         for (int64_t e = 0; e < m; ++e) {
@@ -84,12 +75,6 @@ struct GraphTV final : ImageOp<GraphTV> {
     }
 
     const char *name() const noexcept override { return "graph_tv"; }
-    int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
-    int image_ndim() const noexcept override { return 1; }
-    fp_status check_image(const int64_t *shape) const noexcept override {
-        return shape[0] == n ? FP_OK : FP_ESHAPE;
-    }
-    double we(int64_t e) const noexcept { return w.size() == 1 ? w[0] : w[static_cast<size_t>(e)]; }
 
     // ---- working set --------------------------------------------------------
 
@@ -147,42 +132,6 @@ struct GraphTV final : ImageOp<GraphTV> {
     }
     size_t image_bytes(const int64_t *) const noexcept override { return layout(nullptr, nullptr) + 64; }
 
-    // Saved structure: the number of regions, a region label per node, 1/|R|
-    // per region, and the sign of z_u - z_v per edge (0 inside a region).
-    size_t struct_bytes(const int64_t *) const noexcept override {
-        return 8 + round64(4 * static_cast<size_t>(n)) + 8 * static_cast<size_t>(n) + static_cast<size_t>(m);
-    }
-    struct View {
-        int64_t *nreg;
-        int32_t *label;
-        double *inv;
-        int8_t *sgn;
-    };
-    View view(char *save) const noexcept {
-        View v;
-        v.nreg = reinterpret_cast<int64_t *>(save);
-        v.label = reinterpret_cast<int32_t *>(save + 8);
-        v.inv = reinterpret_cast<double *>(save + 8 + round64(4 * static_cast<size_t>(n)));
-        v.sgn = reinterpret_cast<int8_t *>(v.inv + n);
-        return v;
-    }
-
-    // Union-find with roots at the smallest index, so labels are deterministic.
-    static int32_t find(int32_t *uf, int32_t i) noexcept {
-        while (uf[i] != i) {
-            uf[i] = uf[uf[i]];
-            i = uf[i];
-        }
-        return i;
-    }
-    static void unite(int32_t *uf, int32_t a, int32_t b) noexcept {
-        a = find(uf, a);
-        b = find(uf, b);
-        if (a == b) return;
-        if (a < b) uf[b] = a;
-        else uf[a] = b;
-    }
-
     // ---- prox ---------------------------------------------------------------
 
     template <class T>
@@ -190,42 +139,16 @@ struct GraphTV final : ImageOp<GraphTV> {
         Work wk;
         char *base = c.work + ((64 - reinterpret_cast<uintptr_t>(c.work) % 64) % 64);
         layout(&wk, base);
-        double *d = wk.d;
         c.gap = 0.0;
         c.iters = 0;
         c.converged = true;
-        bool nan = false;
-        for (int64_t i = 0; i < n; ++i) {
-            const double v = static_cast<double>(x[i]);
-            if (std::isinf(v)) return kRowNonFinite;
-            nan = nan || std::isnan(v);
-            d[i] = v;
-        }
-        double *q = c.dual;
-        if (nan) {  // NaN anywhere: the whole signal is NaN, with singleton regions
-            for (int64_t i = 0; i < n; ++i) z[i] = std::numeric_limits<T>::quiet_NaN();
-            std::fill(q, q + n, std::numeric_limits<double>::quiet_NaN());
-            if (c.save) singletons(c.save);
-            return kRowOk;
-        }
-        if (n == 0) {
-            if (c.save) *view(c.save).nreg = 0;
-            return kRowOk;
-        }
+        bool done;
+        const int st = read_input(x, z, wk.d, c, done);
+        if (st != kRowOk || done) return st;
         solve(wk, c);
         for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(wk.zv[i]);
-        if (c.save) structure(wk, c);
+        if (c.save) structure(wk.d, wk.zv, wk.lev, wk.uf, c);
         return kRowOk;
-    }
-
-    void singletons(char *save) const noexcept {
-        const View v = view(save);
-        for (int64_t i = 0; i < n; ++i) {
-            v.label[i] = static_cast<int32_t>(i);
-            v.inv[i] = 1.0;
-        }
-        std::fill(v.sgn, v.sgn + m, int8_t(0));
-        *v.nreg = n;
     }
 
     // Level of part P for its next cut, or false when P is done (set to its mean).
@@ -426,131 +349,19 @@ struct GraphTV final : ImageOp<GraphTV> {
             np = na;
         }
         c.iters = rounds;
-        certificate(wk, mf, c);
-    }
-
-    // Gap of z with the flow's dual, and the dual q into c.dual.
-    void certificate(const Work &wk, const MF &mf, ImageCall &c) const noexcept {
-        const double gamma = c.gamma;
-        double *q = c.dual;
-        const double *zv = wk.zv, *d = wk.d;
-        std::fill(q, q + n, 0.0);
-        double edge = 0.0;
-        for (int64_t e = 0; e < m; ++e) {
+        certificate(d, zv, [&](int64_t e) {
             const double cap = gamma * we(e);
-            const double f = wk.esgn[e] ? wk.esgn[e] * cap : cap - mf.residual(g.arc[e]);
-            const int32_t u = eu[e], v = ev[e];
-            q[u] += f;
-            q[v] -= f;
-            const double dz = zv[u] - zv[v];
-            edge += cap * std::fabs(dz) - f * dz;
-        }
-        double node = 0.0;
-        for (int64_t i = 0; i < n; ++i) {
-            const double r = zv[i] - d[i] + q[i];
-            node += r * r;
-        }
-        c.gap = 0.5 * node + std::max(edge, 0.0);
-    }
-
-    // ---- structure ----------------------------------------------------------
-
-    void structure(Work &wk, ImageCall &c) const noexcept {
-        const View v = view(c.save);
-        const double gamma = c.gamma;
-        const double *zv = wk.zv;
-        int32_t *uf = wk.uf;
-        // Values are means of x plus boundary terms, within a few ulps of
-        // max |x| + gamma (largest weighted degree).
-        double *deg = wk.lev;
-        std::fill(deg, deg + n, 0.0);
-        double scale = 0.0;
-        for (int64_t i = 0; i < n; ++i) scale = std::max(scale, std::fabs(wk.d[i]));
-        for (int64_t e = 0; e < m; ++e) {
-            const double cap = gamma * we(e);
-            deg[eu[e]] += cap;
-            deg[ev[e]] += cap;
-        }
-        double dmax = 0.0;
-        for (int64_t i = 0; i < n; ++i) dmax = std::max(dmax, deg[i]);
-        const double tau = 64.0 * kEps * (scale + dmax);
-        for (int64_t i = 0; i < n; ++i) uf[i] = static_cast<int32_t>(i);
-        for (int64_t e = 0; e < m; ++e)
-            if (gamma * we(e) > 0.0 && std::fabs(zv[eu[e]] - zv[ev[e]]) <= tau) unite(uf, eu[e], ev[e]);
-        int64_t nr = 0;
-        for (int64_t i = 0; i < n; ++i) {
-            const int32_t r = find(uf, static_cast<int32_t>(i));
-            v.label[i] = r == i ? static_cast<int32_t>(nr++) : v.label[r];
-        }
-        std::fill(v.inv, v.inv + nr, 0.0);
-        for (int64_t i = 0; i < n; ++i) v.inv[v.label[i]] += 1.0;
-        for (int64_t R = 0; R < nr; ++R) v.inv[R] = 1.0 / v.inv[R];
-        for (int64_t e = 0; e < m; ++e) {
-            const int32_t a = v.label[eu[e]], bb = v.label[ev[e]];
-            const double dz = zv[eu[e]] - zv[ev[e]];
-            v.sgn[e] = a == bb ? 0 : (dz > 0.0 ? 1 : (dz < 0.0 ? -1 : 0));
-        }
-        *v.nreg = nr;
-    }
-
-    // ---- derivatives --------------------------------------------------------
-
-    // dz_R = mean_R(dx) - (1/|R|) sum_{e in dR} (dgamma w_e + gamma dw_e) s_{e,R}.
-    template <class T>
-    void jvp_img(const char *save, const T *dx, T *dz, const int64_t *, double gamma, double dgamma,
-                 const double *dparams, char *work, DerivCtl &) const noexcept {
-        const View v = view(const_cast<char *>(save));
-        const int64_t nr = *v.nreg;
-        double *acc = reinterpret_cast<double *>(work);
-        std::fill(acc, acc + nr, 0.0);
-        for (int64_t i = 0; i < n; ++i) acc[v.label[i]] += static_cast<double>(dx[i]);
-        for (int64_t e = 0; e < m; ++e) {
-            if (!v.sgn[e]) continue;
-            const double dwe = dparams ? dparams[w.size() == 1 ? 0 : e] : 0.0;
-            const double t = (dgamma * we(e) + gamma * dwe) * v.sgn[e];
-            acc[v.label[eu[e]]] -= t;
-            acc[v.label[ev[e]]] += t;
-        }
-        for (int64_t R = 0; R < nr; ++R) acc[R] *= v.inv[R];
-        for (int64_t i = 0; i < n; ++i) dz[i] = static_cast<T>(acc[v.label[i]]);
-    }
-
-    template <class T>
-    void vjp_img(const char *save, const T *gin, T *gx, const int64_t *, double gamma, double *acc, char *work,
-                 DerivCtl &) const noexcept {
-        const View v = view(const_cast<char *>(save));
-        const int64_t nr = *v.nreg;
-        double *G = reinterpret_cast<double *>(work);
-        std::fill(G, G + nr, 0.0);
-        for (int64_t i = 0; i < n; ++i) G[v.label[i]] += static_cast<double>(gin[i]);
-        for (int64_t R = 0; R < nr; ++R) G[R] *= v.inv[R];
-        const int64_t P = nparams();
-        for (int64_t e = 0; e < m; ++e) {
-            if (!v.sgn[e]) continue;
-            const double h = v.sgn[e] * (G[v.label[eu[e]]] - G[v.label[ev[e]]]);
-            acc[w.size() == 1 ? 0 : e] -= gamma * h;
-            acc[P] -= we(e) * h;
-        }
-        for (int64_t i = 0; i < n; ++i) gx[i] = static_cast<T>(G[v.label[i]]);
+            return esgn[e] ? esgn[e] * cap : cap - mf.residual(g.arc[e]);
+        }, c);
     }
 };
 
 }  // namespace
 
 fp_status make_graph_tv(int64_t n, int64_t m, const int64_t *edges, Vec w, fp_op **out) {
-    if (n < 0 || m < 0 || (m > 0 && !edges)) return FP_EINVAL;
-    if (n >= 2147483647 || m > 1073741823) return FP_ESHAPE;
-    if (w.empty()) w.assign(1, 1.0);
-    if (w.size() != 1 && static_cast<int64_t>(w.size()) != m) return FP_ESHAPE;
-    for (double v : w)
-        if (!finite_nonneg(v)) return FP_EPARAM;
-    std::vector<int32_t> u(static_cast<size_t>(m)), v(static_cast<size_t>(m));
-    for (int64_t e = 0; e < m; ++e) {
-        const int64_t a = edges[2 * e], b = edges[2 * e + 1];
-        if (a < 0 || a >= n || b < 0 || b >= n || a == b) return FP_EPARAM;
-        u[static_cast<size_t>(e)] = static_cast<int32_t>(a);
-        v[static_cast<size_t>(e)] = static_cast<int32_t>(b);
-    }
+    std::vector<int32_t> u, v;
+    const fp_status st = edge_tv::parse(n, m, edges, w, u, v);
+    if (st != FP_OK) return st;
     *out = new GraphTV(n, std::move(u), std::move(v), std::move(w));
     return FP_OK;
 }

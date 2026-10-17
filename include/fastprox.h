@@ -294,6 +294,16 @@ FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **ou
 FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges,
                                 const fp_array *edge_weights, fp_op **out);
 
+/* TV on a tree or forest (since 0.3): fp_op_graph_tv's g, n, edges and
+ * edge_weights, for edges that form a forest (no cycles, no repeated edges;
+ * FP_EPARAM otherwise), in any order and orientation; a chain is a tree. By
+ * dynamic programming (Kolmogorov, Pock and Rolinek), O(n log n): exact up
+ * to rounding, tol and max_iter are ignored, fp_info.iters is 1 and gap the
+ * duality gap with the dual flow, which on a tree is determined by z. The
+ * workspace dual and the derivatives are those of fp_op_graph_tv. */
+FP_API fp_status fp_op_tree_tv(int64_t n, int64_t m, const int64_t *edges,
+                               const fp_array *edge_weights, fp_op **out);
+
 FP_API void        fp_op_free(fp_op *op);
 FP_API int64_t     fp_op_nparams(const fp_op *op);
 FP_API const char *fp_op_name(const fp_op *op);

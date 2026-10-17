@@ -1022,3 +1022,43 @@ max-flow part from 5.5 s to 0.12 s, but approximate duals from up to 400
 iterations of restarted FISTA on the edge dual gave no gain: the dual is far
 from unique, and a flow close in value is not close in shape. The
 bookkeeping between solves touches only the active nodes and their edges.
+
+## 2026-10-18, Apple M5 Pro: tree TV
+
+`bench/compare_tree_tv.py` (single thread, medians of 5; graph TV once).
+Random recursive trees carry the pattern of the graph TV section at random
+points; combs are an h × h image's rows joined by its first column, the
+spanning tree of Kolmogorov, Pock and Rolínek's image experiments; paths
+carry a random walk plus noise. Both operators are exact, so only time is
+compared.
+
+| Tree, γ | 0.02 | 0.1 | 0.5 |
+| --- | --- | --- | --- |
+| random, 10⁴ nodes: tree / graph TV | 0.5 / 2.5 | 0.8 / 4.1 | 0.5 / 6.5 |
+| random, 10⁵ nodes | 6.6 / 28.3 | 9.0 / 61.0 | 14.3 / 74.2 |
+| random, 10⁶ nodes, tree TV only | 69–92 | 77–188 | 69–135 |
+| comb 316² | 3.4 / 17.6 | 5.9 / 24.0 | 6.0 / 38.6 |
+| comb 1000² | 33.9 / 193.1 | 60.7 / 267.9 | 73.0 / 546.0 |
+| star, 3000 nodes | 0.2 / 6.8 | 0.2 / 12.5 | 0.2 / 9.2 |
+| star, 10⁵ nodes, tree TV only | 9.7 | 10.2 | 9.6 |
+| path, 10⁵ nodes: tree / TV1D | 2.3 / 0.6 | 2.6 / 0.7 | 2.4 / 0.6 |
+| path, 10⁶ nodes | 22.4 / 6.4 | 26.8 / 7.6 | 24.3 / 6.0 |
+| path, 10⁶ nodes, shuffled labels, tree TV | 26.3 | 31.0 | 27.0 |
+
+The 10⁶-node random trees vary between instances (ranges over two trees and
+five runs each). On trees the dynamic program is 4–8× faster than graph TV
+and 30–60× on stars; graph TV takes 30–60 s on a star with 10⁵ leaves
+(measured while writing the tests), because its max-flow rescans the hub's
+arcs each time the hub loses its parent in the search tree. On paths the
+deque version of Section 4.1 runs at 22–27 ns per node, 3.5–4× the time of
+Condat's algorithm in `TV1D`, which needs the signal in order; labels in
+random order cost 10–15% more.
+
+Choices measured on the way, on 10⁶ nodes: pairing heaps instead of leftist
+heaps (1.3–1.6× faster, since an insertion at the far end of a leftist heap
+walks its right spine), a depth-first instead of a breadth-first order (comb
+1000²: 54–122 ms to 35–61 ms, as each subtree is contiguous), and the passes
+run over positions in that order with the input gathered once (random trees:
+110 ms to 57 ms). The deque for paths took them from 35–150 ms with heaps to
+21–26 ms. Recomputing the values as region means and the certificate cost
+about 1 ms of the 21.

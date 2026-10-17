@@ -171,6 +171,17 @@ def _graph(rng, shape):
     return {"n": np.array([float(n)]), "edges": e.astype(float), "weights": w}
 
 
+def _tree(rng, shape):
+    """A random forest: each node joins an earlier one (labels shuffled), one
+    edge dropped, with weights in [0, 2] (some zero)."""
+    n = shape[0]
+    i = np.arange(1, n)
+    e = rng.permutation(n)[np.stack([i, (rng.random(n - 1) * i).astype(int)], 1)][: max(n - 2, 0)]
+    w = _pos(rng, len(e), 0.0, 2.0)
+    w[rng.random(len(e)) < 0.1] = 0.0
+    return {"n": np.array([float(n)]), "edges": e.reshape(-1, 2).astype(float), "weights": w}
+
+
 def _graph_term(cp, z, g, p, shape):
     e = p["edges"].astype(int)
     return g * cp.sum(cp.multiply(p["weights"], cp.abs(z[e[:, 0]] - z[e[:, 1]])))
@@ -202,6 +213,11 @@ IMAGE_CASES = {
         lambda p: fp.GraphTV(int(p["n"][0]), p["edges"].astype(int), p["weights"]),
         _graph_term,
     ),
+    "tree_tv": (
+        _tree,
+        lambda p: fp.TreeTV(int(p["n"][0]), p["edges"].astype(int), p["weights"]),
+        _graph_term,
+    ),
 }
 
 IMAGE_SHAPES = {
@@ -210,4 +226,5 @@ IMAGE_SHAPES = {
     "tv_iso_2d": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
     "tv_iso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
     "graph_tv": ((3,), (8,), (30,), (120,)),
+    "tree_tv": ((3,), (8,), (30,), (120,)),
 }
