@@ -120,6 +120,29 @@ def test_tight_solves_threads_and_warm(shape, k, w):
     assert info2.iters == 0 and np.array_equal(z, z2)
 
 
+@pytest.mark.parametrize("gamma", [0.1, 0.5])
+def test_loose_tolerances(gamma):
+    """In 2D the gap is checked on the second block step of an iteration,
+    which costs one sweep, at iterations 1 and 2 and then when its rate
+    predicts the target: loose solves stop before the 4th iteration (the
+    first check before), certified like tight ones. The z returned is
+    rebuilt from the dual returned, so a warm start from it stops at once
+    with the same bits."""
+    x = image((64, 80), 5)
+    half = 0.5 * (x ** 2).sum()
+    iters = []
+    for tol in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6):
+        z, info = fp.tv_aniso(x, gamma, tol=tol, max_iter=1000)
+        assert info.converged
+        gap, feas = certificate(x, z, info.dual, gamma, 1.0, 2)
+        assert feas <= 1e-12 * (1 + np.abs(x).max())
+        assert -1e-12 * half <= gap <= tol * half * (1 + 1e-6)
+        z2, info2 = fp.tv_aniso(x, gamma, tol=tol, warm_start=info.dual)
+        assert info2.iters == 0 and np.array_equal(z, z2)
+        iters.append(info.iters)
+    assert iters[0] < 4 and iters == sorted(iters)
+
+
 def _fd_case(shape, k, conj, seed):
     rng = np.random.default_rng(seed)
     x = image(shape, seed)
@@ -165,7 +188,7 @@ def test_warm_starts():
     z, info = op.solve(x, 0.5, tol=1e-10)
     z2, info2 = op.solve(x, 0.5, tol=1e-10, warm_start=info.dual)
     assert info2.iters == 0 and np.array_equal(z, z2)
-    x2 = x + 0.01 * np.sin(7 * x)
+    x2 = x + 1e-3 * np.sin(7 * x)
     _, cold = op.solve(x2, 0.5, tol=1e-10)
     _, warm = op.solve(x2, 0.5, tol=1e-10, warm_start=info.dual)
     assert warm.iters < cold.iters
