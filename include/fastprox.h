@@ -42,7 +42,9 @@
 extern "C" {
 #endif
 
-typedef enum { FP_F32 = 1, FP_F64 = 2 } fp_dtype;
+/* FP_I8 (since 0.2) is accepted only by the kink and branch arrays of
+ * fp_workspace_kinks and fp_workspace_set_branch. */
+typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3 } fp_dtype;
 typedef enum { FP_DEVICE_CPU = 0 } fp_device; /* GPU values reserved */
 
 /* Strided n-d array descriptor. Strides are in elements, not bytes, and may
@@ -308,6 +310,37 @@ FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on);
  * batch (0 for derivatives in closed form). Other operators: FP_EINVAL. */
 FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter);
 FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residual, int *iters);
+
+/* Kinks of the elementwise maps soft thresholding, l1 over a box, SCAD and
+ * MCP (since 0.2), at the point saved by the last fp_prox or fp_prox_conj
+ * call with keep_structure (FP_EINVAL before one, and for other operators).
+ * An entry is at a kink when it lies within tol (absolute, in the units of
+ * the input x or y) of a breakpoint of its scalar map; the code says which,
+ * the nearest one:
+ *   soft thresholding  1: |x| = gamma lambda w
+ *   l1 over a box      1: |x| = gamma lambda w, 2: soft(x) = lower,
+ *                      3: soft(x) = upper
+ *   SCAD               1: |x| = gamma w lambda, 2: |x| = (1 + gamma w) lambda,
+ *                      3: |x| = a lambda
+ *   MCP                1: |x| = gamma w lambda, 2: |x| = b lambda
+ * (breakpoints of a map that is the identity, gamma w = 0 or lambda = 0, are
+ * not kinks). fp_workspace_kinks writes the codes into mask (FP_I8, the shape
+ * of x, any strides; NULL for the count only) and the number of entries at a
+ * kink into *count (may be NULL). The mask is the same for any thread count.
+ *
+ * fp_workspace_set_branch chooses, for the entries at a kink (with its own
+ * tol), which piece fp_jvp and fp_vjp differentiate: side (FP_I8, the shape
+ * of x, values -1, 0, +1) picks the piece on the x - eps side (-1) or the
+ * x + eps side (+1) of the breakpoint, with its formula taken at x; 0, and
+ * every entry not at a kink, keeps the default rule (docs/api.md,
+ * "Derivatives at kinks"). So side +1 gives the derivative of the
+ * one-sided difference (prox(x + h e_i) - prox(x)) / h, -1 that from below:
+ * the elements of the B-Jacobian. It applies to the fp_jvp and fp_vjp calls
+ * on this workspace until the next prox call or fp_workspace_set_branch(ws,
+ * NULL, 0). */
+FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,
+                                    int64_t *count);
+FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol);
 
 /* ------------------------------------------------------------------------
  * Entry points. ws may be NULL unless opt->keep_structure is set; out may

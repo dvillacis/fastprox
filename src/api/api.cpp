@@ -34,10 +34,11 @@ fp_status guard(F &&f) noexcept {
 bool finite(double v) noexcept { return std::isfinite(v); }
 
 // Converts and validates a public descriptor. Scalars become shape [1].
-fp_status to_arr(const fp_array *a, Arr &out) noexcept {
+// int8: true for the kink and branch arrays, the only ones of that dtype.
+fp_status to_arr(const fp_array *a, Arr &out, bool int8 = false) noexcept {
     if (!a) return FP_EINVAL;
     if (a->device != FP_DEVICE_CPU) return FP_EINVAL;
-    if (a->dtype != FP_F32 && a->dtype != FP_F64) return FP_EDTYPE;
+    if (int8 ? a->dtype != FP_I8 : (a->dtype != FP_F32 && a->dtype != FP_F64)) return FP_EDTYPE;
     if (a->ndim < 0 || a->ndim > FP_MAX_NDIM) return FP_ESHAPE;
     out.data = static_cast<char *>(a->data);
     out.dtype = a->dtype;
@@ -189,6 +190,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.zsave.resize(bytes / sizeof(double) + 1);
             w.code.resize(static_cast<size_t>(w.numel) + 1);
         }
+        if (elem && op.has_kinks()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
         const int64_t P = op.nparams();
         const int64_t units = elem ? ceil_div(w.numel, kChunk) : w.rows;
         w.nblocks = reduction_blocks(units, P);
@@ -228,6 +230,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
             if (ws->shape[d] != x.shape[d]) return FP_ESHAPE;
         if (keep && !ws->keep) return FP_EINVAL;
         ws->valid = false;
+        ws->branch_on = false;  // a branch override belongs to the point it was set for
         nt = std::min(nt, ws->nthreads);
     }
 
@@ -368,6 +371,63 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     }
     if (ggamma) *ggamma = tot[P];
     if (gpa && P > 0) return write_exact(gpa, P, tot);
+    return FP_OK;
+}
+
+// The workspace must hold a kept elementwise call of an operator with kinks,
+// and a must be an FP_I8 array of x's shape.
+fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a) noexcept {
+    if (!ws || !ws->op || !ws->keep || !ws->op->elementwise() || !ws->op->has_kinks()) return FP_EINVAL;
+    if (!ws->valid) return FP_EINVAL;
+    if (!aa) return FP_OK;
+    if (fp_status s = to_arr(aa, *a, true)) return s;
+    if (a->ndim != ws->ndim) return FP_ESHAPE;
+    for (int d = 0; d < a->ndim; ++d)
+        if (a->shape[d] != ws->shape[d]) return FP_ESHAPE;
+    return FP_OK;
+}
+
+fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *count) {
+    if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
+    Arr m;
+    if (fp_status s = kink_arrays(ws, ma, &m)) return s;
+    const Arr *mp = ma ? &m : nullptr;
+    const int64_t c = ws->numel == 0 ? 0
+                      : ws->dtype == FP_F32 ? kinks_driver<float>(*ws->op, *ws, tol, mp)
+                                            : kinks_driver<double>(*ws->op, *ws, tol, mp);
+    if (count) *count = c;
+    return FP_OK;
+}
+
+fp_status set_branch_impl(fp_workspace *ws, const fp_array *sa, double tol) {
+    if (!sa) {
+        if (!ws || !ws->op) return FP_EINVAL;
+        ws->branch_on = false;
+        return FP_OK;
+    }
+    if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
+    Arr a;
+    if (fp_status s = kink_arrays(ws, sa, &a)) return s;
+    // Into the workspace in C order, the order of the saved entries.
+    const int64_t *st[1] = {a.strides};
+    const ElemPlan p = make_elem_plan(a.ndim, a.shape, ws->axis, false, 1, st);
+    const int8_t *src = reinterpret_cast<const int8_t *>(a.data);
+    int8_t *dst = ws->branch.data();
+    const int64_t s0 = p.stride[0][p.ndim - 1];
+    bool ok = true;
+    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t pos, int64_t, int64_t) {
+        for (int64_t i = 0; i < len; ++i) {
+            const int8_t v = src[off[0] + i * s0];
+            ok = ok && v >= -1 && v <= 1;
+            dst[pos + i] = v;
+        }
+    });
+    if (!ok) {
+        ws->branch_on = false;
+        return FP_EPARAM;
+    }
+    ws->branch_on = true;
+    ws->branch_tol = tol;
     return FP_OK;
 }
 
@@ -823,6 +883,15 @@ FP_API fp_status fp_workspace_get_dual(const fp_workspace *ws, fp_array *out) {
 
 FP_API fp_status fp_workspace_set_dual(fp_workspace *ws, const fp_array *dual) {
     return guard([&] { return fp::dual_impl(ws, dual, true); });
+}
+
+FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,
+                                    int64_t *count) {
+    return guard([&] { return fp::kinks_impl(ws, tol, mask, count); });
+}
+
+FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol) {
+    return guard([&] { return fp::set_branch_impl(ws, side, tol); });
 }
 
 FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter) {

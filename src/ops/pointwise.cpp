@@ -55,11 +55,16 @@ struct Soft final : ElemOp<Soft> {
         const double tau = gamma * lambda * w[wi(i)];
         return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+    // Pieces: 0 thresholded, 1 shifted by -s tau. Kink 1 at |x| = tau.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        return {std::fabs(x) > gamma * lambda * w[wi(i)] ? 1 : 0, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
         const int64_t k = wi(i);
-        if (std::fabs(x) > gamma * lambda * w[k]) {
-            const double s = sgn(x);
+        if (p.id == 1) {
+            const double s = p.s;
             e.j = 1.0;
             e.dg = -s * lambda * w[k];
             e.np = 1;
@@ -67,6 +72,16 @@ struct Soft final : ElemOp<Soft> {
             e.pv[0] = -s * gamma * lambda;
         }
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double tau = gamma * lambda * w[wi(i)];
+        if (!(tau > 0.0) || !(std::fabs(std::fabs(x) - tau) <= tol)) return 0;
+        k.b = std::copysign(tau, x);
+        k.scale = tau;
+        return 1;
     }
 };
 
@@ -273,19 +288,28 @@ struct L1Box final : ElemOp<L1Box> {
         const double l = lo[at(lo, i)], h = hi[at(hi, i)];
         return static_cast<T>(y < l ? l : (y > h ? h : y));
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+    // Pieces: 0 thresholded (inside the bounds), 1 soft's shifted branch, 2
+    // clipped at lower, 3 clipped at upper. Kinks: 1 at |x| = tau, 2 where
+    // soft(x) = lower, 3 where soft(x) = upper.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        const double tau = gamma * lambda * w[at(w, i)];
+        const double y = std::copysign(pos(std::fabs(x) - tau), x);
+        if (y < lo[at(lo, i)]) return {2, sgn(x)};
+        if (y > hi[at(hi, i)]) return {3, sgn(x)};
+        return {std::fabs(x) > tau ? 1 : 0, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
         const int64_t k = at(w, i), a = at(lo, i), b = at(hi, i);
-        const double tau = gamma * lambda * w[k];
-        const double y = std::copysign(pos(std::fabs(x) - tau), x);
         e.np = 1;
         e.pv[0] = 1.0;
-        if (y < lo[a]) {
+        if (p.id == 2) {
             e.pi[0] = static_cast<int64_t>(w.size()) + a;
-        } else if (y > hi[b]) {
+        } else if (p.id == 3) {
             e.pi[0] = static_cast<int64_t>(w.size() + lo.size()) + b;
-        } else if (std::fabs(x) > tau) {
-            const double s = sgn(x);
+        } else if (p.id == 1) {
+            const double s = p.s;
             e.j = 1.0;
             e.dg = -s * lambda * w[k];
             e.pi[0] = k;
@@ -294,6 +318,34 @@ struct L1Box final : ElemOp<L1Box> {
             e.np = 0;
         }
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    // The point where soft(x) = v (v finite): v + tau above 0, v - tau below,
+    // and the threshold on v's side at 0 (-tau for a lower bound, +tau for an
+    // upper one, where the clipped piece begins).
+    static double soft_inverse(double v, double tau, double at0) noexcept {
+        return v > 0.0 ? v + tau : (v < 0.0 ? v - tau : at0);
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double tau = gamma * lambda * w[at(w, i)];
+        const double l = lo[at(lo, i)], h = hi[at(hi, i)];
+        int code = 0;
+        double best = tol;
+        auto consider = [&](int c, double b, double scale) {
+            const double dist = std::fabs(x - b);
+            if (dist <= best && (code == 0 || dist < best)) {
+                code = c;
+                best = dist;
+                k.b = b;
+                k.scale = scale;
+            }
+        };
+        if (tau > 0.0) consider(1, std::copysign(tau, x), tau);
+        if (std::isfinite(l)) consider(2, soft_inverse(l, tau, -tau), std::fmax(std::fabs(l), tau));
+        if (std::isfinite(h)) consider(3, soft_inverse(h, tau, tau), std::fmax(std::fabs(h), tau));
+        return code;
     }
 };
 

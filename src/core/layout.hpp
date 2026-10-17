@@ -31,7 +31,7 @@ struct Arr {
         for (int d = 0; d < ndim; ++d) m *= shape[d];
         return m;
     }
-    size_t itemsize() const noexcept { return dtype == FP_F32 ? 4 : 8; }
+    size_t itemsize() const noexcept { return dtype == FP_F32 ? 4 : (dtype == FP_I8 ? 1 : 8); }
 };
 
 inline bool same_shape(const Arr &a, const Arr &b) noexcept {

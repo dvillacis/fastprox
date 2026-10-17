@@ -56,6 +56,22 @@ fp_array view(const A &a) {
     return v;
 }
 
+using I8In = nb::ndarray<nb::ro, const int8_t, nb::device::cpu>;
+using I8Out = nb::ndarray<int8_t, nb::device::cpu>;
+
+// An int8 kink or branch array as an fp_array.
+template <class A>
+fp_array view_i8(const A &a) {
+    fp_array v;
+    v.data = const_cast<void *>(static_cast<const void *>(a.data()));
+    v.dtype = FP_I8;
+    v.ndim = static_cast<int>(a.ndim());
+    v.shape = a.shape_ptr();
+    v.strides = a.stride_ptr();
+    v.device = FP_DEVICE_CPU;
+    return v;
+}
+
 struct Op {
     fp_op *p = nullptr;
     Op() = default;
@@ -322,6 +338,24 @@ NB_MODULE(_fastprox, m) {
     }, "ws"_a, "dual"_a);
     m.def("set_warm", [](Workspace &ws, bool on) { check(fp_workspace_set_warm(ws.p, on ? 1 : 0)); },
           "ws"_a, "on"_a);
+    m.def("kinks", [](const Workspace &ws, double tol, std::optional<I8Out> mask) {
+        int64_t count = 0;
+        if (mask) {
+            fp_array ma = view_i8(*mask);
+            check(fp_workspace_kinks(ws.p, tol, &ma, &count));
+        } else {
+            check(fp_workspace_kinks(ws.p, tol, nullptr, &count));
+        }
+        return count;
+    }, "ws"_a, "tol"_a, "mask"_a.none());
+    m.def("set_branch", [](Workspace &ws, std::optional<I8In> side, double tol) {
+        if (side) {
+            const fp_array sa = view_i8(*side);
+            check(fp_workspace_set_branch(ws.p, &sa, tol));
+        } else {
+            check(fp_workspace_set_branch(ws.p, nullptr, tol));
+        }
+    }, "ws"_a, "side"_a.none(), "tol"_a);
     m.def("workspace", &workspace, "op"_a, "like"_a, "axis"_a, "threads"_a, "keep"_a,
           nb::keep_alive<0, 1>());
     m.def("jvp", &jvp, "op"_a, "ws"_a, "dx"_a.none(), "dgamma"_a, "dparams"_a.none(), "dout"_a);

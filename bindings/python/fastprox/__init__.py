@@ -124,6 +124,49 @@ class Context:
         self.info = None
         self.deriv = None  # (residual, iterations) of the last iterative derivative solve
 
+    def kinks(self, tol=0.0):
+        """Kink codes of the saved point, an int8 array of its shape (since
+        0.2; soft thresholding, l1 over a box, SCAD and MCP): 0 away from a
+        kink, k >= 1 within ``tol`` (absolute, in the units of the input) of
+        the operator's breakpoint k, the nearest one (see ``fp_workspace_kinks``
+        in fastprox.h for the numbering). Pass the entries to keep and the
+        side to ``jvp``/``vjp`` as ``branch``."""
+        mask = np.empty(self.shape, np.int8)
+        _C.kinks(self.ws, float(tol), mask)
+        return mask
+
+
+class _branch:
+    """Sets a branch override on the context's workspace for one call."""
+
+    def __init__(self, ctx, branch, tol):
+        self.ws = ctx.ws
+        self.side = None
+        if branch is not None:
+            side = np.asarray(branch)
+            if side.shape != ctx.shape:
+                side = np.broadcast_to(side, ctx.shape)
+            self.side = np.ascontiguousarray(side, dtype=np.int8)
+            if not np.array_equal(self.side, side):
+                raise ValueError("branch entries must be -1, 0 or 1")
+        self.tol = _kink_tol(tol)
+
+    def __enter__(self):
+        if self.side is not None:
+            _C.set_branch(self.ws, self.side, self.tol)
+
+    def __exit__(self, *exc):
+        if self.side is not None:
+            _C.set_branch(self.ws, None, 0.0)
+        return False
+
+
+def _kink_tol(tol):
+    tol = float(tol)
+    if not tol >= 0.0:
+        raise ValueError("kink_tol must be >= 0")
+    return tol
+
 
 def _input(x, copy: bool) -> np.ndarray:
     if isinstance(x, np.ndarray):
@@ -208,24 +251,34 @@ class Operator:
         return ctx
 
     # -- derivatives -------------------------------------------------------
-    def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None):
-        """J_x dx + (dz/dgamma) dgamma + (dz/dtheta) dparams at the saved point."""
+    def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None, branch=None,
+            kink_tol=0.0):
+        """J_x dx + (dz/dgamma) dgamma + (dz/dtheta) dparams at the saved point.
+
+        ``branch`` (soft thresholding, l1 over a box, SCAD and MCP; since 0.2):
+        -1, 0 or +1 per entry. At the entries within ``kink_tol`` of a
+        breakpoint (``ctx.kinks(kink_tol)`` nonzero), -1 and +1 take the
+        piece on the x - eps and the x + eps side of it, so +1 matches the
+        one-sided difference (prox(x + h e_i) - prox(x)) / h; 0 and all other
+        entries keep the default rule."""
         self._check_ctx(ctx)
         if dx is not None:
             dx = _input(dx, True).astype(ctx.dtype, copy=False)
         dout = np.empty(ctx.shape, ctx.dtype) if out is None else out
         if dparams is not None:
             dparams = self._flatten(dparams)
-        _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
+        with _branch(ctx, branch, kink_tol):
+            _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
         return dout
 
-    def vjp(self, ctx: Context, g, *, out=None):
-        """(J_x^T g, Grads) at the saved point."""
+    def vjp(self, ctx: Context, g, *, out=None, branch=None, kink_tol=0.0):
+        """(J_x^T g, Grads) at the saved point; ``branch`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = np.empty(ctx.shape, ctx.dtype) if out is None else out
         gp = np.zeros(self.nparams, np.float64)
-        gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
+        with _branch(ctx, branch, kink_tol):
+            gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
         return gx, Grads(gg, gp, self._fields(gp))
 
     def _check_ctx(self, ctx):
