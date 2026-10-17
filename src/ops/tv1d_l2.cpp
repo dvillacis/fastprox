@@ -20,9 +20,9 @@
 // (mu I + K) y = mu z, and the step is mu + (s - mu gamma) s^2 / (gamma S) with
 // s = ||W D z|| and S = sum_e a_e Dz_e Dy_e. At mu = 0 the same quantities come
 // from cumulative sums: ||u0||, and ||y0||^2 with y0 the mean-free solution of
-// w_e (y0_{e+1} - y0_e) = u0_e. Once a step is below 1e-7 mu it is taken and
-// the iteration stops: Newton's quadratic rate puts the next error below
-// rounding.
+// w_e (y0_{e+1} - y0_e) = u0_e. Once a step is below 1e-7 mu it is taken, from
+// either side of the root, and the iteration stops: Newton's quadratic rate
+// puts the next error below rounding.
 //
 // Solves. sigma I + kappa K (sigma = mu, kappa = 1 for mu < 1, else 1 and 1/mu)
 // is a diagonally dominant M-matrix. Its pivots are kept in excess form,
@@ -131,15 +131,22 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         }
         return S;
     }
-    // xc <- x minus its piece means.
+    // xc <- x minus its piece means. The mean is the piece's first entry plus
+    // the mean of the offsets from it, so a constant piece gives exactly zero.
+    // The inside test divides running sums of xc by w_e^2, and the rounding of
+    // a plain running mean of equal entries, over a tiny weight, passed for a
+    // huge dual (found by fuzzing: NaN at w_e = 2e-53). Each entry is still
+    // rounded once (centring on the first entry itself rounded twice and left
+    // 25x larger residuals on a long random walk without FMA contraction).
     template <class T>
     void center(const T *x, double *xc, int64_t n) const noexcept {
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e < n - 1 && ae(e) != 0.0) continue;
-            double m = 0.0;  // piece [s, e]
-            for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]);
-            m /= static_cast<double>(e - s + 1);
+            const double x0 = static_cast<double>(x[s]);  // piece [s, e]
+            double m = 0.0;
+            for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]) - x0;
+            m = x0 + m / static_cast<double>(e - s + 1);
             for (int64_t i = s; i <= e; ++i) xc[i] = static_cast<double>(x[i]) - m;
             s = e + 1;
         }
@@ -205,12 +212,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             }
         }
         const double rho0 = std::sqrt(rho0sq);
-        if (rho0 <= gamma) {
+        double L = 0.0, R = norm_wd(xc, n) / gamma;
+        // R = 0: no differences across nonzero weights, so x is its own
+        // piecewise mean whatever rounding left in rho0.
+        if (rho0 <= gamma || !(R > 0.0)) {
             for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i]);
             if (code) code[0] = kInside;
             return kRowOk;
         }
-        double L = 0.0, R = norm_wd(xc, n) / gamma;
         double mu = (rho0 / gamma - 1.0) * rho0sq / kap0;  // Newton from mu = 0
         if (!(mu > L && mu < R)) mu = 0.5 * (L + R);
         // zc = (sigma I + kappa K)^{-1} sigma xc at mu, returning s; y likewise
@@ -228,8 +237,11 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             else break;
             const double S = solve_cross(sigma, kappa, inv, zc, y, n);
             double next = S > 0.0 ? mu + (s - mu * gamma) * s * s / (gamma * S) : 0.5 * (L + R);
+            // Take the last small step from either side: rounding can put an
+            // iterate just right of the root, and a Newton step from there
+            // also lands at or below it, with the same quadratic error.
             if (std::fabs(next - mu) <= 1e-7 * mu) {
-                if (s > mu * gamma && next > L && next < R) solve_z(next, sigma, kappa);
+                if (next > L && next < R) solve_z(next, sigma, kappa);
                 break;
             }
             if (!(next > L && next < R)) next = 0.5 * (L + R);

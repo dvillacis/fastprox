@@ -60,8 +60,11 @@ def test_gap_and_optimality(n, kind):
         u, wdz = dual(x, z, w)
         s = np.linalg.norm(wdz)
         # The dual point is feasible and certifies z: zero gap to rounding.
+        # Without FMA contraction (x86-64 builds) the dual taken from x - z
+        # carries about 20 eps |x| per entry at small gamma, the cancellation
+        # in x - z: up to 6e-13 relative on the walk at n = 1e5, 2e-14 with FMA.
         assert np.linalg.norm(u) <= g * (1 + 1e-9)
-        assert g * s - wdz @ u <= 1e-12 * (1 + g * s)
+        assert g * s - wdz @ u <= 4e-12 * (1 + g * s)
         # Stationarity: x - z = gamma (W D)^T W D z / s, i.e. u = gamma W D z / s.
         # The right side multiplies the rounding of z by gamma / s.
         np.testing.assert_allclose(u, g * wdz / s, rtol=0,
@@ -116,6 +119,24 @@ def test_special_cases():
     y = x.copy()
     fp.tv1d_l2(y, 3.0, out=y)
     np.testing.assert_array_equal(y, fp.tv1d_l2(x, 3.0))
+
+
+def test_tiny_weights_on_constant_pieces():
+    # The nightly fuzzer: constant pieces whose running mean rounds, with a
+    # weight of 2e-53 inside one of them, gave NaN (the rounding residual over
+    # w^2 posed as a dual of 1e38). Constant pieces add nothing to the norm,
+    # so they stay as they are and the varying piece is solved on its own.
+    w = np.array([0.46875] * 5 + [0, 0, 2.2334456681412216e-53] + [0.46875] * 5 + [3.3125])
+    x = np.full(15, 29.1132812)
+    x[6] = -0.00390625
+    for g in (0.515625, 1.0, 1e3):
+        np.testing.assert_array_equal(fp.tv1d_l2(x, g, weights=w), x)
+    assert np.isfinite(fp.TV1DL2(w).prox_conj(x, 0.515625)).all()
+    x[:6] = np.random.default_rng(8).normal(size=6) + 29.0
+    for g in (0.1, 0.5, 2.0):
+        z = fp.tv1d_l2(x, g, weights=w)
+        np.testing.assert_array_equal(z[6:], x[6:])
+        np.testing.assert_allclose(z[:6], fp.tv1d_l2(x[:6], g, weights=w[:5]), rtol=1e-14, atol=1e-13)
 
 
 def test_float32():
