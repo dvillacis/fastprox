@@ -39,6 +39,19 @@ struct ElemDeriv {
     double pv[3] = {0.0, 0.0, 0.0};
 };
 
+// A breakpoint of an elementwise map near an entry: its position b (in
+// signed x) and the magnitude of the terms it is computed from, which sets
+// the step used to land on either side of it.
+struct Kink {
+    double b = 0.0, scale = 0.0;
+};
+// A piece of an elementwise map: an operator-specific id and the sign that
+// its formulas use (sgn(x) by default, the side's sign across a kink).
+struct Piece {
+    int id = 0;
+    double s = 0.0;
+};
+
 // Status returned by row kernels.
 enum RowStatus : int { kRowOk = 0, kRowNonFinite = 1 };
 
@@ -110,16 +123,30 @@ struct fp_op {
     virtual int64_t prox_run(const double *, int64_t, double *, int64_t, int64_t, double, int64_t,
                              int64_t, double *, bool, double, int) const noexcept { return 0; }
     // xsave is contiguous; dx may be null. tie: the rule of the prox call.
+    // side, if not null, is the branch override along the run (contiguous,
+    // -1, 0 or +1 per entry), applied to the entries within kink_tol of a
+    // breakpoint (operators with has_kinks()).
     virtual void jvp_run(const float *, const float *, int64_t, float *, int64_t, int64_t, double,
-                         double, const double *, int64_t, int64_t, bool, double, int) const noexcept {}
+                         double, const double *, int64_t, int64_t, bool, double, int,
+                         const int8_t *, double) const noexcept {}
     virtual void jvp_run(const double *, const double *, int64_t, double *, int64_t, int64_t,
                          double, double, const double *, int64_t, int64_t, bool,
-                         double, int) const noexcept {}
+                         double, int, const int8_t *, double) const noexcept {}
     // acc has nparams() + 2 slots: theta..., gamma, conjugate extra term.
     virtual void vjp_run(const float *, const float *, int64_t, float *, int64_t, int64_t, double,
-                         double *, int64_t, int64_t, bool, double, int) const noexcept {}
+                         double *, int64_t, int64_t, bool, double, int, const int8_t *,
+                         double) const noexcept {}
     virtual void vjp_run(const double *, const double *, int64_t, double *, int64_t, int64_t,
-                         double, double *, int64_t, int64_t, bool, double, int) const noexcept {}
+                         double, double *, int64_t, int64_t, bool, double, int, const int8_t *,
+                         double) const noexcept {}
+    // Kinks (elementwise operators with has_kinks()): for each saved entry of
+    // the run, the code of the breakpoint within tol of it (0: none) into
+    // codes (may be null); returns the number of flagged entries.
+    virtual bool has_kinks() const noexcept { return false; }
+    virtual int64_t kink_run(const float *, int64_t, double, int64_t, int64_t, double,
+                             int8_t *) const noexcept { return 0; }
+    virtual int64_t kink_run(const double *, int64_t, double, int64_t, int64_t, double,
+                             int8_t *) const noexcept { return 0; }
 
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.
@@ -202,8 +229,49 @@ struct ElemCall {
 template <class D>
 struct ElemOp : fp_op {
     static constexpr bool kTies = false;
+    // Operators with kinks (kKinks = true) also provide
+    //   int kink1(double x, double gamma, int64_t widx, double tol, Kink &k);
+    //   Piece piece_of(double x, double gamma, int64_t widx);
+    //   ElemDeriv deriv_piece(double x, double gamma, int64_t widx, Piece p);
+    // kink1 returns the code of the breakpoint nearest to x within tol (0 if
+    // none) and fills k; deriv1 must equal deriv_piece(x, piece_of(x)).
+    static constexpr bool kKinks = false;
     bool elementwise() const noexcept override { return true; }
     bool has_ties() const noexcept override { return D::kTies; }
+    bool has_kinks() const noexcept override { return D::kKinks; }
+
+    // The derivative used at entry x: the default rule, or with a side
+    // override at a flagged entry the piece on that side of its breakpoint
+    // (the side of b + side * delta), whose formula is evaluated at x.
+    static ElemDeriv deriv_at(const D &d, double x, double gamma, int64_t w, int tie, int side,
+                              double tol) noexcept {
+        if constexpr (D::kKinks) {
+            if (side != 0) {
+                Kink k;
+                if (d.kink1(x, gamma, w, tol, k)) {
+                    const double delta = 32.0 * 2.220446049250313e-16 * k.scale + 1e-300;
+                    return d.deriv_piece(x, gamma, w, d.piece_of(k.b + side * delta, gamma, w));
+                }
+            }
+        }
+        return ElemCall<D>::deriv(d, x, gamma, w, tie);
+    }
+
+    template <class T>
+    int64_t run_kinks(const T *xsave, int64_t len, double gamma, int64_t widx, int64_t wstep,
+                      double tol, int8_t *codes) const noexcept {
+        int64_t count = 0;
+        if constexpr (D::kKinks) {
+            const D &d = static_cast<const D &>(*this);
+            for (int64_t i = 0; i < len; ++i) {
+                Kink k;
+                const int c = d.kink1(static_cast<double>(xsave[i]), gamma, widx + i * wstep, tol, k);
+                if (codes) codes[i] = static_cast<int8_t>(c);
+                count += c != 0;
+            }
+        }
+        return count;
+    }
 
     template <class T>
     int64_t run_prox(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,
@@ -243,17 +311,44 @@ struct ElemOp : fp_op {
         return ties;
     }
 
+    // Overrides are rare: the loops below are instantiated with and without
+    // them, so the default loop is unchanged.
     template <class T>
     void run_jvp(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,
                  double gamma, double dgamma, const double *dparams, int64_t widx, int64_t wstep,
-                 bool conj, double sigma, int tie) const noexcept {
+                 bool conj, double sigma, int tie, const int8_t *side, double tol) const noexcept {
+        if (side && D::kKinks)
+            run_jvp_<T, true>(xsave, dx, dxs, dz, dzs, len, gamma, dgamma, dparams, widx, wstep, conj,
+                              sigma, tie, side, tol);
+        else
+            run_jvp_<T, false>(xsave, dx, dxs, dz, dzs, len, gamma, dgamma, dparams, widx, wstep, conj,
+                               sigma, tie, nullptr, tol);
+    }
+    template <class T>
+    void run_vjp(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
+                 double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
+                 double sigma, int tie, const int8_t *side, double tol) const noexcept {
+        if (side && D::kKinks)
+            run_vjp_<T, true>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
+                              side, tol);
+        else
+            run_vjp_<T, false>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
+                               nullptr, tol);
+    }
+
+    template <class T, bool Side>
+    void run_jvp_(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,
+                  double gamma, double dgamma, const double *dparams, int64_t widx, int64_t wstep,
+                  bool conj, double sigma, int tie, const int8_t *side, double tol) const noexcept {
         const D &d = static_cast<const D &>(*this);
         using C = ElemCall<D>;
         bool tied = false;
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
-            const ElemDeriv e = C::deriv(d, xi, gamma, w, tie);
+            ElemDeriv e;
+            if constexpr (Side) e = deriv_at(d, xi, gamma, w, tie, side[i], tol);
+            else e = C::deriv(d, xi, gamma, w, tie);
             const double dxi = dx ? static_cast<double>(dx[i * dxs]) : 0.0;
             double ptheta = 0.0;
             if (dparams)
@@ -271,10 +366,10 @@ struct ElemOp : fp_op {
         }
     }
 
-    template <class T>
-    void run_vjp(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
-                 double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
-                 double, int tie) const noexcept {
+    template <class T, bool Side>
+    void run_vjp_(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
+                  double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
+                  double, int tie, const int8_t *side, double tol) const noexcept {
         const D &d = static_cast<const D &>(*this);
         using C = ElemCall<D>;
         bool tied = false;
@@ -282,7 +377,9 @@ struct ElemOp : fp_op {
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
-            const ElemDeriv e = C::deriv(d, xi, gamma, w, tie);
+            ElemDeriv e;
+            if constexpr (Side) e = deriv_at(d, xi, gamma, w, tie, side[i], tol);
+            else e = C::deriv(d, xi, gamma, w, tie);
             const double gi = static_cast<double>(g[i * gs]);
             for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += e.pv[k] * gi;
             acc[P] += e.dg * gi;
@@ -304,14 +401,20 @@ struct ElemOp : fp_op {
     }                                                                                            \
     void jvp_run(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,      \
                  double gamma, double dgamma, const double *dparams, int64_t widx,               \
-                 int64_t wstep, bool conj, double sigma, int tie) const noexcept override {      \
+                 int64_t wstep, bool conj, double sigma, int tie, const int8_t *side,            \
+                 double tol) const noexcept override {                                           \
         run_jvp<T>(xsave, dx, dxs, dz, dzs, len, gamma, dgamma, dparams, widx, wstep, conj,      \
-                   sigma, tie);                                                                  \
+                   sigma, tie, side, tol);                                                       \
     }                                                                                            \
     void vjp_run(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,        \
                  double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,              \
-                 double sigma, int tie) const noexcept override {                                \
-        run_vjp<T>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie);       \
+                 double sigma, int tie, const int8_t *side, double tol) const noexcept override {\
+        run_vjp<T>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie, side,  \
+                   tol);                                                                         \
+    }                                                                                            \
+    int64_t kink_run(const T *xsave, int64_t len, double gamma, int64_t widx, int64_t wstep,     \
+                     double tol, int8_t *codes) const noexcept override {                        \
+        return run_kinks<T>(xsave, len, gamma, widx, wstep, tol, codes);                         \
     }
     FP_ELEM_FORWARD(float)
     FP_ELEM_FORWARD(double)

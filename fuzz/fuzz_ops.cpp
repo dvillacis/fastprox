@@ -407,6 +407,24 @@ void run(const uint8_t *data, size_t size) {
             int64_t ps_shape[1] = {P};
             fp_array dpa{dp.data(), FP_F64, 1, ps_shape, nullptr, FP_DEVICE_CPU};
             fp_array gpa{gp.data(), FP_F64, 1, ps_shape, nullptr, FP_DEVICE_CPU};
+            // Kinks and a branch override (elementwise maps with kinks; any
+            // other operator, or a failed prox, answers FP_EINVAL).
+            std::vector<int8_t> mask, side;
+            if (b.u8() % 2) {
+                int64_t numel = 1;
+                for (int d = 0; d < x.ndim; ++d) numel *= x.shape[d];
+                mask.assign(static_cast<size_t>(numel), 0);
+                side.resize(mask.size());
+                for (auto &v : side) v = static_cast<int8_t>(b.u8() % 3) - 1;
+                fp_array ma{mask.data(), FP_I8, x.ndim, x.shape, nullptr, FP_DEVICE_CPU};
+                fp_array sa{side.data(), FP_I8, x.ndim, x.shape, nullptr, FP_DEVICE_CPU};
+                const double tol = b.u8() % 2 ? 0.0 : std::fabs(b.value());
+                int64_t count = 0;
+                const fp_status ks = fp_workspace_kinks(ws, tol, &ma, &count);
+                const fp_status bs = fp_workspace_set_branch(ws, &sa, tol);
+                if (!valid_status(ks) || !valid_status(bs)) fail("kink status");
+                if (ks == FP_OK && (count < 0 || count > numel)) fail("kink count");
+            }
             const fp_status js = fp_jvp(c.op, ws, &x, b.value(), P ? &dpa : nullptr, &o4);
             double gg = 0;
             const fp_status vs = fp_vjp(c.op, ws, &x, &o4, &gg, P ? &gpa : nullptr);

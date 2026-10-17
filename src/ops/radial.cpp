@@ -79,7 +79,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
     double deriv(double s, double step, double &j, double *d) const noexcept {
         const double one = 1.0;
         for (int64_t k = 0; k < Ph + 2; ++k) d[k] = 0.0;
-        h->vjp_run(&s, &one, 1, &j, 1, 1, step, d, 0, 0, false, 1.0, FP_TIE_NONZERO);
+        h->vjp_run(&s, &one, 1, &j, 1, 1, step, d, 0, 0, false, 1.0, FP_TIE_NONZERO, nullptr, 0.0);
         return phi(s, step);
     }
 

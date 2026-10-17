@@ -318,6 +318,42 @@ At a kink, the JVP is not the one-sided directional derivative for
 directions that leave the chosen piece. Finite-difference tests therefore
 avoid kinks.
 
+**Kink masks and branch overrides (*since 0.2*).** For soft thresholding,
+ℓ1 over a box, SCAD and MCP, the kinks of a kept prox call can be read and
+the piece differentiated there chosen, which gives the other elements of the
+B-subdifferential, for example both elements at a biactive entry, or the
+SCD subspaces of each entry:
+- `fp_workspace_kinks(ws, tol, mask, &count)` writes an int8 code per entry
+  (dtype `FP_I8`, the shape of x): 0 away from a kink, and k ≥ 1 for the
+  breakpoint, the nearest one, within `tol` of the entry. `tol` is absolute,
+  in the units of the input (x, or y after `fp_prox_conj`); exact equality
+  rarely occurs in a computed solution, so `tol` is usually set from its
+  accuracy. Breakpoints: soft thresholding 1: |x| = γλwᵢ; ℓ1 over a box 1:
+  |x| = γλwᵢ, 2: soft(x) = lower, 3: soft(x) = upper; SCAD 1: |x| = γwᵢλ,
+  2: (1 + γwᵢ)λ, 3: aλ; MCP 1: |x| = γwᵢλ, 2: bλ. A map that is the identity
+  (γwᵢ = 0 or λ = 0) has none. The mask is the same for any thread count.
+- `fp_workspace_set_branch(ws, side, tol)` sets the piece that `fp_jvp` and
+  `fp_vjp` differentiate at the entries within `tol` of a breakpoint: side
+  −1 or +1 (int8, the shape of x) takes the piece on the x − ε or x + ε side
+  of the breakpoint, with that piece's formula evaluated at x; 0, and every
+  entry away from a kink, keep the rule in the table. Side +1 is the
+  derivative of the forward difference (prox(x + h eᵢ) − prox(x))/h and −1
+  of the backward one, in x and, along the same piece, in γ and θ. The
+  override lasts until the next prox call or `fp_workspace_set_branch(ws,
+  NULL, 0)`.
+- In Python: `ctx.kinks(tol)` returns the mask, and `jvp` and `vjp` take
+  `branch=` (an array or scalar of −1, 0, 1) and `kink_tol=`, for that call
+  only.
+
+```python
+op = fp.MCP(0.5, 3.0)
+z, ctx = op.prox(x, 0.8, keep=True)
+k = ctx.kinks(1e-8)                                   # 1: |x| = 0.4, 2: |x| = 1.5
+dx = np.ones_like(x)
+up = op.jvp(ctx, dx, branch=1, kink_tol=1e-8)         # pieces on the x + eps side
+dn = op.jvp(ctx, dx, branch=-1, kink_tol=1e-8)        # and on the x - eps side
+```
+
 ## C API
 
 ### Arrays

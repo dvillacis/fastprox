@@ -247,6 +247,24 @@ struct Lq final : ElemOp<Lq> {
 // weights, as before they existed (and as the group penalties wrap it), and
 // (lambda, a or b, w...) with them.
 
+// The breakpoint +-t[j] (j + 1 the code) nearest to x within tol, on x's side
+// of 0; 0 if none.
+inline int nearest_kink(double x, const double *t, int m, double tol, Kink &k) noexcept {
+    const double ax = std::fabs(x);
+    int code = 0;
+    double best = tol;
+    for (int j = 0; j < m; ++j) {
+        const double dist = std::fabs(ax - t[j]);
+        if (dist <= best && (code == 0 || dist < best)) {
+            code = j + 1;
+            best = dist;
+            k.b = std::copysign(t[j], x);
+            k.scale = t[j];
+        }
+    }
+    return code;
+}
+
 // Shared by both: lambda, the concavity, the weights and their maximum.
 // Weighted is a template parameter, so the unweighted maps load no weight per
 // entry and compile as before weights existed.
@@ -315,17 +333,30 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly
         return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+    // Pieces (in |x|, with the sign s): 0 thresholded, 1 soft, 2 linear, 3
+    // identity. Kinks: 1 at |x| = c lambda, 2 at (1 + c) lambda, 3 at a lambda.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        const double ax = std::fabs(x), c = step(gamma, i), a = p;
+        int id;
+        if (ax <= c * lambda && c > 0.0) id = 0;  // c = 0 is the identity
+        else if (ax <= (1.0 + c) * lambda) id = 1;
+        else if (ax <= a * lambda) id = 2;
+        else id = 3;
+        return {id, sgn(x)};
+    }
+    // The piece's formula at x; ax = s x is |x| unless x lies across a kink.
+    ElemDeriv deriv_piece(double x, double gamma, int64_t i, Piece pc) const noexcept {
         ElemDeriv e;
-        const double ax = std::fabs(x), s = sgn(x), c = step(gamma, i), a = p;
+        const double s = pc.s, ax = s * x, c = step(gamma, i), a = p;
         double dzdc = 0.0;
-        if (ax <= c * lambda && c > 0.0) {
-            // thresholded (the soft rule's kink choice); c = 0 is the identity
-        } else if (ax <= (1.0 + c) * lambda) {
+        if (pc.id == 0) {
+            // thresholded (the soft rule's kink choice)
+        } else if (pc.id == 1) {
             e.j = 1.0;
             dzdc = -s * lambda;
             e.pv[0] = -s * c;
-        } else if (ax <= a * lambda) {
+        } else if (pc.id == 2) {
             const double D = a - 1.0 - c;
             const double z = s * ((a - 1.0) * ax - c * a * lambda) / D;
             e.j = (a - 1.0) / D;
@@ -337,6 +368,15 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
         }
         chain(e, dzdc, gamma, i);
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double c = step(gamma, i);
+        if (!(c > 0.0) || !(lambda > 0.0)) return 0;  // the identity
+        const double t[3] = {c * lambda, (1.0 + c) * lambda, p * lambda};
+        return nearest_kink(x, t, 3, tol, k);
     }
 };
 
@@ -367,13 +407,24 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly (b x / b is not)
         return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+    // Pieces (in |x|, with the sign s): 0 thresholded, 1 linear, 2 identity.
+    // Kinks: 1 at |x| = c lambda, 2 at b lambda.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        const double ax = std::fabs(x), c = step(gamma, i), b = p;
+        int id;
+        if (ax <= c * lambda && c > 0.0) id = 0;  // c = 0 is the identity
+        else if (ax <= b * lambda) id = 1;
+        else id = 2;
+        return {id, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double x, double gamma, int64_t i, Piece pc) const noexcept {
         ElemDeriv e;
-        const double ax = std::fabs(x), s = sgn(x), c = step(gamma, i), b = p;
+        const double s = pc.s, ax = s * x, c = step(gamma, i), b = p;
         double dzdc = 0.0;
-        if (ax <= c * lambda && c > 0.0) {
-            // thresholded; c = 0 is the identity
-        } else if (ax <= b * lambda) {
+        if (pc.id == 0) {
+            // thresholded
+        } else if (pc.id == 1) {
             const double D = b - c;
             const double z = s * b * (ax - c * lambda) / D;
             e.j = b / D;
@@ -385,6 +436,15 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
         }
         chain(e, dzdc, gamma, i);
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double c = step(gamma, i);
+        if (!(c > 0.0) || !(lambda > 0.0)) return 0;  // the identity
+        const double t[2] = {c * lambda, p * lambda};
+        return nearest_kink(x, t, 2, tol, k);
     }
 };
 

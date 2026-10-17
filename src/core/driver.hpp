@@ -135,6 +135,39 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
     return err.load() ? FP_EINVAL : FP_OK;
 }
 
+// The kink tolerance in the units of the saved entries: the input, or y / sigma
+// after fp_prox_conj.
+inline double branch_tol(const fp_workspace &ws) noexcept {
+    return ws.conj ? ws.branch_tol / ws.sigma : ws.branch_tol;
+}
+
+// Kink codes of the saved entries (elementwise operators with has_kinks()):
+// written into mask (FP_I8, the shape of x, any strides; may be null), and
+// the number of flagged entries returned. tol is in the units of the input.
+template <class T>
+int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const Arr *mask) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[1] = {mask ? mask->strides : cstr};
+    const ElemPlan p = make_elem_plan(ws.ndim, ws.shape, ws.axis, op.axis_params(), 1, st);
+    const T *save = ws.xs<T>();
+    const double t = ws.conj ? tol / ws.sigma : tol;
+    int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
+    const int64_t ms = p.stride[0][p.ndim - 1];
+    int64_t count = 0;
+    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
+                               int64_t wstep) {
+        int8_t buf[256];
+        for (int64_t i0 = 0; i0 < len; i0 += 256) {
+            const int64_t m = std::min<int64_t>(256, len - i0);
+            count += op.kink_run(save + pos + i0, m, ws.gamma, widx + i0 * wstep, wstep, t,
+                                 md ? buf : nullptr);
+            if (md)
+                for (int64_t i = 0; i < m; ++i) md[off[0] + (i0 + i) * ms] = buf[i];
+        }
+    });
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // jvp
 // ---------------------------------------------------------------------------
@@ -154,6 +187,8 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
         const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         const T *save = ws.xs<T>();
+        const int8_t *side = ws.branch_on ? ws.branch.data() : nullptr;
+        const double ktol = branch_tol(ws);
         if (p.numel < kParallelMin) nt = 1;
         parallel_for(nt, nch, 1, [&](int, int64_t c0, int64_t c1) {
             p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
@@ -161,7 +196,7 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
                            int64_t wstep) {
                            op.jvp_run(save + pos, dxd ? dxd + off[0] : nullptr, xs, dd + off[1],
                                       os, len, gamma, dgamma, dparams, widx, wstep, conj, sigma,
-                                      ws.tie);
+                                      ws.tie, side ? side + pos : nullptr, ktol);
                        });
         });
         return FP_OK;
@@ -240,6 +275,8 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
         const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t gs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         const T *save = ws.xs<T>();
+        const int8_t *side = ws.branch_on ? ws.branch.data() : nullptr;
+        const double ktol = branch_tol(ws);
         if (p.numel < kParallelMin) nt = 1;
         parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
             for (int64_t b = b0; b < b1; ++b) {
@@ -249,7 +286,8 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                            [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                                int64_t wstep) {
                                op.vjp_run(save + pos, gd + off[0], gs, xd + off[1], os, len, gamma,
-                                          a, widx, wstep, conj, sigma, ws.tie);
+                                          a, widx, wstep, conj, sigma, ws.tie,
+                                          side ? side + pos : nullptr, ktol);
                            });
             }
         });

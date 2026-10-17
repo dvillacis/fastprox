@@ -1185,6 +1185,118 @@ static void test_tv_iso() {
 }
 
 // ---------------------------------------------------------------- misc
+// ---------------------------------------------------------------- kinks and branch overrides
+
+struct I8 {  // int8 array with an fp_array view; strides in elements
+    std::vector<int64_t> shape, strides;
+    std::vector<int8_t> data;
+    fp_array a{};
+    I8(std::vector<int64_t> s, std::vector<int64_t> st, size_t n, int64_t offset = 0)
+        : shape(std::move(s)), strides(std::move(st)), data(n, 0) {
+        a.data = data.data() + offset;
+        a.dtype = FP_I8;
+        a.ndim = static_cast<int>(shape.size());
+        a.shape = shape.data();
+        a.strides = strides.data();
+        a.device = FP_DEVICE_CPU;
+    }
+};
+
+static void test_kinks() {
+    // Soft thresholding at gamma lambda = 0.4: entries on +-0.4, near it, and away.
+    fp_op *op;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &op));
+    Arr x({2, 3}, {0.4, -0.4, 0.4 + 1e-9, 1.0, 0.0, -0.3}), z({2, 3}), d({2, 3}), ones({2, 3}, Vec(6, 1.0));
+    fp_options o = opts(-1, 0, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+    int64_t count = -1;
+    CHECK(fp_workspace_kinks(ws, 0.0, nullptr, &count) == FP_EINVAL);  // no kept call yet
+    CHECK_OK(fp_prox(op, 0.8, &x.a, &z.a, &o, ws, nullptr));
+    // The mask through negative strides: element (i, j) at offset 11 - 4 i - 2 j.
+    I8 m({2, 3}, {-4, -2}, 12, 11);
+    CHECK_OK(fp_workspace_kinks(ws, 0.0, &m.a, &count));
+    const int8_t *mp = static_cast<const int8_t *>(m.a.data);
+    CHECK(count == 2 && mp[0] == 1 && mp[-2] == 1 && mp[-4] == 0 && mp[-6] == 0);
+    CHECK_OK(fp_workspace_kinks(ws, 1e-8, nullptr, &count));
+    CHECK(count == 3);
+    CHECK(fp_workspace_kinks(ws, -1.0, nullptr, &count) == FP_EPARAM);
+    // An int8 array is not an input of the prox.
+    I8 xi({2, 3}, {3, 1}, 6);
+    CHECK(fp_prox(op, 0.8, &xi.a, &z.a, &o, ws, nullptr) == FP_EDTYPE);
+    // Sides: +1 takes the shifted branch (1) at +0.4 and the thresholded one (0)
+    // at -0.4, -1 the reverse; the near kink follows only with its tolerance.
+    CHECK_OK(fp_prox(op, 0.8, &x.a, &z.a, &o, ws, nullptr));
+    I8 up({2, 3}, {3, 1}, 6), dn({2, 3}, {3, 1}, 6), bad({2, 3}, {3, 1}, 6);
+    for (auto &v : up.data) v = 1;
+    for (auto &v : dn.data) v = -1;
+    bad.data[4] = 2;
+    CHECK_OK(fp_workspace_set_branch(ws, &up.a, 0.0));
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    CHECK(d.data == Vec({1.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    CHECK_OK(fp_workspace_set_branch(ws, &dn.a, 0.0));
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    CHECK(d.data == Vec({0.0, 1.0, 1.0, 1.0, 0.0, 0.0}));
+    CHECK_OK(fp_workspace_set_branch(ws, &dn.a, 1e-8));
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    CHECK(d.data == Vec({0.0, 1.0, 0.0, 1.0, 0.0, 0.0}));
+    double gg = 0.0;
+    Arr gp({1}), gx({2, 3});
+    CHECK_OK(fp_vjp(op, ws, &ones.a, &gx.a, &gg, &gp.a));
+    CHECK(gx.data == d.data);
+    CHECK(fp_workspace_set_branch(ws, &bad.a, 0.0) == FP_EPARAM);
+    // A prox call clears the override, and so does NULL.
+    CHECK_OK(fp_workspace_set_branch(ws, &up.a, 0.0));
+    CHECK_OK(fp_prox(op, 0.8, &x.a, &z.a, &o, ws, nullptr));
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    CHECK(d.data == Vec({0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    CHECK_OK(fp_workspace_set_branch(ws, &up.a, 0.0));
+    CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    CHECK(d.data == Vec({0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    I8 wrong({3, 2}, {2, 1}, 6);
+    CHECK(fp_workspace_set_branch(ws, &wrong.a, 0.0) == FP_ESHAPE);
+    fp_workspace_free(ws);
+
+    // A workspace without keep_structure, and an operator without kinks.
+    fp_options o0 = opts();
+    CHECK_OK(fp_workspace_create(op, &x.a, &o0, &ws));
+    CHECK_OK(fp_prox(op, 0.8, &x.a, &z.a, &o0, ws, nullptr));
+    CHECK(fp_workspace_kinks(ws, 0.0, nullptr, &count) == FP_EINVAL);
+    fp_workspace_free(ws);
+    fp_op_free(op);
+    CHECK_OK(fp_op_huber(0.5, 0.3, &op));
+    CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+    CHECK_OK(fp_prox(op, 0.8, &x.a, &z.a, &o, ws, nullptr));
+    CHECK(fp_workspace_kinks(ws, 0.0, nullptr, &count) == FP_EINVAL);
+    CHECK(fp_workspace_set_branch(ws, &up.a, 0.0) == FP_EINVAL);
+    fp_workspace_free(ws);
+    fp_op_free(op);
+
+    // MCP with weights in a batch large enough for threads: the same mask on
+    // 1 and 8 threads.
+    Arr wv({50}, Vec(50, 1.0));
+    for (int i = 0; i < 50; ++i) wv.data[static_cast<size_t>(i)] = 0.5 + 0.02 * i;
+    CHECK_OK(fp_op_mcp(0.5, 3.0, &wv.a, &op));
+    Arr xb({1000, 50}, randn(50000));
+    for (int r = 0; r < 1000; r += 3)
+        for (int i = 0; i < 50; i += 2) xb.data[static_cast<size_t>(r * 50 + i)] = 0.8 * wv.data[static_cast<size_t>(i)] * 0.5;
+    Arr zb({1000, 50});
+    std::vector<std::vector<int8_t>> masks;
+    for (int t : {1, 8}) {
+        fp_options ot = opts(-1, t, 1);
+        CHECK_OK(fp_workspace_create(op, &xb.a, &ot, &ws));
+        CHECK_OK(fp_prox(op, 0.8, &xb.a, &zb.a, &ot, ws, nullptr));
+        I8 mb({1000, 50}, {50, 1}, 50000);
+        CHECK_OK(fp_workspace_kinks(ws, 0.0, &mb.a, &count));
+        CHECK(count >= 334 * 25);
+        masks.push_back(mb.data);
+        fp_workspace_free(ws);
+    }
+    CHECK(masks[0] == masks[1]);
+    fp_op_free(op);
+}
+
 static void test_no_allocation() {
     fp_op *op;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
@@ -1204,6 +1316,28 @@ static void test_no_allocation() {
     CHECK(g_allocs.load() == before);
     fp_workspace_free(ws);
     fp_op_free(op);
+
+    // Kinks and a branch override of an elementwise map.
+    {
+        CHECK_OK(fp_op_mcp(0.5, 3.0, nullptr, &op));
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        I8 side({64, 1000}, {1000, 1}, 64000), mask({64, 1000}, {1000, 1}, 64000);
+        for (size_t i = 0; i < side.data.size(); ++i) side.data[i] = static_cast<int8_t>(i % 3) - 1;
+        Arr gp2({2});
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+        const long kb = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+            int64_t count;
+            CHECK_OK(fp_workspace_kinks(ws, 1e-3, &mask.a, &count));
+            CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-3));
+            CHECK_OK(fp_jvp(op, ws, &x.a, 0.1, nullptr, &gx.a));
+            CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp2.a));
+        }
+        CHECK(g_allocs.load() == kb);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
 
     // Anisotropic TV: a single image (threads inside it) and a batch.
     for (int iso = 0; iso < 2; ++iso)
@@ -1350,6 +1484,7 @@ int main() {
     test_tv_aniso();
     test_tv_iso();
     test_nonconvex();
+    test_kinks();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

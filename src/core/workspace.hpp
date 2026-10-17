@@ -92,6 +92,13 @@ struct fp_workspace {
     bool warm = false;        // fp_workspace_set_warm: every call starts from dual
     bool seeded = false;      // fp_workspace_set_dual: the next call starts from dual
 
+    // Branch override of elementwise operators with kinks
+    // (fp_workspace_set_branch): one side per entry in C order, applied to
+    // the entries within branch_tol of a breakpoint, until the next prox call.
+    fp::Buffer<int8_t> branch;
+    bool branch_on = false;
+    double branch_tol = 0.0;
+
     // State of the last prox call.
     bool valid = false;
     bool conj = false;
