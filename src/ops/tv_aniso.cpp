@@ -77,6 +77,7 @@ constexpr double kPolishEta = 1e-9;
 // points met the target with 2-4x the iterate's error (gap ratios 0.03-0.4),
 // while right regions give ratios below 4e-3.
 constexpr double kPolishRatio = 0.01;
+constexpr int64_t kEdgeChunk = 64;  // fibers per polish chunk along a strided axis
 
 struct TVAniso final : ImageOp<TVAniso> {
     int k;
@@ -458,14 +459,14 @@ struct TVAniso final : ImageOp<TVAniso> {
     // of fibers run in parallel.
     static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, double eta,
                            const double *__restrict qa, uint8_t *__restrict flag, double *__restrict v) {
-        constexpr int64_t W = 64;  // fibers per chunk along a strided axis
+        constexpr int64_t W = kEdgeChunk;
         const int64_t s = g.S[a], L = g.L[a], outer = g.N / (L * s);
         const double in = lam * (1.0 - eta);
         const uint8_t bit = static_cast<uint8_t>(1u << a);
         const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
         parallel_for(c.nt, outer * per, std::max<int64_t>(1, kChunk / (L * std::min(s, W))),
                      [&](int, int64_t u0, int64_t u1) {
-            double acc[W];
+            double acc[kEdgeChunk];
             for (int64_t u = u0; u < u1; ++u) {
                 const int64_t oo = u / per, r0 = (u % per) * W;
                 const int64_t w = std::min(W, s - r0);
