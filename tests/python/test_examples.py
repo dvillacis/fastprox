@@ -57,3 +57,14 @@ def test_group_penalties_select_the_groups():
         extra_groups, _, err = res[name]
         assert extra_groups == 0 and err < res["lasso"][2]
     assert res["sparse group lasso"][1] < res["group lasso"][1]   # fewer extra features
+
+
+def test_weighted_glasso_beats_the_graphical_lasso():
+    res = _load("weighted_glasso").main()
+    g_extra, g_missed, g_err = res["glasso 0.2"]
+    a_extra, a_missed, a_err = res["adaptive"]
+    _, m_missed, m_err = res["mcp"]
+    # The weights cost a few missed edges in some problems (see the docstring).
+    assert a_extra < g_extra / 2 and a_missed <= g_missed + 2 and m_missed <= a_missed
+    assert m_err < a_err < g_err
+    assert max(res["kkt"].values()) < 1e-5     # the convex solves are optimal
