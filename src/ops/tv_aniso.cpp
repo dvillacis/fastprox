@@ -164,7 +164,8 @@ struct TVAniso final : ImageOp<TVAniso> {
     // ---- prox --------------------------------------------------------------
 
     // Scratch of the polish: the candidate, per-component sums, and labels,
-    // component sizes and union-find parents (32-bit).
+    // component sizes and union-find parents (32-bit); parent has room for
+    // 2N entries (it is u), the second N holding the roots.
     struct PolishBuf {
         double *zp, *sum;
         int32_t *label, *cnt, *parent;
@@ -513,8 +514,8 @@ struct TVAniso final : ImageOp<TVAniso> {
     // delta_e = lam sign(p_e) - p_e added to v[i] and taken from v[j]. Each
     // entry is touched only by the edges of its own fiber, so the fixed chunks
     // of fibers run in parallel.
-    static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, double eta,
-                           const double *__restrict qa, uint8_t *__restrict flag, double *__restrict v) {
+    static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, double eta, const double *qa,
+                           uint8_t *flag, double *v) {
         constexpr int64_t W = kEdgeChunk;
         const int64_t s = g.S[a], L = g.L[a], outer = g.N / (L * s);
         const double in = lam * (1.0 - eta);
@@ -522,26 +523,33 @@ struct TVAniso final : ImageOp<TVAniso> {
         const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
         parallel_for(c.nt, outer * per, std::max<int64_t>(1, kChunk / (L * std::min(s, W))),
                      [&](int, int64_t u0, int64_t u1) {
-            double acc[kEdgeChunk];
             for (int64_t u = u0; u < u1; ++u) {
                 const int64_t oo = u / per, r0 = (u % per) * W;
-                const int64_t w = std::min(W, s - r0);
                 const int64_t b = oo * L * s + r0;
-                for (int64_t r = 0; r < w; ++r) acc[r] = 0.0;
-                for (int64_t l = 0; l + 1 < L; ++l) {
-                    const int64_t o = b + l * s;
-                    for (int64_t r = 0; r < w; ++r) {
-                        acc[r] += qa[o + r];
-                        const double pe = -acc[r];
-                        const bool inside = std::fabs(pe) < in;
-                        const double delta = inside ? 0.0 : std::copysign(lam, pe) - pe;
-                        flag[o + r] |= inside ? bit : uint8_t{0};
-                        v[o + r] += delta;
-                        v[o + r + s] -= delta;
-                    }
-                }
+                mark_chunk(qa + b, flag + b, v + b, std::min(W, s - r0), L, s, lam, in, bit);
             }
         });
+    }
+    // One chunk of w fibers of length L and stride s starting at q, flag, v.
+    // A separate function, so that the pointers are restrict here: through a
+    // lambda's captures they are not, and the loop did not vectorise (5.6x
+    // slower).
+    static void mark_chunk(const double *__restrict q, uint8_t *__restrict flag, double *__restrict v, int64_t w,
+                           int64_t L, int64_t s, double lam, double in, uint8_t bit) {
+        double acc[kEdgeChunk];
+        for (int64_t r = 0; r < w; ++r) acc[r] = 0.0;
+        for (int64_t l = 0; l + 1 < L; ++l) {
+            const int64_t o = l * s;
+            for (int64_t r = 0; r < w; ++r) {
+                acc[r] += q[o + r];
+                const double pe = -acc[r];
+                const bool inside = std::fabs(pe) < in;
+                const double delta = inside ? 0.0 : std::copysign(lam, pe) - pe;
+                flag[o + r] |= inside ? bit : uint8_t{0};
+                v[o + r] += delta;
+                v[o + r + s] -= delta;
+            }
+        }
     }
 
     // A candidate from the dual q = c.dual, with d - z = sum_a q_a. An edge
@@ -571,15 +579,24 @@ struct TVAniso final : ImageOp<TVAniso> {
         std::fill(zp, zp + N, 0.0);
         for (int a = 0; a < g.k; ++a)
             if (lam[a] > 0.0) mark_edges(g, c, a, lam[a], kPolishEta, c.dual + a * N, flag, zp);
-        // Components by union-find, roots at the smallest index (deterministic
-        // labels). Along the contiguous axis they are runs, linked directly;
-        // run[i] (in cnt) is the start of i's run. An edge along another axis
-        // is redundant when the edge before it in the row joins the same two
-        // runs.
+        // Components by union-find with union by the smaller root, so every
+        // root is the smallest index of its component and every parent
+        // pointer points backwards. Along the contiguous axis the components
+        // are runs, linked directly; run[i] (in cnt) is the start of i's run,
+        // and an edge along another axis is redundant when the edge before it
+        // in the row joins the same two runs.
+        //
+        // In parallel: the image is cut into slabs of whole units of S[0]
+        // (planes in 3D, rows in 2D), fixed by the shape, so only axis-0
+        // edges cross slabs. Each slab's edges are joined by its own thread
+        // (finds stay inside the slab, since pointers point backwards), then
+        // the crossing edges in one serial pass. The components, and so the
+        // labels and sums below, are those of the serial order.
         const int last = g.k - 1;
         const int64_t n = g.L[last];
         const uint8_t bl = static_cast<uint8_t>(1u << last);
         int32_t *run = cnt;
+        int32_t *root = parent + N;  // second half of u
         row_for(g, c, [&](int64_t r) {
             const int64_t b = r * n;
             parent[b] = static_cast<int32_t>(b);
@@ -594,35 +611,111 @@ struct TVAniso final : ImageOp<TVAniso> {
             }
             return i;
         };
-        for (int a = 0; a < last; ++a) {
-            if (lam[a] == 0.0) continue;
-            const uint8_t bit = static_cast<uint8_t>(1u << a);
-            const int64_t s = g.S[a];
-            for (int64_t r = 0; r < g.rows(); ++r) {
-                const int64_t b = r * n;
-                for (int64_t j = 0; j < n; ++j) {
-                    const int64_t i = b + j;
-                    if (!(flag[i] & bit)) continue;
-                    if (j > 0 && (flag[i - 1] & bit) && run[i] == run[i - 1] && run[i + s] == run[i + s - 1]) continue;
-                    const int64_t ri = find(i), rj = find(i + s);
-                    if (ri == rj) continue;
-                    if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
-                    else parent[ri] = static_cast<int32_t>(rj);
+        // The edge (i, i + s) along axis a, unless the skip rule applies.
+        auto join = [&](int64_t i, int64_t j, int64_t s, uint8_t bit) {
+            if (j > 0 && (flag[i - 1] & bit) && run[i] == run[i - 1] && run[i + s] == run[i + s - 1]) return;
+            const int64_t ri = find(i), rj = find(i + s);
+            if (ri == rj) return;
+            if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
+            else parent[ri] = static_cast<int32_t>(rj);
+        };
+        // At most 64 slabs of at least 4 units, so that at most a quarter
+        // of the axis-0 edges cross.
+        const int64_t units = g.L[0], unit = g.S[0];
+        const int64_t per = std::max<int64_t>(4, (units + 63) / 64);
+        const int64_t nslab = (units + per - 1) / per;
+        auto slab_lo = [&](int64_t t) { return std::min(units, t * per) * unit; };
+        parallel_for(c.nt, nslab, 1, [&](int, int64_t t0, int64_t t1) {
+            for (int64_t t = t0; t < t1; ++t) {
+                const int64_t lo = slab_lo(t), hi = slab_lo(t + 1);
+                for (int a = 0; a < last; ++a) {
+                    if (lam[a] == 0.0) continue;
+                    const uint8_t bit = static_cast<uint8_t>(1u << a);
+                    const int64_t s = g.S[a];
+                    for (int64_t i = lo; i < hi; ++i)
+                        if ((flag[i] & bit) && i + s < hi) join(i, i % n, s, bit);
                 }
             }
+        });
+        // Crossing edges: axis 0 from the last unit of each slab. Their
+        // components are marked crossing (bit 7 of flag at the final root).
+        constexpr uint8_t kCross = 0x80;
+        if (lam[0] > 0.0 && nslab > 1) {
+            for (int64_t t = 0; t + 1 < nslab; ++t)
+                for (int64_t i = slab_lo(t + 1) - unit; i < slab_lo(t + 1); ++i)
+                    if (flag[i] & 1u) join(i, i % n, unit, 1u);
+            for (int64_t t = 0; t + 1 < nslab; ++t)
+                for (int64_t i = slab_lo(t + 1) - unit; i < slab_lo(t + 1); ++i)
+                    if (flag[i] & 1u) flag[find(i)] |= kCross;
         }
-        int64_t nc = 0;
-        for (int64_t i = 0; i < N; ++i) {
-            const int64_t r = find(i);
-            label[i] = r == i ? static_cast<int32_t>(nc++) : label[r];
-        }
+        // root[i], as ~r for crossing components (reads parent only), and
+        // the number of roots before each slab (in part).
+        int64_t *roots_in = reinterpret_cast<int64_t *>(part);
+        parallel_for(c.nt, nslab, 1, [&](int, int64_t t0, int64_t t1) {
+            for (int64_t t = t0; t < t1; ++t) {
+                int64_t m = 0;
+                for (int64_t i = slab_lo(t); i < slab_lo(t + 1); ++i) {
+                    int64_t r = i;
+                    while (parent[r] != r) r = parent[r];
+                    m += r == i;
+                    root[i] = (flag[r] & kCross) ? ~static_cast<int32_t>(r) : static_cast<int32_t>(r);
+                }
+                roots_in[t + 1] = m;
+            }
+        });
+        roots_in[0] = 0;
+        for (int64_t t = 0; t < nslab; ++t) roots_in[t + 1] += roots_in[t];
+        const int64_t nc = roots_in[nslab];
+        // Labels in index order of the roots (flag is no longer needed, and
+        // shares label's memory): roots first, then the others, which read
+        // their root's label.
+        parallel_for(c.nt, nslab, 1, [&](int, int64_t t0, int64_t t1) {
+            for (int64_t t = t0; t < t1; ++t) {
+                int64_t m = roots_in[t];
+                for (int64_t i = slab_lo(t); i < slab_lo(t + 1); ++i) {
+                    const int32_t r = root[i] < 0 ? ~root[i] : root[i];
+                    if (r == i) label[i] = static_cast<int32_t>(m++);
+                }
+            }
+        });
+        parallel_for(c.nt, nslab, 1, [&](int, int64_t t0, int64_t t1) {
+            for (int64_t t = t0; t < t1; ++t)
+                for (int64_t i = slab_lo(t); i < slab_lo(t + 1); ++i) {
+                    const int32_t r = root[i] < 0 ? ~root[i] : root[i];
+                    if (r != i) label[i] = label[r];
+                }
+        });
+        // Region sums in index order: a component that does not cross lies in
+        // one slab and is summed by its thread; the crossing ones serially.
         std::fill(sum, sum + nc, 0.0);
         std::fill(cnt, cnt + nc, 0);
-        for (int64_t i = 0; i < N; ++i) {
-            sum[label[i]] += z[i] + zp[i];
-            ++cnt[label[i]];
-        }
-        for (int64_t i = 0; i < N; ++i) zp[i] = sum[label[i]] / cnt[label[i]];
+        // The crossing entries of slab t are listed from parent[slab_lo(t)]
+        // on (parent is no longer needed), their number in xin[t].
+        int64_t *xin = roots_in + nslab + 1;
+        parallel_for(c.nt, nslab, 1, [&](int, int64_t t0, int64_t t1) {
+            for (int64_t t = t0; t < t1; ++t) {
+                int32_t *list = parent + slab_lo(t);
+                int64_t m = 0;
+                for (int64_t i = slab_lo(t); i < slab_lo(t + 1); ++i) {
+                    if (root[i] < 0) {
+                        list[m++] = static_cast<int32_t>(i);
+                        continue;
+                    }
+                    sum[label[i]] += z[i] + zp[i];
+                    ++cnt[label[i]];
+                }
+                xin[t] = m;
+            }
+        });
+        for (int64_t t = 0; t < nslab; ++t)
+            for (int64_t m = 0; m < xin[t]; ++m) {
+                const int64_t i = parent[slab_lo(t) + m];
+                sum[label[i]] += z[i] + zp[i];
+                ++cnt[label[i]];
+            }
+        row_for(g, c, [&](int64_t r) {
+            for (int64_t i = r * n; i < (r + 1) * n; ++i) zp[i] = sum[label[i]] / cnt[label[i]];
+        });
 
         pz = row_sum(g, c, part, [&](int64_t r) {
             const int64_t b = r * n;
