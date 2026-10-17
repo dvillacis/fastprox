@@ -236,86 +236,154 @@ struct Lq final : ElemOp<Lq> {
     }
 };
 
-// ---- SCAD -----------------------------------------------------------------------------
+// ---- SCAD and MCP ---------------------------------------------------------------------
+//
+// Weighted: g(z) = sum_i w_i phi(z_i). The prox of gamma w_i phi is the
+// unweighted map at the step c = gamma w_i (both forms above depend on gamma
+// only through c), so the condition is a > 1 + gamma max w (SCAD) or
+// b > gamma max w (MCP), and the derivatives follow from those in c:
+// dz/dgamma = w_i dz/dc, dz/dw_i = gamma dz/dc. For MCP this is the identity
+// w MCP_{lam, b} = MCP_{w lam, b / w}. theta = (lambda, a or b) without
+// weights, as before they existed (and as the group penalties wrap it), and
+// (lambda, a or b, w...) with them.
 
-struct Scad final : ElemOp<Scad> {
-    double lambda, a;
-    Scad(double l, double aa) : lambda(l), a(aa) {}
-    const char *name() const noexcept override { return "scad"; }
-    int64_t nparams() const noexcept override { return 2; }  // (lambda, a)
-    fp_status check_n(int64_t) const noexcept override { return FP_OK; }
-    fp_status check_step(double gamma) const noexcept override { return a > 1.0 + gamma ? FP_OK : FP_EPARAM; }
-
-    template <class T>
-    T prox1(T x, double gamma, int64_t) const noexcept {
-        const double xd = static_cast<double>(x), ax = std::fabs(xd);
-        double m;
-        if (ax <= (1.0 + gamma) * lambda) m = std::fmax(ax - gamma * lambda, 0.0);
-        else if (ax <= a * lambda) m = ((a - 1.0) * ax - gamma * a * lambda) / (a - 1.0 - gamma);
-        else m = ax;
-        return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
+// Shared by both: lambda, the concavity, the weights and their maximum.
+// Weighted is a template parameter, so the unweighted maps load no weight per
+// entry and compile as before weights existed.
+template <bool Weighted>
+struct WeightedPair {
+    double lambda, p;
+    Vec w;
+    double wmax = 1.0;
+    WeightedPair(double l, double pp, Vec ww) : lambda(l), p(pp), w(std::move(ww)) {
+        if (Weighted) wmax = 0.0;
+        for (double v : w) wmax = std::fmax(wmax, v);
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
-        ElemDeriv e;
-        const double ax = std::fabs(x), s = sgn(x);
+    int64_t nw() const noexcept { return Weighted ? static_cast<int64_t>(w.size()) : 0; }
+    int64_t wi(int64_t i) const noexcept { return w.size() == 1 ? 0 : i; }
+    double step(double gamma, int64_t i) const noexcept {
+        if constexpr (Weighted) return gamma * w[wi(i)];
+        else return gamma;
+    }
+    fp_status check_len(int64_t n) const noexcept { return (nw() <= 1 || nw() == n) ? FP_OK : FP_ESHAPE; }
+    // dz/dgamma and dz/dw_i from dz/dc.
+    void chain(ElemDeriv &e, double dzdc, double gamma, int64_t i) const noexcept {
         e.np = 2;
         e.pi[0] = 0;
         e.pi[1] = 1;
-        if (ax <= gamma * lambda) return e;  // thresholded (the soft rule's kink choice)
-        if (ax <= (1.0 + gamma) * lambda) {
+        if constexpr (Weighted) {
+            e.dg = w[wi(i)] * dzdc;
+            e.np = 3;
+            e.pi[2] = 2 + wi(i);
+            e.pv[2] = gamma * dzdc;
+        } else {
+            e.dg = dzdc;
+        }
+    }
+};
+
+template <bool Weighted>
+struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
+    using P = WeightedPair<Weighted>;
+    using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
+    Scad(double l, double aa, Vec ww) : P(l, aa, std::move(ww)) {}
+    const char *name() const noexcept override { return "scad"; }
+    int64_t nparams() const noexcept override { return 2 + nw(); }  // (lambda, a, w...)
+    bool axis_params() const noexcept override { return nw() > 1; }
+    fp_status check_n(int64_t n) const noexcept override { return check_len(n); }
+    fp_status check_step(double gamma) const noexcept override {
+        return p > 1.0 + gamma * wmax ? FP_OK : FP_EPARAM;
+    }
+
+    template <class T>
+    T prox1(T x, double gamma, int64_t i) const noexcept {
+        const double xd = static_cast<double>(x), ax = std::fabs(xd), c = step(gamma, i), a = p;
+        // Branches vectorise the unweighted loop, and every branch evaluated
+        // and selected the weighted one (Apple clang 21, arm64: 0.5 and
+        // 1.2 ns per entry; the other way round, 1.3 and 3.7).
+        double m;
+        if constexpr (Weighted) {
+            const double m1 = std::fmax(ax - c * lambda, 0.0);
+            const double m2 = ((a - 1.0) * ax - c * a * lambda) / (a - 1.0 - c);
+            m = ax <= a * lambda ? m2 : ax;
+            m = ax <= (1.0 + c) * lambda ? m1 : m;
+        } else {
+            if (ax <= (1.0 + c) * lambda) m = std::fmax(ax - c * lambda, 0.0);
+            else if (ax <= a * lambda) m = ((a - 1.0) * ax - c * a * lambda) / (a - 1.0 - c);
+            else m = ax;
+        }
+        if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly
+        return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        ElemDeriv e;
+        const double ax = std::fabs(x), s = sgn(x), c = step(gamma, i), a = p;
+        double dzdc = 0.0;
+        if (ax <= c * lambda && c > 0.0) {
+            // thresholded (the soft rule's kink choice); c = 0 is the identity
+        } else if (ax <= (1.0 + c) * lambda) {
             e.j = 1.0;
-            e.dg = -s * lambda;
-            e.pv[0] = -s * gamma;
+            dzdc = -s * lambda;
+            e.pv[0] = -s * c;
         } else if (ax <= a * lambda) {
-            const double D = a - 1.0 - gamma;
-            const double z = s * ((a - 1.0) * ax - gamma * a * lambda) / D;
+            const double D = a - 1.0 - c;
+            const double z = s * ((a - 1.0) * ax - c * a * lambda) / D;
             e.j = (a - 1.0) / D;
-            e.dg = (z - s * a * lambda) / D;
-            e.pv[0] = -s * gamma * a / D;
-            e.pv[1] = (s * (ax - gamma * lambda) - z) / D;
+            dzdc = (z - s * a * lambda) / D;
+            e.pv[0] = -s * c * a / D;
+            e.pv[1] = (s * (ax - c * lambda) - z) / D;
         } else {
             e.j = 1.0;
         }
+        chain(e, dzdc, gamma, i);
         return e;
     }
 };
 
-// ---- MCP ------------------------------------------------------------------------------
-
-struct Mcp final : ElemOp<Mcp> {
-    double lambda, b;
-    Mcp(double l, double bb) : lambda(l), b(bb) {}
+template <bool Weighted>
+struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
+    using P = WeightedPair<Weighted>;
+    using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
+    Mcp(double l, double bb, Vec ww) : P(l, bb, std::move(ww)) {}
     const char *name() const noexcept override { return "mcp"; }
-    int64_t nparams() const noexcept override { return 2; }  // (lambda, b)
-    fp_status check_n(int64_t) const noexcept override { return FP_OK; }
-    fp_status check_step(double gamma) const noexcept override { return b > gamma ? FP_OK : FP_EPARAM; }
+    int64_t nparams() const noexcept override { return 2 + nw(); }  // (lambda, b, w...)
+    bool axis_params() const noexcept override { return nw() > 1; }
+    fp_status check_n(int64_t n) const noexcept override { return check_len(n); }
+    fp_status check_step(double gamma) const noexcept override { return p > gamma * wmax ? FP_OK : FP_EPARAM; }
 
     template <class T>
-    T prox1(T x, double gamma, int64_t) const noexcept {
-        const double xd = static_cast<double>(x), ax = std::fabs(xd);
-        double m;
-        if (ax <= gamma * lambda) m = 0.0;
-        else if (ax <= b * lambda) m = b * (ax - gamma * lambda) / (b - gamma);
-        else m = ax;
+    T prox1(T x, double gamma, int64_t i) const noexcept {
+        const double xd = static_cast<double>(x), ax = std::fabs(xd), c = step(gamma, i), b = p;
+        double m;  // as in Scad::prox1
+        if constexpr (Weighted) {
+            const double m2 = b * (ax - c * lambda) / (b - c);
+            m = ax <= b * lambda ? m2 : ax;
+            m = ax <= c * lambda ? 0.0 : m;
+        } else {
+            if (ax <= c * lambda) m = 0.0;
+            else if (ax <= b * lambda) m = b * (ax - c * lambda) / (b - c);
+            else m = ax;
+        }
+        if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly (b x / b is not)
         return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
     }
-    ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
         ElemDeriv e;
-        const double ax = std::fabs(x), s = sgn(x);
-        e.np = 2;
-        e.pi[0] = 0;
-        e.pi[1] = 1;
-        if (ax <= gamma * lambda) return e;
-        if (ax <= b * lambda) {
-            const double D = b - gamma;
-            const double z = s * b * (ax - gamma * lambda) / D;
+        const double ax = std::fabs(x), s = sgn(x), c = step(gamma, i), b = p;
+        double dzdc = 0.0;
+        if (ax <= c * lambda && c > 0.0) {
+            // thresholded; c = 0 is the identity
+        } else if (ax <= b * lambda) {
+            const double D = b - c;
+            const double z = s * b * (ax - c * lambda) / D;
             e.j = b / D;
-            e.dg = (z - s * b * lambda) / D;
-            e.pv[0] = -s * gamma * b / D;
-            e.pv[1] = -s * gamma * (ax - gamma * lambda) / (D * D);
+            dzdc = (z - s * b * lambda) / D;
+            e.pv[0] = -s * c * b / D;
+            e.pv[1] = -s * c * (ax - c * lambda) / (D * D);
         } else {
             e.j = 1.0;
         }
+        chain(e, dzdc, gamma, i);
         return e;
     }
 };
@@ -401,14 +469,20 @@ fp_status make_lq(double lambda, double q, Vec w, fp_op **out) {
     return emit<Lq>(out, lambda, q, std::move(w));
 }
 
-fp_status make_scad(double lambda, double a, fp_op **out) {
+fp_status make_scad(double lambda, double a, Vec w, fp_op **out) {
     if (!finite_nonneg(lambda) || !(a > 1.0) || !std::isfinite(a)) return FP_EPARAM;
-    return emit<Scad>(out, lambda, a);
+    for (double v : w)
+        if (!finite_nonneg(v)) return FP_EPARAM;
+    if (w.empty()) return emit<Scad<false>>(out, lambda, a, Vec{1.0});
+    return emit<Scad<true>>(out, lambda, a, std::move(w));
 }
 
-fp_status make_mcp(double lambda, double b, fp_op **out) {
+fp_status make_mcp(double lambda, double b, Vec w, fp_op **out) {
     if (!finite_nonneg(lambda) || !(b > 0.0) || !std::isfinite(b)) return FP_EPARAM;
-    return emit<Mcp>(out, lambda, b);
+    for (double v : w)
+        if (!finite_nonneg(v)) return FP_EPARAM;
+    if (w.empty()) return emit<Mcp<false>>(out, lambda, b, Vec{1.0});
+    return emit<Mcp<true>>(out, lambda, b, std::move(w));
 }
 
 fp_status make_log(double lambda, double eps, fp_op **out) {

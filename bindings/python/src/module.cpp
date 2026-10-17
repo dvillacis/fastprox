@@ -268,12 +268,14 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_lq(lam, q, pw.get(), o); });
     }, "lam"_a, "q"_a, "weights"_a.none());
-    m.def("scad", [](double lam, double a) {
-        return make([&](fp_op **o) { return fp_op_scad(lam, a, o); });
-    }, "lam"_a, "a"_a);
-    m.def("mcp", [](double lam, double b) {
-        return make([&](fp_op **o) { return fp_op_mcp(lam, b, o); });
-    }, "lam"_a, "b"_a);
+    m.def("scad", [](double lam, double a, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_scad(lam, a, pw.get(), o); });
+    }, "lam"_a, "a"_a, "weights"_a.none());
+    m.def("mcp", [](double lam, double b, std::optional<Params> w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_mcp(lam, b, pw.get(), o); });
+    }, "lam"_a, "b"_a, "weights"_a.none());
     m.def("log_penalty", [](double lam, double eps) {
         return make([&](fp_op **o) { return fp_op_log(lam, eps, o); });
     }, "lam"_a, "eps"_a);

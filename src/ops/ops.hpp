@@ -60,8 +60,8 @@ fp_status make_tv1d_l2(Vec w, fp_op **out);
 // nonconvex.cpp
 fp_status make_l0(double lambda, Vec w, fp_op **out);
 fp_status make_lq(double lambda, double q, Vec w, fp_op **out);
-fp_status make_scad(double lambda, double a, fp_op **out);
-fp_status make_mcp(double lambda, double b, fp_op **out);
+fp_status make_scad(double lambda, double a, Vec w, fp_op **out);  // w empty: unweighted
+fp_status make_mcp(double lambda, double b, Vec w, fp_op **out);
 fp_status make_log(double lambda, double eps, fp_op **out);
 
 // tv_aniso.cpp

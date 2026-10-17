@@ -386,8 +386,10 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"lq_half", [=](fp_op **o) { return fp_op_lq(0.4, 0.5, wn, o); }, 0.8},
         {"lq_two_thirds", [](fp_op **o) { return fp_op_lq(0.4, 2.0 / 3.0, nullptr, o); }, 0.8},
         {"lq_0.3", [](fp_op **o) { return fp_op_lq(0.4, 0.3, nullptr, o); }, 0.8},
-        {"scad", [](fp_op **o) { return fp_op_scad(0.5, 3.7, o); }, 0.8},
-        {"mcp", [](fp_op **o) { return fp_op_mcp(0.5, 3.0, o); }, 0.8},
+        {"scad", [](fp_op **o) { return fp_op_scad(0.5, 3.7, nullptr, o); }, 0.8},
+        {"scad_w", [=](fp_op **o) { return fp_op_scad(0.5, 3.7, wn, o); }, 0.8},
+        {"mcp", [](fp_op **o) { return fp_op_mcp(0.5, 3.0, nullptr, o); }, 0.8},
+        {"mcp_w", [=](fp_op **o) { return fp_op_mcp(0.5, 3.0, wn, o); }, 0.8},
         {"log", [](fp_op **o) { return fp_op_log(0.8, 0.5, o); }, 0.8},
     };
 }
@@ -908,8 +910,8 @@ static void test_nonconvex() {
 
     // SCAD and MCP need the concavity parameter large enough for the step.
     fp_op *scad, *mcp;
-    CHECK_OK(fp_op_scad(0.5, 3.7, &scad));
-    CHECK_OK(fp_op_mcp(0.5, 3.0, &mcp));
+    CHECK_OK(fp_op_scad(0.5, 3.7, nullptr, &scad));
+    CHECK_OK(fp_op_mcp(0.5, 3.0, nullptr, &mcp));
     Arr x({5}, {-2.0, -0.4, 0.0, 0.7, 3.0}), z({5});
     CHECK_OK(fp_prox(scad, 2.6, &x.a, &z.a, nullptr, nullptr, nullptr));
     CHECK(fp_prox(scad, 2.7, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
@@ -918,13 +920,32 @@ static void test_nonconvex() {
     CHECK(fp_prox(mcp, 3.0, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
     fp_op_free(scad);
     fp_op_free(mcp);
+    // With weights the conditions use max w: a > 1 + gamma max w, b > gamma max w.
+    {
+        Arr w2({5}, {1.0, 2.0, 0.0, 0.5, 1.0}), w3({3}, {1.0, 1.0, 1.0});
+        CHECK_OK(fp_op_scad(0.5, 3.7, &w2.a, &scad));
+        CHECK_OK(fp_op_mcp(0.5, 3.0, &w2.a, &mcp));
+        CHECK_OK(fp_prox(scad, 1.3, &x.a, &z.a, nullptr, nullptr, nullptr));
+        CHECK(z.data[2] == x.data[2]);  // zero weight: the identity
+        CHECK(fp_prox(scad, 1.4, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+        CHECK_OK(fp_prox(mcp, 1.45, &x.a, &z.a, nullptr, nullptr, nullptr));
+        CHECK(fp_prox(mcp, 1.5, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+        CHECK(fp_op_nparams(scad) == 7 && fp_op_nparams(mcp) == 7);
+        fp_op_free(scad);
+        fp_op_free(mcp);
+        CHECK_OK(fp_op_scad(0.5, 3.7, &w3.a, &scad));
+        CHECK(fp_prox(scad, 1.0, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        fp_op_free(scad);
+        Arr wneg({1}, {-1.0});
+        CHECK(fp_op_mcp(0.5, 3.0, &wneg.a, &mcp) == FP_EPARAM);
+    }
 
     // Parameters, the tie option and special values.
     fp_op *bad = nullptr;
     CHECK(fp_op_lq(1.0, 0.0, nullptr, &bad) == FP_EPARAM);
     CHECK(fp_op_lq(1.0, 1.0, nullptr, &bad) == FP_EPARAM);
-    CHECK(fp_op_scad(1.0, 1.0, &bad) == FP_EPARAM);
-    CHECK(fp_op_mcp(1.0, 0.0, &bad) == FP_EPARAM);
+    CHECK(fp_op_scad(1.0, 1.0, nullptr, &bad) == FP_EPARAM);
+    CHECK(fp_op_mcp(1.0, 0.0, nullptr, &bad) == FP_EPARAM);
     CHECK(fp_op_log(1.0, 0.0, &bad) == FP_EPARAM);
     CHECK(fp_op_l0(-1.0, nullptr, &bad) == FP_EPARAM);
     fp_op *op;

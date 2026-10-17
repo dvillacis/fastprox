@@ -1,7 +1,7 @@
 """Nonconvex pointwise maps (l0, lq, SCAD, MCP, log): global minimisers on a
 dense grid with refinement, tie rules and counts exact at thresholds, the
-closed forms for q = 1/2 and 2/3, the step conditions of SCAD and MCP, and
-errors (the 0.2 gate in ROADMAP.md). Derivatives, threads and strides run in
+closed forms for q = 1/2 and 2/3, the step conditions of SCAD and MCP, their
+per-entry weights, and errors (the 0.2 gate in ROADMAP.md). Derivatives, threads and strides run in
 test_operators.py through CASES."""
 
 import numpy as np
@@ -139,6 +139,64 @@ def test_weights_and_errors():
     for f in (fp.hard_threshold, fp.lq, fp.scad, fp.mcp, fp.prox_log):
         r = f(v)
         assert np.isnan(r[1]) and not np.isnan(r[[0, 2]]).any()
+
+
+@pytest.mark.parametrize("kind", ["scad", "mcp"])
+def test_weighted_scad_mcp(kind):
+    """sum_i w_i phi(z_i): entry i is the unweighted map at the step gamma w_i
+    (bit for bit), MCP also satisfies w MCP(lam, b) = MCP(w lam, b / w), a
+    zero weight is the identity, the step condition uses max(w), and theta
+    gains the weights only when they are given."""
+    cls, f, p = (fp.SCAD, fp.scad, 3.7) if kind == "scad" else (fp.MCP, fp.mcp, 3.0)
+    rng = np.random.default_rng(9)
+    x = rng.normal(scale=2.0, size=(4, 12))
+    w = rng.uniform(0.2, 1.6, 12)
+    w[3] = 0.0
+    gamma, lam = 0.9, 0.6
+    z = f(x, lam, p, gamma, weights=w)
+    for j in range(12):
+        np.testing.assert_array_equal(z[:, j], f(x[:, j], lam, p, gamma * w[j]))
+    assert np.array_equal(z[:, 3], x[:, 3])
+    np.testing.assert_array_equal(f(x, lam, p, 0.0), x)  # gamma = 0 too
+    if kind == "mcp":
+        for j in np.flatnonzero(w):
+            np.testing.assert_allclose(z[:, j], f(x[:, j], w[j] * lam, p / w[j], gamma), rtol=1e-14,
+                                       atol=1e-15)
+    # Along another axis, and a scalar weight.
+    np.testing.assert_array_equal(f(x.T, lam, p, gamma, weights=w, axis=0), z.T)
+    np.testing.assert_array_equal(f(x, lam, p, gamma, weights=0.5), f(x, lam, p, 0.5 * gamma))
+    # The step condition: a > 1 + gamma max(w), b > gamma max(w).
+    gmax = ((p - 1.0) if kind == "scad" else p) / w.max()
+    f(x, lam, p, 0.999 * gmax, weights=w)
+    with pytest.raises(ValueError):
+        f(x, lam, p, 1.001 * gmax, weights=w)
+    # theta: (lam, a or b) unweighted, plus the weights when given.
+    op = cls(lam, p)
+    _, ctx = op.prox(x, gamma, keep=True)
+    _, grads = op.vjp(ctx, np.ones_like(x))
+    assert not hasattr(grads, "weights")
+    op = cls(lam, p, w)
+    _, ctx = op.prox(x, gamma, keep=True)
+    _, grads = op.vjp(ctx, np.ones_like(x))
+    assert grads.weights.shape == (12,)
+    h = 1e-7
+    for j in (0, 5):
+        wp, wm = w.copy(), w.copy()
+        wp[j] += h
+        wm[j] -= h
+        fd = (f(x, lam, p, gamma, weights=wp).sum() - f(x, lam, p, gamma, weights=wm).sum()) / (2 * h)
+        assert grads.weights[j] == pytest.approx(fd, rel=1e-6, abs=1e-9)
+    # At w_j = 0 the map is the identity, but raising the weight shrinks the
+    # entry: the derivative is the one-sided one from w_j >= 0.
+    wp = w.copy()
+    wp[3] = h
+    fd = (f(x, lam, p, gamma, weights=wp).sum() - z.sum()) / h
+    assert grads.weights[3] != 0.0 and grads.weights[3] == pytest.approx(fd, rel=1e-5)
+    for bad in (lambda: cls(lam, p, -w), lambda: cls(lam, p, [1.0, np.inf])):
+        with pytest.raises(ValueError):
+            bad()
+    with pytest.raises(ValueError):
+        f(x, lam, p, gamma, weights=w[:5])
 
 
 def test_lq_lam_gradient():

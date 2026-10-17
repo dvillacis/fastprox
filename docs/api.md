@@ -50,8 +50,8 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | 1D TV, ℓ2 of differences (*since 0.2*) | (Σ wᵢ² (zᵢ₊₁ − zᵢ)²)^½ | `fp_op_tv1d_l2(w)` | `TV1DL2(weights)`, `tv1d_l2` | w (scalar or n − 1 edges) |
 | ℓ0 (*since 0.2*) | λ Σ wᵢ [zᵢ ≠ 0] | `fp_op_l0(λ, w)` | `L0(lam, weights)`, `hard_threshold` | w (scalar or per entry) |
 | ℓq, 0 < q < 1 (*since 0.2*) | λ Σ wᵢ \|zᵢ\|^q | `fp_op_lq(λ, q, w)` | `Lq(lam, q, weights)`, `lq` | w (scalar or per entry) |
-| SCAD (*since 0.2*) | Fan and Li's penalty, threshold λ, concavity a | `fp_op_scad(λ, a)` | `SCAD(lam, a)`, `scad` | (λ, a) |
-| MCP (*since 0.2*) | Zhang's minimax concave penalty, threshold λ, concavity b | `fp_op_mcp(λ, b)` | `MCP(lam, b)`, `mcp` | (λ, b) |
+| SCAD (*since 0.2*) | Σ wᵢ ρ(zᵢ), Fan and Li's penalty ρ, threshold λ, concavity a | `fp_op_scad(λ, a, w)` | `SCAD(lam, a, weights)`, `scad` | (λ, a), or (λ, a, w…) with weights |
+| MCP (*since 0.2*) | Σ wᵢ ρ(zᵢ), Zhang's minimax concave penalty ρ, threshold λ, concavity b | `fp_op_mcp(λ, b, w)` | `MCP(lam, b, weights)`, `mcp` | (λ, b), or (λ, b, w…) with weights |
 | Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
@@ -136,10 +136,15 @@ problem ½(z − x)² + γψ(z):
   the size of the jump. Above it, the root of z + γλwᵢ q z^{q−1} = |x|: in
   closed form for q = 1/2 and 2/3 (a cubic and a quartic), by Newton's
   method from |x| otherwise (monotone on that branch).
-- **SCAD** needs a > 1 + γ and **MCP** b > γ; below that the prox is not
-  single-valued and the call returns `FP_EPARAM` (with `fp_prox_conj` the
-  condition applies to its step 1/σ). Both are continuous and piecewise
-  linear; with γ = 1 they are Fan and Li's and Zhang's thresholding rules.
+- **SCAD** needs a > 1 + γ max w and **MCP** b > γ max w; below that the
+  prox is not single-valued and the call returns `FP_EPARAM` (with
+  `fp_prox_conj` the condition applies to its step 1/σ). Both are continuous
+  and piecewise linear; with γ = 1 and unit weights they are Fan and Li's
+  and Zhang's thresholding rules. With weights, entry i is the unweighted map
+  at the step γwᵢ (for MCP, wρ_{λ,b} = ρ_{wλ,b/w}), and a zero weight leaves
+  the entry unchanged. The weights are optional: without them θ is (λ, a) or
+  (λ, b); with them, a scalar or one per element along the axis, θ ends with
+  w and the VJP gives their gradient.
 - **Log penalty.** The positive root of a quadratic, kept when it beats 0;
   for γλ ≤ ε² the problem is convex.
 - **Ties.** Where two minimisers exist (ℓ0 and ℓq at the threshold, the log
@@ -464,6 +469,8 @@ y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
 # Nonconvex maps (since 0.2): ties at thresholds follow tie= and are counted.
 zq = fp.lq(x, lam=0.1, q=0.5, gamma=1.0, tie="nonzero")
 zs = fp.scad(x, lam=0.2, a=3.7, gamma=1.0)          # needs a > 1 + gamma
+w = np.linspace(0.5, 1.5, x.shape[-1])
+zm = fp.mcp(x, lam=0.2, b=3.0, weights=w)           # sum_i w_i MCP(z_i); b > gamma max(w)
 z0, ctx = fp.L0(0.3).prox(x, 1.0, keep=True, tie="zero")
 ctx.info.ties                                       # entries exactly on the threshold
 

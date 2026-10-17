@@ -35,8 +35,8 @@ struct ElemDeriv {
     double j = 0.0;
     double dg = 0.0;
     int np = 0;
-    int64_t pi[2] = {0, 0};
-    double pv[2] = {0.0, 0.0};
+    int64_t pi[3] = {0, 0, 0};
+    double pv[3] = {0.0, 0.0, 0.0};
 };
 
 // Status returned by row kernels.

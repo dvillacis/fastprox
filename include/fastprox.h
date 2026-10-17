@@ -228,13 +228,18 @@ FP_API fp_status fp_op_l0(double lambda, const fp_array *weights, fp_op **out);
  * 2/3, safeguarded Newton otherwise). weights as fp_op_l0. theta = w. */
 FP_API fp_status fp_op_lq(double lambda, double q, const fp_array *weights, fp_op **out);
 
-/* SCAD (Fan and Li) with threshold lambda and concavity a > 1; the prox
- * needs a > 1 + gamma, else FP_EPARAM. theta = (lambda, a). */
-FP_API fp_status fp_op_scad(double lambda, double a, fp_op **out);
+/* g(z) = sum_i w_i SCAD(z_i), SCAD (Fan and Li) with threshold lambda and
+ * concavity a > 1; entry i is the unweighted map at the step gamma w_i. The
+ * prox needs a > 1 + gamma max w, else FP_EPARAM. weights: NULL (w = 1,
+ * theta = (lambda, a)), or length 1 or the axis length, all >= 0
+ * (theta = (lambda, a, w...)). Weights since 0.2. */
+FP_API fp_status fp_op_scad(double lambda, double a, const fp_array *weights, fp_op **out);
 
-/* MCP (Zhang) with threshold lambda and concavity b > 0; the prox needs
- * b > gamma, else FP_EPARAM. theta = (lambda, b). */
-FP_API fp_status fp_op_mcp(double lambda, double b, fp_op **out);
+/* g(z) = sum_i w_i MCP(z_i), MCP (Zhang) with threshold lambda and
+ * concavity b > 0 (w MCP_{lambda, b} = MCP_{w lambda, b / w}). The prox needs
+ * b > gamma max w, else FP_EPARAM. weights and theta as fp_op_scad, with b
+ * for a. */
+FP_API fp_status fp_op_mcp(double lambda, double b, const fp_array *weights, fp_op **out);
 
 /* g(z) = lambda * sum_i log(1 + |z_i| / eps), eps > 0. theta = (lambda, eps). */
 FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out);
