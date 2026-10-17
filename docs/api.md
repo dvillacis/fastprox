@@ -177,6 +177,10 @@ image-by-image calls, for any thread count.
     alternates rows and columns at an O(1/k²) rate;
   - with three, the fast dual proximal gradient method for three blocks
     (Beck, Algorithm 9).
+  Both restart their momentum when it points uphill (the gradient test of
+  O'Donoghue and Candès, Found. Comput. Math. 15, 2015). The dual problem is
+  a quadratic over a polyhedron, on which restarted methods converge
+  linearly, so tight tolerances are not much dearer than loose ones.
   An axis of extent 1 or weight 0 drops out. With a single active axis the
   prox is the exact 1D TV, with gap 0.
 - **Gap and stopping.** Every iterate carries duals q_a, one per axis and
@@ -186,12 +190,20 @@ image-by-image calls, for any thread count.
   iterations (default 1000), in which case the call returns `FP_ENOTCONV`
   with the last iterate written. `fp_info.gap` is the sum over the batch,
   `fp_info.iters` the maximum.
-- **Polish.** At the end the solution's constant regions (edges with a jump
-  below a threshold set by the certified error) are identified. Their
-  closed-form values are then recomputed from the input and the signs of the
-  jumps on their boundary. The polished point is kept when its gap, with
-  the same dual, is no larger, which makes the output exact to rounding
-  when the regions are identified correctly.
+- **Polish.** The constant regions of the solution are read off the dual:
+  an edge whose 1D dual lies strictly inside its bound has no jump at the
+  solution. The values on those regions have a closed form, from the input
+  and the dual's signs on their boundary. At the gap checks (first, then each
+  time the iterate's gap has fallen tenfold, and at the end) this polished
+  point is formed and its gap, with the same dual, computed; the solve stops
+  as soon as that gap meets the tolerance and is at most 1/100 of the
+  iterate's (a larger gap means the regions are not yet right, and such a
+  point can be further from the solution than the iterate). Once the regions are right the
+  polished point is the exact solution to rounding, and its gap is often
+  orders of magnitude below that of the iterate, so the polish both ends
+  tight solves early and makes their output exact. The dual returned is the
+  iterate's: x − z = Σₐ q_a holds for the iterate, and the gap with that dual
+  certifies the polished output.
 - **Warm starts.** The dual of the last call stays in the workspace, shaped
   `(ndim, *x.shape)`. `fp_workspace_get_dual` copies it out, and
   `fp_workspace_set_dual` seeds the next call with a dual, for example one
