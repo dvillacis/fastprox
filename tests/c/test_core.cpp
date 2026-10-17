@@ -1458,6 +1458,145 @@ static void test_graph_tv() {
     }
 }
 
+// ---------------------------------------------------------------- tree TV
+// A random forest on n nodes as 2m endpoints: each node after the first joins
+// an earlier one (kind 0), the one before it (a path, kind 1) or node 0 (a
+// star, kind 2); then the labels are shuffled, the ends swapped at random,
+// the edges shuffled, and `drop` of them removed.
+static std::vector<int64_t> tree_edges(int64_t n, int kind, int64_t drop, unsigned seed) {
+    std::mt19937_64 g(seed);
+    std::vector<int64_t> label(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) label[i] = i;
+    std::shuffle(label.begin(), label.end(), g);
+    std::vector<std::pair<int64_t, int64_t>> es;
+    for (int64_t i = 1; i < n; ++i) {
+        const int64_t p = kind == 1 ? i - 1 : (kind == 2 ? 0 : static_cast<int64_t>(g() % static_cast<uint64_t>(i)));
+        if (g() % 2) es.emplace_back(label[i], label[p]);
+        else es.emplace_back(label[p], label[i]);
+    }
+    std::shuffle(es.begin(), es.end(), g);
+    es.resize(es.size() - static_cast<size_t>(std::min<int64_t>(drop, static_cast<int64_t>(es.size()))));
+    std::vector<int64_t> e;
+    for (auto &pq : es) e.insert(e.end(), {pq.first, pq.second});
+    return e;
+}
+
+static void test_tree_tv() {
+    fp_info info, ig;
+    // Against exact graph TV on random trees, paths, stars and forests, with
+    // some zero weights; the gap is zero up to rounding.
+    for (int kind : {0, 1, 2})
+        for (int64_t n : {1, 2, 3, 10, 200, 3000})
+            for (int64_t drop : {0, 3})
+                for (double gamma : {0.01, 0.5, 4.0}) {
+                    const std::vector<int64_t> e = tree_edges(n, kind, drop, static_cast<unsigned>(n + kind));
+                    const int64_t m = static_cast<int64_t>(e.size()) / 2;
+                    Vec x = randn(n, 2.0), w(static_cast<size_t>(std::max<int64_t>(m, 1)));
+                    for (auto &v : w) v = unif(0.0, 1.0) < 0.1 ? 0.0 : unif(0.0, 2.0);
+                    Arr wa({static_cast<int64_t>(w.size())}, w), xa({n}, x), za({n}), zg({n});
+                    fp_op *t, *g;
+                    CHECK_OK(fp_op_tree_tv(n, m, e.data(), m ? &wa.a : nullptr, &t));
+                    CHECK_OK(fp_op_graph_tv(n, m, e.data(), m ? &wa.a : nullptr, &g));
+                    fp_options o = opts();
+                    o.tol = 0.0;
+                    CHECK_OK(fp_prox(t, gamma, &xa.a, &za.a, &o, nullptr, &info));
+                    CHECK_OK(fp_prox(g, gamma, &xa.a, &zg.a, &o, nullptr, &ig));
+                    double err = 0, x2 = 0;
+                    for (int64_t i = 0; i < n; ++i) err = std::max(err, std::fabs(za.data[i] - zg.data[i]));
+                    for (double v : x) x2 += v * v;
+                    CHECK(err <= 1e-12 * (1 + maxabs(x)));
+                    CHECK(info.gap <= 1e-13 * (1 + x2));
+                    CHECK(info.iters == 1);
+                    fp_op_free(t);
+                    fp_op_free(g);
+                }
+    // Paths are weighted 1D TV, in any node order.
+    for (int64_t n : {2, 9, 200, 3000})
+        for (double gamma : {0.01, 0.5, 4.0}) {
+            Vec x = randn(n, 2.0), w(static_cast<size_t>(n - 1));
+            for (int64_t i = 1; i < n; ++i) x[i] += x[i - 1];
+            std::vector<int64_t> perm(static_cast<size_t>(n)), e;
+            for (int64_t i = 0; i < n; ++i) perm[i] = i;
+            std::shuffle(perm.begin(), perm.end(), rng);
+            Vec xp(static_cast<size_t>(n));
+            for (int64_t i = 0; i < n; ++i) xp[perm[i]] = x[i];
+            for (int64_t i = 0; i + 1 < n; ++i) {
+                e.insert(e.end(), {perm[i], perm[i + 1]});
+                w[i] = unif(0.0, 1.0) < 0.05 ? 0.0 : unif(0.0, 2.0);
+            }
+            Arr wa({n - 1}, w), xa({n}, xp), za({n});
+            fp_op *t, *d;
+            CHECK_OK(fp_op_tree_tv(n, n - 1, e.data(), &wa.a, &t));
+            CHECK_OK(fp_op_tv1d(&wa.a, FP_TV1D_AUTO, &d));
+            CHECK_OK(fp_prox(t, gamma, &xa.a, &za.a, nullptr, nullptr, &info));
+            const Vec zd = prox(d, gamma, x);
+            double err = 0;
+            for (int64_t i = 0; i < n; ++i) err = std::max(err, std::fabs(za.data[perm[i]] - zd[i]));
+            CHECK(err <= 1e-12 * (1 + maxabs(x)));
+            fp_op_free(t);
+            fp_op_free(d);
+        }
+    // Derivatives on a tree and a forest, unit and per-edge weights.
+    static const std::vector<int64_t> t12 = tree_edges(12, 0, 0, 3), f12 = tree_edges(12, 0, 2, 4);
+    static Arr w11({11}, Vec(11, 0.8));
+    for (size_t k = 0; k < 11; ++k) w11.data[k] = 0.4 + 0.1 * static_cast<double>(k % 7);
+    const std::vector<OpCase> cases = {
+        {"tree_tv", [](fp_op **o) { return fp_op_tree_tv(12, 11, t12.data(), nullptr, o); }, 0.6},
+        {"tree_tv_w", [](fp_op **o) { return fp_op_tree_tv(12, 11, t12.data(), &w11.a, o); }, 0.6},
+        {"tree_tv_forest", [](fp_op **o) { return fp_op_tree_tv(12, 9, f12.data(), nullptr, o); }, 0.6},
+    };
+    for (int rep = 0; rep < 10; ++rep)
+        for (const auto &c : cases) {
+            check_derivatives(c, false);
+            check_derivatives(c, true);
+        }
+    // Batches: each signal on its own, for any thread count.
+    {
+        const std::vector<int64_t> e = tree_edges(40, 0, 2, 9);
+        const int64_t m = static_cast<int64_t>(e.size()) / 2;
+        fp_op *t;
+        CHECK_OK(fp_op_tree_tv(40, m, e.data(), nullptr, &t));
+        Arr x({50, 40}, randn(2000, 2.0));
+        std::vector<Vec> outs;
+        for (int th : {1, 3, 8}) {
+            Arr z({50, 40});
+            fp_options o = opts(-1, th);
+            CHECK_OK(fp_prox(t, 0.8, &x.a, &z.a, &o, nullptr, nullptr));
+            outs.push_back(z.data);
+        }
+        CHECK(outs[0] == outs[1] && outs[0] == outs[2]);
+        Vec row(x.data.begin() + 40 * 7, x.data.begin() + 40 * 8);
+        Arr ra({40}, row), rz({40});
+        CHECK_OK(fp_prox(t, 0.8, &ra.a, &rz.a, nullptr, nullptr, nullptr));
+        CHECK(std::equal(rz.data.begin(), rz.data.end(), outs[0].begin() + 40 * 7));
+        // The wrong length, and infinities.
+        Arr bad({41});
+        CHECK(fp_prox(t, 0.8, &bad.a, &bad.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        ra.data[3] = INFINITY;
+        CHECK(fp_prox(t, 0.8, &ra.a, &rz.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+        ra.data[3] = NAN;
+        CHECK_OK(fp_prox(t, 0.8, &ra.a, &rz.a, nullptr, nullptr, nullptr));
+        CHECK(std::isnan(rz.data[0]) && std::isnan(rz.data[39]));
+        fp_op_free(t);
+    }
+    // Constructor errors: cycles and repeated edges are not forests.
+    {
+        fp_op *t = nullptr;
+        const int64_t tri[] = {0, 1, 1, 2, 2, 0}, twice[] = {0, 1, 1, 0}, loop[] = {0, 1, 1, 1}, ok[] = {0, 1, 1, 2};
+        CHECK(fp_op_tree_tv(3, 3, tri, nullptr, &t) == FP_EPARAM);
+        CHECK(fp_op_tree_tv(3, 2, twice, nullptr, &t) == FP_EPARAM);
+        CHECK(fp_op_tree_tv(3, 2, loop, nullptr, &t) == FP_EPARAM);
+        CHECK(fp_op_tree_tv(3, 1, nullptr, nullptr, &t) == FP_EINVAL);
+        Arr neg({2}, {1.0, -1.0}), three({3}, {1.0, 1.0, 1.0});
+        CHECK(fp_op_tree_tv(3, 2, ok, &neg.a, &t) == FP_EPARAM);
+        CHECK(fp_op_tree_tv(3, 2, ok, &three.a, &t) == FP_ESHAPE);
+        CHECK(t == nullptr);
+        CHECK_OK(fp_op_tree_tv(3, 2, ok, nullptr, &t));
+        CHECK(fp_op_nparams(t) == 1 && std::string(fp_op_name(t)) == "tree_tv");
+        fp_op_free(t);
+    }
+}
+
 static void test_no_allocation() {
     fp_op *op;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
@@ -1553,6 +1692,28 @@ static void test_no_allocation() {
         CHECK(g_allocs.load() == gbefore);
         fp_workspace_free(gws);
         fp_op_free(gop);
+    }
+
+    // Tree TV: on a tree (heaps) and on a path (deque), with weight gradients.
+    for (int kind : {0, 1}) {
+        const std::vector<int64_t> edges = tree_edges(40, kind, 0, 6);
+        Arr wa({39}, Vec(39, 0.7));
+        fp_op *top;
+        CHECK_OK(fp_op_tree_tv(40, 39, edges.data(), &wa.a, &top));
+        Arr txa({64, 40}, randn(2560)), tza({64, 40}), tga({64, 40}, randn(2560)), tgx({64, 40}), tpa({39});
+        fp_options to = opts(-1, 4, 1);
+        fp_workspace *tws;
+        CHECK_OK(fp_workspace_create(top, &txa.a, &to, &tws));
+        CHECK_OK(fp_prox(top, 0.5, &txa.a, &tza.a, &to, tws, nullptr));
+        const long tbefore = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_prox(top, 0.5, &txa.a, &tza.a, &to, tws, nullptr));
+            CHECK_OK(fp_jvp(top, tws, &txa.a, 0.1, &tpa.a, &tgx.a));
+            CHECK_OK(fp_vjp(top, tws, &tga.a, &tgx.a, &gg, &tpa.a));
+        }
+        CHECK(g_allocs.load() == tbefore);
+        fp_workspace_free(tws);
+        fp_op_free(top);
     }
 }
 
@@ -1669,6 +1830,7 @@ int main() {
     test_tv_aniso();
     test_tv_iso();
     test_graph_tv();
+    test_tree_tv();
     test_nonconvex();
     test_kinks();
     test_no_allocation();

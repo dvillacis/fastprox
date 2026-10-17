@@ -32,7 +32,7 @@ __version__ = _C.version()
 __all__ = [
     "Info", "IterInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
-    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso", "GraphTV", "graph_tv",
+    "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso", "GraphTV", "graph_tv", "TreeTV", "tree_tv",
     "L0", "Lq", "SCAD", "MCP", "LogPenalty", "hard_threshold", "lq", "scad", "mcp", "prox_log",
     "soft_threshold", "elastic_net", "huber", "group_soft_threshold", "prox_l2",
     "project_box", "project_nonneg", "project_l2_ball", "project_simplex",
@@ -765,6 +765,8 @@ class GraphTV(_ImageOperator):
     starts have no effect. ``jvp`` and ``vjp`` are exact (averages over the
     regions where z is constant). Parameters: weights."""
 
+    _make = staticmethod(_C.graph_tv)
+
     def __init__(self, n, edges, weights=None):
         e = np.ascontiguousarray(edges, dtype=np.int64)
         if e.size and (e.ndim != 2 or e.shape[1] != 2):
@@ -772,7 +774,7 @@ class GraphTV(_ImageOperator):
         w = _vec(weights)
         if w is not None and w.size == 0 and e.size == 0:
             w = None  # no edges: nothing to weigh
-        super().__init__(_C.graph_tv(int(n), e.reshape(-1), w), 1)
+        super().__init__(self._make(int(n), e.reshape(-1), w), 1)
         self.n = int(n)
         self.edges = e.reshape(-1, 2)
         self._w = np.ones(1) if w is None else w
@@ -793,6 +795,19 @@ class GraphTV(_ImageOperator):
               warm_start=None, ctx=None, warm=False):
         return super().solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
                              max_iter=max_iter, warm_start=warm_start, ctx=ctx, warm=warm)
+
+
+class TreeTV(GraphTV):
+    """Total variation on a tree or forest, on the last axis (length ``n``)
+    and batched over the others: :class:`GraphTV`'s penalty for ``edges``
+    that form a forest (no cycles or repeated edges, any order and
+    orientation; a chain is a tree). By dynamic programming (Kolmogorov, Pock
+    and Rolinek), O(n log n) and exact up to rounding; ``tol`` and
+    ``max_iter`` are ignored and ``info.iters`` is 1. ``info.gap``,
+    ``info.dual`` and the derivatives are those of :class:`GraphTV`.
+    Parameters: weights."""
+
+    _make = staticmethod(_C.tree_tv)
 
 
 class TVIso(_ImageOperator):
@@ -1064,6 +1079,15 @@ def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=0.0, max_iter=100
     x = np.asarray(x)
     return GraphTV(x.shape[-1] if n is None else n, edges, weights).solve(
         x, gamma, out=out, threads=threads, copy=copy, tol=tol, max_iter=max_iter)
+
+
+def tree_tv(x, edges, gamma=1.0, *, n=None, weights=None, out=None, threads=0, copy=False):
+    """prox of gamma * sum_e w_e |z_u - z_v| over ``edges`` (pairs (u, v))
+    that form a forest, on the last axis. Returns ``(z, info)`` as
+    :func:`tv_aniso`."""
+    x = np.asarray(x)
+    return TreeTV(x.shape[-1] if n is None else n, edges, weights).solve(
+        x, gamma, out=out, threads=threads, copy=copy)
 
 
 def hard_threshold(x, lam=1.0, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,

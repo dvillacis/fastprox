@@ -73,6 +73,9 @@ fp_status make_tv_iso(int ndim, Vec w, fp_op **out);
 // graph_tv.cpp: edges holds 2m node indices (u_0, v_0, u_1, v_1, ...).
 fp_status make_graph_tv(int64_t n, int64_t m, const int64_t *edges, Vec w, fp_op **out);
 
+// tree_tv.cpp: as make_graph_tv; FP_EPARAM unless the edges form a forest.
+fp_status make_tree_tv(int64_t n, int64_t m, const int64_t *edges, Vec w, fp_op **out);
+
 inline bool finite_nonneg(double v) noexcept { return v >= 0.0 && v <= 1.7976931348623157e308; }
 
 }  // namespace fp

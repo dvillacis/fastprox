@@ -56,6 +56,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
 | Graph TV (*since 0.3*) | Σ_e w_e \|z_u − z_v\| over the edges e = (u, v) of a graph, on the last axis | `fp_op_graph_tv(n, m, edges, w)` | `GraphTV(n, edges, weights)`, `graph_tv` | w (scalar or one per edge) |
+| Tree TV (*since 0.3*) | as graph TV, for edges that form a forest (a tree, a path) | `fp_op_tree_tv(n, m, edges, w)` | `TreeTV(n, edges, weights)`, `tree_tv` | w (scalar or one per edge) |
 
 Notes:
 
@@ -313,9 +314,39 @@ signal, for any thread count; threads go to the batch.
   γ; on large grids at large γ each round re-routes flow through the flat
   regions. On 4-neighbour grids, where it is the same problem, `TVAniso` is
   faster at moderate accuracy, and exact graph TV is comparable with it at a
-  gap tolerance of 1e-10 (see docs/benchmarks.md).
+  gap tolerance of 1e-10 (see docs/benchmarks.md). For a forest, `TreeTV`
+  is exact in one pass and faster.
 
-### Derivatives at kinks
+### Tree TV (*since 0.3*)
+
+`TreeTV` takes graph TV's arguments and conventions (last axis, edges as
+pairs, weights NULL, one or one per edge) for edges that form a forest: no
+cycles and no repeated edges, otherwise the constructor fails with
+`FP_EPARAM`. Edges may come in any order and orientation, and node labels in
+any order; a chain is a tree, so a signal along a curve or a path through a
+graph can be given as it is. In Python `TreeTV` is a subclass of `GraphTV`.
+
+- **Algorithm.** Dynamic programming (Kolmogorov, Pock and Rolínek, SIAM J.
+  Imaging Sci. 9, 2016, Algorithm 2 and Section 4.2). Each tree is rooted and
+  visited from the leaves up; at each node the derivative of the best cost of
+  its subtree is a piecewise linear function, held as its outer pieces and a
+  set of breakpoints, which is clipped to [−γw_e, γw_e] and passed to the
+  parent. The breakpoints sit in two pairing heaps, one for each end:
+  O(n log n). When every tree is a path the breakpoints form a sorted deque,
+  O(n) (Section 4.1). Then each node takes its parent's value clipped to its
+  own interval, on the way down.
+- **Exactness.** Exact up to rounding: the values are recomputed as the means
+  of the regions found, as in the derivative formula. `tol`, `max_iter` and
+  warm starts have no effect; `fp_info.iters` is 1.
+- **Certificate and derivatives** are graph TV's: on a tree the dual flow is
+  determined by z (the flow above a node is the sum of x − z over its
+  subtree), `fp_info.gap` is the duality gap with it, the workspace dual is
+  q = Dᵀf, and the JVP and VJP average over the regions where z is constant.
+- **Cost.** On 10⁶ nodes 70–190 ms for random trees and 35–75 ms for a comb
+  spanning tree of a 1000² image, 4–8× faster than graph TV on the same
+  trees; 22–27 ms on a path, 3.5–4× the time of `TV1D` on the ordered signal
+  (see docs/benchmarks.md).
+
 
 Every operator is piecewise smooth. At a point where two pieces meet,
 `fp_jvp` and `fp_vjp` use the Jacobian of one of them, chosen as follows:
