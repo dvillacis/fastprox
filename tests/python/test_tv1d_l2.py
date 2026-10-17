@@ -60,8 +60,11 @@ def test_gap_and_optimality(n, kind):
         u, wdz = dual(x, z, w)
         s = np.linalg.norm(wdz)
         # The dual point is feasible and certifies z: zero gap to rounding.
+        # Without FMA contraction (x86-64 builds) the dual taken from x - z
+        # carries about 20 eps |x| per entry at small gamma, the cancellation
+        # in x - z: up to 6e-13 relative on the walk at n = 1e5, 2e-14 with FMA.
         assert np.linalg.norm(u) <= g * (1 + 1e-9)
-        assert g * s - wdz @ u <= 1e-12 * (1 + g * s)
+        assert g * s - wdz @ u <= 4e-12 * (1 + g * s)
         # Stationarity: x - z = gamma (W D)^T W D z / s, i.e. u = gamma W D z / s.
         # The right side multiplies the rounding of z by gamma / s.
         np.testing.assert_allclose(u, g * wdz / s, rtol=0,
