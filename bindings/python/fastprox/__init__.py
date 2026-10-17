@@ -124,6 +124,22 @@ class Context:
         self.info = None
         self.deriv = None  # (residual, iterations) of the last iterative derivative solve
 
+    def jacobian_diag(self, branch=None, kink_tol=0.0):
+        """Diagonal of the Jacobian dz/dx at the saved point, for elementwise
+        operators (since 0.2): ``jvp(ctx, dx=ones)``, with ``branch`` and
+        ``kink_tol`` as in :meth:`Operator.jvp`, so at a kink it is the
+        chosen piece's slope. For the nonconvex maps an entry reads off its
+        SCD subspace: 0 where the entry is fixed at zero, 1 on a piece
+        without curvature (the identity, or soft's shift), and otherwise
+        the slope of the concave branch, b / (b - gamma w) for MCP. After
+        ``prox_conj`` it is the diagonal of the conjugate prox's Jacobian.
+        Other operators raise ValueError: their Jacobian is not diagonal."""
+        if not self.op._elementwise:
+            raise ValueError(f"{type(self.op).__name__} is not elementwise: its Jacobian is not "
+                             "diagonal; use jvp or vjp")
+        return self.op.jvp(self, np.ones(self.shape, self.dtype), branch=branch,
+                           kink_tol=kink_tol)
+
     def kinks(self, tol=0.0):
         """Kink codes of the saved point, an int8 array of its shape (since
         0.2; soft thresholding, l1 over a box, SCAD and MCP): 0 away from a
@@ -203,6 +219,7 @@ class Operator:
     """
 
     _layout: list = []
+    _elementwise = False  # the C operator acts entry by entry (diagonal Jacobian)
 
     def __init__(self, handle):
         self._op = handle
@@ -312,6 +329,8 @@ class Soft(Operator):
     """g(z) = lam * sum_i w_i |z_i| (soft thresholding). Parameters: weights
     (scalar when not given); ``grads.lam`` is also provided."""
 
+    _elementwise = True
+
     def __init__(self, lam=1.0, weights=None):
         w = _vec(weights)
         super().__init__(_C.soft(float(lam), w))
@@ -328,6 +347,8 @@ class Soft(Operator):
 class ElasticNet(Operator):
     """g(z) = l1 ||z||_1 + (l2/2) ||z||^2. Parameters: l1, l2."""
 
+    _elementwise = True
+
     _layout = [("l1", 1, True), ("l2", 1, True)]
 
     def __init__(self, l1=1.0, l2=1.0):
@@ -337,6 +358,8 @@ class ElasticNet(Operator):
 class Huber(Operator):
     """g(z) = lam * sum_i h_delta(z_i), h_delta(t) = t^2/(2 delta) for
     |t| <= delta and |t| - delta/2 otherwise. Parameters: lam, delta."""
+
+    _elementwise = True
 
     _layout = [("lam", 1, True), ("delta", 1, True)]
 
@@ -395,6 +418,8 @@ class Box(Operator):
     """Projection onto lower <= z <= upper (scalars or per-entry along the
     axis; infinities allowed). Parameters: lower, upper."""
 
+    _elementwise = True
+
     def __init__(self, lower=-np.inf, upper=np.inf):
         lo = np.atleast_1d(np.asarray(lower, np.float64))
         hi = np.atleast_1d(np.asarray(upper, np.float64))
@@ -406,6 +431,8 @@ class Box(Operator):
 class NonNeg(Operator):
     """Projection onto the nonnegative orthant."""
 
+    _elementwise = True
+
     def __init__(self):
         super().__init__(_C.nonneg())
 
@@ -413,6 +440,8 @@ class NonNeg(Operator):
 class LogBarrier(Operator):
     """g(z) = -lam * sum_i log z_i, lam > 0: z = (x + sqrt(x^2 + 4 gamma lam)) / 2
     (Beck, Lemma 6.5). Parameters: lam."""
+
+    _elementwise = True
 
     _layout = [("lam", 1, True)]
 
@@ -425,6 +454,8 @@ class L1Box(Operator):
     z = clip(soft(x, gamma lam w), lower, upper) (Beck, Example 6.23). The
     weights and bounds are scalars or one entry per element along the axis.
     Parameters: weights, lower, upper; ``grads.lam`` is also provided."""
+
+    _elementwise = True
 
     def __init__(self, lam=1.0, lower=-np.inf, upper=np.inf, weights=None):
         w = _vec(weights)
@@ -758,6 +789,8 @@ class _Pointwise(Operator):
     set-valued; with ``keep=True``, ``ctx.info.ties`` counts the entries that
     sat on a tie. ``prox_conj`` is the Moreau formula y - sigma prox(y/sigma),
     not the prox of the conjugate, for these nonconvex functions."""
+
+    _elementwise = True
 
     def prox(self, x, gamma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
              copy=False, tie="nonzero"):

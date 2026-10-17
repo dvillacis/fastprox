@@ -344,6 +344,13 @@ SCD subspaces of each entry:
 - In Python: `ctx.kinks(tol)` returns the mask, and `jvp` and `vjp` take
   `branch=` (an array or scalar of −1, 0, 1) and `kink_tol=`, for that call
   only.
+- `ctx.jacobian_diag(branch=None, kink_tol=0.0)` (Python) is the diagonal of
+  dz/dx for every elementwise operator, `jvp(ctx, dx=ones)` under its own
+  name and honouring the override. For the nonconvex maps it reads off each
+  entry's SCD subspace for a semismooth* Newton step: 0 where the entry is
+  fixed at zero, 1 on a piece without curvature, and otherwise the slope of
+  the concave branch (b/(b − γwᵢ) for MCP). Other operators raise
+  `ValueError`, since their Jacobian is not diagonal.
 
 ```python
 op = fp.MCP(0.5, 3.0)
@@ -352,6 +359,7 @@ k = ctx.kinks(1e-8)                                   # 1: |x| = 0.4, 2: |x| = 1
 dx = np.ones_like(x)
 up = op.jvp(ctx, dx, branch=1, kink_tol=1e-8)         # pieces on the x + eps side
 dn = op.jvp(ctx, dx, branch=-1, kink_tol=1e-8)        # and on the x - eps side
+d = ctx.jacobian_diag(branch=1, kink_tol=1e-8)        # the same as up here, dx being ones
 ```
 
 ## C API

@@ -177,3 +177,20 @@ def test_threads_float32_and_errors():
             c2.kinks()
         with pytest.raises(ValueError):
             other.jvp(c2, x, branch=1)
+
+
+def test_jacobian_diag_reads_the_scd_subspaces():
+    """MCP: 0 on the thresholded piece, b / (b - gamma w) on the concave one,
+    1 on the identity; at a kink the branch override picks the side."""
+    op = fp.MCP(0.5, 3.0, W)
+    c = GAMMA * W * 0.5  # gamma w lambda
+    x = np.stack([0.5 * c, 0.5 * (c + 1.5), np.full(6, 2.0), c])
+    _, ctx = op.prox(x, GAMMA, keep=True)
+    d = ctx.jacobian_diag()
+    slope = 3.0 / (3.0 - GAMMA * W)
+    np.testing.assert_array_equal(d[0], 0.0)
+    np.testing.assert_allclose(d[1], slope, rtol=1e-15)
+    np.testing.assert_array_equal(d[2], 1.0)
+    np.testing.assert_array_equal(d[3], 0.0)  # the default rule at |x| = gamma w lambda
+    np.testing.assert_allclose(ctx.jacobian_diag(branch=1)[3], slope, rtol=1e-15)
+    np.testing.assert_array_equal(ctx.jacobian_diag(branch=-1)[3], 0.0)
