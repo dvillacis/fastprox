@@ -202,6 +202,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.dparams.resize(static_cast<size_t>(P) + 1);
             w.deriv_res.resize(static_cast<size_t>(B));
             w.deriv_its.resize(static_cast<size_t>(B));
+            if (op.has_branches()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
         }
         return FP_OK;
     }
@@ -216,7 +217,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.zsave.resize(bytes / sizeof(double) + 1);
             w.code.resize(static_cast<size_t>(w.numel) + 1);
         }
-        if (elem && op.has_kinks()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
+        if (op.has_branches()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
+        if (!elem && op.has_branches()) w.code_default.resize(static_cast<size_t>(w.numel) + 1);
         const int64_t P = op.nparams();
         const int64_t units = elem ? ceil_div(w.numel, kChunk) : w.rows;
         w.nblocks = reduction_blocks(units, P);
@@ -257,6 +259,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if (keep && !ws->keep) return FP_EINVAL;
         ws->valid = false;
         ws->branch_on = false;  // a branch override belongs to the point it was set for
+        ws->override_on = false;
         nt = std::min(nt, ws->nthreads);
     }
 
@@ -404,7 +407,7 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
 // overrides, an elementwise one), and a must be an FP_I8 array of x's shape.
 fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool branch) noexcept {
     if (!ws || !ws->op || !ws->keep || !ws->op->has_kinks()) return FP_EINVAL;
-    if (branch && !ws->op->elementwise()) return FP_EINVAL;
+    if (branch && !ws->op->has_branches()) return FP_EINVAL;
     if (!ws->valid) return FP_EINVAL;
     if (!aa) return FP_OK;
     if (fp_status s = to_arr(aa, *a, true)) return s;
@@ -430,15 +433,99 @@ fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *
     return FP_OK;
 }
 
+// Row and image operators (since 0.3): the saved structure with the override
+// applied, from the saved x, z (and dual), or restored to the prox call's.
+template <class T>
+void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
+    const fp_op &op = *ws.op;
+    const double t = ws.conj ? tol / ws.sigma : tol;
+    if (ws.image_ndim) {
+        const int64_t N = ws.image_numel, B = ws.rows;
+        const int k = ws.image_ndim;
+        std::vector<double> xb(static_cast<size_t>(N)), zb(static_cast<size_t>(N));
+        const int64_t *ishape = ws.shape + (ws.ndim - k);
+        for (int64_t r = 0; r < B; ++r) {
+            const T *xs = ws.xs<T>() + r * N, *zs = ws.zs<T>() + r * N;
+            for (int64_t i = 0; i < N; ++i) {
+                xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
+                zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
+            }
+            const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
+            op.branch_image(ws.image_struct(r), xb.data(), zb.data(), dual, ishape, ws.gamma, t,
+                            side ? side + r * N : nullptr, ws.image_set(0) + image_staging_bytes(N));
+        }
+        return;
+    }
+    const int64_t n = ws.n;
+    if (!ws.override_on) std::memcpy(ws.code_default.data(), ws.code.data(), static_cast<size_t>(ws.numel));
+    else std::memcpy(ws.code.data(), ws.code_default.data(), static_cast<size_t>(ws.numel));
+    if (!side) return;
+    std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
+    for (int64_t r = 0; r < ws.rows; ++r) {
+        const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
+        for (int64_t i = 0; i < n; ++i) {
+            xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
+            zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
+        }
+        op.branch_row(xb.data(), zb.data(), ws.code.data() + r * n, n, ws.gamma, t, side + r * n);
+    }
+}
+
+void restore_structure(fp_workspace &ws) {
+    if (ws.dtype == FP_F32) apply_structure<float>(ws, nullptr, 0.0);
+    else apply_structure<double>(ws, nullptr, 0.0);
+    ws.override_on = false;
+}
+
+// Copies side into the order of the saved structure (rows with the axis
+// last, or images in C order) and applies it.
+fp_status set_structure_branch(fp_workspace &ws, const Arr &a, double tol) {
+    const int8_t *src = reinterpret_cast<const int8_t *>(a.data);
+    int8_t *dst = ws.branch.data();
+    bool ok = true;
+    if (ws.image_ndim) {
+        const int64_t *st[1] = {a.strides};
+        const ImagePlan p = make_image_plan(a.ndim, a.shape, ws.image_ndim, 1, st);
+        for (int64_t r = 0; r < p.images; ++r) {
+            int64_t off[1];
+            p.offsets(r, off);
+            p.for_each(0, [&](int64_t i, int64_t o) {
+                const int8_t v = src[off[0] + o];
+                ok = ok && v >= -1 && v <= 1;
+                dst[r * p.numel + i] = v;
+            });
+        }
+    } else {
+        const int64_t *st[1] = {a.strides};
+        const RowPlan p = make_row_plan(a.ndim, a.shape, ws.axis, 1, st);
+        for (int64_t r = 0; r < p.rows; ++r) {
+            int64_t off[1];
+            p.offsets(r, off);
+            for (int64_t i = 0; i < p.n; ++i) {
+                const int8_t v = src[off[0] + i * p.astride[0]];
+                ok = ok && v >= -1 && v <= 1;
+                dst[r * p.n + i] = v;
+            }
+        }
+    }
+    if (!ok) return FP_EPARAM;
+    if (ws.dtype == FP_F32) apply_structure<float>(ws, dst, tol);
+    else apply_structure<double>(ws, dst, tol);
+    ws.override_on = true;
+    return FP_OK;
+}
+
 fp_status set_branch_impl(fp_workspace *ws, const fp_array *sa, double tol) {
     if (!sa) {
         if (!ws || !ws->op) return FP_EINVAL;
         ws->branch_on = false;
+        if (ws->override_on) restore_structure(*ws);
         return FP_OK;
     }
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr a;
     if (fp_status s = kink_arrays(ws, sa, &a, true)) return s;
+    if (!ws->op->elementwise()) return set_structure_branch(*ws, a, tol);
     // Into the workspace in C order, the order of the saved entries.
     const int64_t *st[1] = {a.strides};
     const ElemPlan p = make_elem_plan(a.ndim, a.shape, ws->axis, false, 1, st);

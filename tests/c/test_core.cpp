@@ -1500,7 +1500,8 @@ static void test_kinks() {
     }
     // 1D, anisotropic and isotropic TV: rows (0, 1) at gamma = 1/2 have the
     // mean as their solution with the dual exactly on its bound, a kink at the
-    // tail of the edge; (0, 3) does not. Branch overrides are elementwise only.
+    // tail of the edge; (0, 3) does not. Branch overrides for 1D and
+    // anisotropic TV (since 0.3).
     {
         Arr xt({2, 2}, {0.0, 1.0, 0.0, 3.0}), zt({2, 2});
         fp_op *tv, *an, *is;
@@ -1519,7 +1520,34 @@ static void test_kinks() {
             CHECK_OK(fp_prox(ops3[j], 0.5, &xt.a, &zt.a, &ot, wt, nullptr));
             CHECK_OK(fp_workspace_kinks(wt, 0.0, &mt.a, &count));
             CHECK(count == 1 && mt.data == std::vector<int8_t>({bit[j], 0, 0, 0}));
-            CHECK(fp_workspace_set_branch(wt, &st.a, 0.0) == FP_EINVAL);
+            if (j == 2) {  // isotropic TV: no branch overrides yet
+                CHECK(fp_workspace_set_branch(wt, &st.a, 0.0) == FP_EINVAL);
+                fp_workspace_free(wt);
+                continue;
+            }
+            // Side -1 joins the kink's edge (the mean of the first row), +1 keeps
+            // it apart (the identity there); NULL and a new prox call restore the
+            // solver's choice.
+            Arr dxt({2, 2}, {1.0, -1.0, 0.5, 0.25}), jt({2, 2}), j0({2, 2});
+            CHECK_OK(fp_jvp(ops3[j], wt, &dxt.a, 0.0, nullptr, &j0.a));
+            for (auto &v : st.data) v = -1;
+            CHECK_OK(fp_workspace_set_branch(wt, &st.a, 0.0));
+            CHECK_OK(fp_jvp(ops3[j], wt, &dxt.a, 0.0, nullptr, &jt.a));
+            CHECK(jt.data[0] == 0.0 && jt.data[1] == 0.0);
+            for (auto &v : st.data) v = 1;
+            CHECK_OK(fp_workspace_set_branch(wt, &st.a, 0.0));
+            CHECK_OK(fp_jvp(ops3[j], wt, &dxt.a, 0.0, nullptr, &jt.a));
+            CHECK(jt.data[0] == 1.0 && jt.data[1] == -1.0);
+            CHECK(jt.data[2] == j0.data[2] && jt.data[3] == j0.data[3]);  // no kink in row 2
+            CHECK_OK(fp_workspace_set_branch(wt, nullptr, 0.0));
+            CHECK_OK(fp_jvp(ops3[j], wt, &dxt.a, 0.0, nullptr, &jt.a));
+            CHECK(jt.data == j0.data);
+            CHECK_OK(fp_workspace_set_branch(wt, &st.a, 0.0));
+            CHECK_OK(fp_prox(ops3[j], 0.5, &xt.a, &zt.a, &ot, wt, nullptr));
+            CHECK_OK(fp_jvp(ops3[j], wt, &dxt.a, 0.0, nullptr, &jt.a));
+            CHECK(jt.data == j0.data);
+            st.data[1] = 2;
+            CHECK(fp_workspace_set_branch(wt, &st.a, 0.0) == FP_EPARAM);
             fp_workspace_free(wt);
         }
         for (fp_op *o3 : ops3) fp_op_free(o3);

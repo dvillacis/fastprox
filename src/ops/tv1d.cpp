@@ -525,6 +525,23 @@ struct TV1D final : RowOp<TV1D> {
         return count;
     }
 
+    // Branch overrides (since 0.3): at a kink (as kink_row), side -1 joins the
+    // edge's two segments and +1 keeps them apart, with the jump's sign that
+    // of its dual: the running sum s_e of x - z is -u_e, negative across a
+    // step up (z = x - D^T u). These are the two pieces that meet there.
+    bool has_branches() const noexcept override { return true; }
+    void branch_row(const double *x, const double *z, uint8_t *code, int64_t n, double gamma, double tol,
+                    const int8_t *side) const noexcept override {
+        double s = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) {
+            s += x[e] - z[e];
+            const double r = gamma * we(e);
+            if (side[e] == 0 || !(r > 0.0) || !(std::fabs(z[e + 1] - z[e]) <= tol) || !(std::fabs(s) >= r - tol))
+                continue;
+            code[e + 1] = side[e] < 0 ? kSame : (s > 0.0 ? kDown : kUp);
+        }
+    }
+
     // The prox of gamma sum_e we[e] |z_{e+1} - z_e| for weights given per call
     // (we[n - 1] = 0 ends the row), as for this operator's own weights.
     int prox_edges(const double *x, double *z, int64_t n, double gamma, const double *we,

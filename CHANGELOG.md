@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Branch overrides for 1D and anisotropic TV (`fp_workspace_set_branch`, `branch=` in Python): at a kink, side −1 joins the edge's two sides and +1 keeps them apart with the sign of its dual, the two pieces of the B-Jacobian there. Each matches the one-sided difference in a direction that keeps it, in x and in γ, and the VJP is its adjoint. Isotropic TV has none yet.
+
 - Kink masks for 1D, anisotropic and isotropic TV (`fp_workspace_kinks`, `ctx.kinks(tol)`): the edges (1D TV: code 1 at the tail; anisotropic TV: bit a for an edge along axis a) and pixels (isotropic TV) where the dual is within `tol` of its bound and the jump or gradient within `tol` of 0, the biactive points where the derivative is set-valued; weights included. Read from the saved solution and dual, the same for any thread count, and checked against the definition recomputed from the returned z and dual. Branch overrides for TV come later (`fp_workspace_set_branch` returns `FP_EINVAL` for them).
 - The ties of ℓ0, ℓq and the log penalty are kinks (code 1): masks and branch overrides, with the zero piece on one side and the nonzero branch on the other, as for SCAD and MCP; for the log penalty with γλ ≤ ε², whose map is continuous, the kink where its branch starts. Each side matches its one-sided difference.
 

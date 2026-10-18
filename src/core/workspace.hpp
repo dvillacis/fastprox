@@ -98,6 +98,12 @@ struct fp_workspace {
     fp::Buffer<int8_t> branch;
     bool branch_on = false;
     double branch_tol = 0.0;
+    // Since 0.3, row and image operators apply an override to their saved
+    // structure instead: rows keep the codes of the prox call in code_default;
+    // images rebuild their structure. override_on: the saved structure holds
+    // an override (cleared by the next prox call).
+    fp::Buffer<uint8_t> code_default;
+    bool override_on = false;
 
     // State of the last prox call.
     bool valid = false;

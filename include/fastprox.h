@@ -391,15 +391,18 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  * kink into *count (may be NULL).
  * The mask is the same for any thread count.
  *
- * fp_workspace_set_branch (elementwise operators only; FP_EINVAL for the
- * TV operators) chooses, for the entries at a kink (with its own
+ * fp_workspace_set_branch (elementwise operators, and since 0.3 1D and
+ * anisotropic TV; FP_EINVAL for isotropic TV) chooses, for the entries at a
+ * kink (with its own
  * tol), which piece fp_jvp and fp_vjp differentiate: side (FP_I8, the shape
  * of x, values -1, 0, +1) picks the piece on the x - eps side (-1) or the
  * x + eps side (+1) of the breakpoint, with its formula taken at x; 0, and
  * every entry not at a kink, keeps the default rule (docs/api.md,
  * "Derivatives at kinks"). So side +1 gives the derivative of the
  * one-sided difference (prox(x + h e_i) - prox(x)) / h, -1 that from below:
- * the elements of the B-Jacobian. It applies to the fp_jvp and fp_vjp calls
+ * the elements of the B-Jacobian. For 1D and anisotropic TV, side -1 at the
+ * tail of a kink's edge joins its two sides and +1 keeps them apart, the jump
+ * taking the sign of the edge's dual. It applies to the fp_jvp and fp_vjp calls
  * on this workspace until the next prox call or fp_workspace_set_branch(ws,
  * NULL, 0). */
 FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,
