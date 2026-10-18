@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/deepinv.md`: `fastprox.torch.tv_iso`/`tv_aniso` in place of DeepInverse's `TVDenoiser`/`TVL1Denoiser`, with the map between their arguments (per-sample steps, stopping, warm starts, gradients) and the differences to expect, checked by `examples/deepinv_tv.py` (needs DeepInverse; it says so and stops without it).
+- `bench/compare_deepinv.py` takes `aniso` to compare `tv_aniso` with `TVL1Denoiser`: on 8 × 256² images on an Apple M5 Pro, 2.2–12× faster on MPS to the same accuracy, with a backward of 45–52 ms against 630 ms for 400 unrolled iterations (docs/benchmarks.md).
+
 ### Changed
 
 - Isotropic TV's derivatives stop their conjugate gradients, by default, at the relative error of z that the prox's gap certifies, √(2 gap)/‖x‖ (at most √tol after a solve to `tol`, and no tighter than 1e-10, or 100 ε on the device), instead of a fixed 1e-10 (100 ε in float32 on the device). Residuals below √tol did not change the gradient, whose error after a solve to `tol` is 50–100 √tol, and the C kernel takes 2–5× fewer iterations. A fixed tolerance is still available: `tol` in `TVIso.jvp`/`vjp` (default now `None`), `deriv_tol` in `fastprox.torch.tv_iso` and `fastprox.jax.tv_iso`, and `fp_workspace_set_deriv_tol`, which now takes 0 for the default (its new initial value).

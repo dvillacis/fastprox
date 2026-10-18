@@ -71,6 +71,7 @@ which entries sit at a breakpoint, and their derivatives can be taken on either 
 - [API reference](https://github.com/dvillacis/fastprox/blob/master/docs/api.md) (C and Python)
 - [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): denoising, image denoising, proximal gradient, sparse recovery, group sparsity, the weighted graphical lasso, derivatives, bilevel learning, PyTorch and JAX
 - [Benchmarks](https://github.com/dvillacis/fastprox/blob/master/docs/benchmarks.md) against proxTV and Condat's C code
+- [Using fastprox in place of DeepInverse's TV denoisers](https://github.com/dvillacis/fastprox/blob/master/docs/deepinv.md)
 - [Design specification](https://github.com/dvillacis/fastprox/blob/master/docs/spec.md)
 - [Roadmap](https://github.com/dvillacis/fastprox/blob/master/ROADMAP.md) and [changelog](https://github.com/dvillacis/fastprox/blob/master/CHANGELOG.md)
 

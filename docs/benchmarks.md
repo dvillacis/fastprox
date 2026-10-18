@@ -1212,3 +1212,41 @@ that are nearly flat at a loose tolerance. Flat pixels are now read off the
 dual (‖u_p‖ < γ(1 − δ)), with the curvature capped at the level of the
 certified error (CHANGELOG): 1.9–10× more accurate, at 1.2–4.7× the
 backward time.
+
+## 2026-10-18, Apple M5 Pro: anisotropic TV against DeepInverse
+
+`bench/compare_deepinv.py 256 8 aniso` against DeepInverse 0.4.2's
+`TVL1Denoiser`, `TVDenoiser`'s method with the dual clamped per component,
+which solves the problem of `TVAniso` (they agree to 4e-14 run to
+convergence). Same images, γ and reference (the C kernel in float64 to a gap
+of 1e-13); fastprox's device path is `fastprox.torch.tv_aniso`, a plain dual
+method (the C kernel's exact 1D steps and polish stay on the CPU).
+
+**Time to reach an error (ms):**
+
+| Error | DeepInverse, CPU | fastprox device, CPU | DeepInverse, MPS | fastprox device, MPS | C via host (MPS tensors) |
+| --- | --- | --- | --- | --- | --- |
+| 1e-2 | 138 (100 it) | 17 (tol 1e-3) | 150 | 13 | 42 (tol 1e-4) |
+| 1e-3 | 260 (200 it) | 183 (tol 1e-5) | 299 | 122 | 138 (tol 1e-6) |
+| 1e-4 | 542 (400 it) | 394 (tol 1e-6) | 598 | 267 | 138 (tol 1e-6) |
+
+DeepInverse's defaults reach 5.9e-6 in 825 ms (CPU) and 893 ms (MPS).
+
+**Backward** (MPS):
+
+| Method | backward | memory kept | gradient error |
+| --- | --- | --- | --- |
+| DeepInverse, 100 iterations | 160 ms | 398 MiB | 3.7 |
+| DeepInverse, 200 iterations | 316 ms | 798 MiB | 1.2 |
+| DeepInverse, 400 iterations | 630 ms | 1598 MiB | 0.16 |
+| fastprox, tol 1e-4 | 67 ms | 10 MiB | 0.56 |
+| fastprox, tol 1e-6 | 45 ms | 10 MiB | 0.099 |
+| fastprox, tol 1e-7 | 52 ms | 10 MiB | 0.039 |
+
+The device path is 2.2–12× faster than DeepInverse on MPS and 1.4–8× on
+the CPU to the same accuracy, so the faster anisotropic device solver of
+ROADMAP.md is not needed to beat it; the C kernel through the host is 2×
+faster than the device path at 1e-4. The anisotropic gradient is exact in
+float64 once the dual identifies the regions (from a gap tolerance of 1e-8
+on 128² images); in float32 its error is 0.04 here at 1e-7, still 4× below
+that of 400 unrolled iterations, with 1/160 of the memory.
