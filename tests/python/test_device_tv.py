@@ -209,8 +209,9 @@ def test_jacobi_preconditioner(fw, shape, w):
         import jax.numpy as jnp
         import fastprox._tv_jax as J
         wj = jnp.asarray(w)
-        z, u, gap, _, _ = J.solve(jnp.asarray(x), 0.3, wj, jnp.zeros((len(w),) + shape), True, 1e-8, 10 ** 5)
-        ops, n, h, R = J._structure(jnp.asarray(x), z, u, gap, 0.3, wj, True)
+        g = jnp.full((shape[0],), 0.3)
+        z, u, gap, _, _ = J.solve(jnp.asarray(x), g, wj, jnp.zeros((len(w),) + shape), True, 1e-8, 10 ** 5)
+        ops, n, h, R = J._structure(jnp.asarray(x), z, u, gap, g, wj, True)
         dinv = np.asarray(J._jacobi(wj, n, h, R, jnp.float64))
         K = lambda e: np.asarray(R.sum(R.spread(jnp.asarray(e)) + ops.Gt(J._H(n, h, ops.G(R.spread(jnp.asarray(e)))))))
         end = np.asarray(R.end)
@@ -305,6 +306,74 @@ def test_errors(fw):
         tv(fw.arr(np.zeros((4, 4))), 0.5, warm_start=np.zeros((2, 4, 5)))
     with pytest.raises(TypeError):
         tv(fw.arr(np.zeros((4, 4)), np.int32), 0.5)
+    with pytest.raises(ValueError):  # gamma must broadcast to the batch shape (3,)
+        tv(fw.arr(np.zeros((3, 4, 4))), fw.arr([0.1, 0.2]))
+    if fw.name == "torch":  # values are checked where they are concrete
+        with pytest.raises(ValueError):
+            tv(fw.arr(np.zeros((2, 4, 4))), fw.arr([0.1, -0.2]))
+
+
+@pytest.mark.parametrize("iso", [True, False])
+def test_gamma_per_image(fw, iso):
+    """One step per image, as DeepInverse's denoisers take one sigma per
+    sample: each image's result, gap and gradients are those of a call with
+    its own scalar step, and a step of shape (B, 1) broadcasts over the
+    channels of a (B, C, H, W) batch, its gradient summed over them."""
+    x = images((2, 3, 10, 11), 12)  # B = 2, C = 3
+    g = np.array([[0.15], [0.4]])
+    c = np.random.default_rng(13).normal(size=x.shape)
+    tv = fw.tv(iso)
+    kw = dict(tol=1e-12, max_iter=10 ** 6)
+    if fw.name == "torch":
+        torch = fw.mod
+        xt = torch.tensor(x, requires_grad=True)
+        gt = torch.tensor(g, requires_grad=True)
+        z = tv(xt, gt, **kw)
+        z.backward(torch.tensor(c))
+        z, gx, gg = z.detach().numpy(), xt.grad.numpy(), gt.grad.numpy()
+    else:
+        import jax
+        import jax.numpy as jnp
+        f = lambda x, g: jnp.vdot(tv(x, g, **kw), c)
+        z = np.asarray(tv(jnp.asarray(x), jnp.asarray(g), **kw))
+        gx, gg = (np.asarray(v) for v in jax.grad(f, argnums=(0, 1))(jnp.asarray(x), jnp.asarray(g)))
+    assert gg.shape == g.shape
+    for b in range(2):
+        if fw.name == "torch":
+            xb = torch.tensor(x[b], requires_grad=True)
+            gb = torch.tensor(float(g[b, 0]), dtype=torch.float64, requires_grad=True)
+            zb = tv(xb, gb, **kw)
+            zb.backward(torch.tensor(c[b]))
+            zb, gxb, ggb = zb.detach().numpy(), xb.grad.numpy(), gb.grad.item()
+        else:
+            zb = np.asarray(tv(jnp.asarray(x[b]), float(g[b, 0]), **kw))
+            fb = lambda x, g, cb=c[b]: jnp.vdot(tv(x, g, **kw), cb)
+            gxb, ggb = jax.grad(fb, argnums=(0, 1))(jnp.asarray(x[b]), float(g[b, 0]))
+            gxb, ggb = np.asarray(gxb), float(ggb)
+        np.testing.assert_allclose(z[b], zb, atol=1e-10)
+        np.testing.assert_allclose(gx[b], gxb, atol=1e-7 * (1 + np.abs(gxb).max()))
+        assert float(gg[b, 0]) == pytest.approx(ggb, rel=1e-6, abs=1e-8)
+    # a zero step leaves its image unchanged
+    z0 = np.asarray(tv(fw.arr(x), fw.arr([[0.0], [0.4]]), **kw))
+    np.testing.assert_allclose(z0[0], x[0], atol=1e-12)
+    np.testing.assert_allclose(z0[1], z[1], atol=1e-10)
+
+
+@pytest.mark.parametrize("iso", [True, False])
+def test_gamma_per_image_gradcheck(fw, iso):
+    x = images((2, 5, 6), 14)
+    tv = fw.tv(iso)
+    if fw.name == "torch":
+        torch = fw.mod
+        f = lambda x, g: tv(x, g, tol=1e-15, max_iter=10 ** 6)
+        args = (torch.tensor(x, requires_grad=True),
+                torch.tensor([0.3, 0.45], dtype=torch.float64, requires_grad=True))
+        assert torch.autograd.gradcheck(f, args, check_forward_ad=True, atol=1e-5)
+    else:
+        import jax.numpy as jnp
+        from jax.test_util import check_grads
+        check_grads(lambda x, g: tv(x, g, tol=1e-15, max_iter=10 ** 6),
+                    (jnp.asarray(x), jnp.asarray([0.3, 0.45])), order=1, modes=["rev"], eps=1e-6)
 
 
 def _gpu(torch):
