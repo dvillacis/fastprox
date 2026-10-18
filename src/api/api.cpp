@@ -400,10 +400,11 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     return FP_OK;
 }
 
-// The workspace must hold a kept elementwise call of an operator with kinks,
-// and a must be an FP_I8 array of x's shape.
-fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a) noexcept {
-    if (!ws || !ws->op || !ws->keep || !ws->op->elementwise() || !ws->op->has_kinks()) return FP_EINVAL;
+// The workspace must hold a kept call of an operator with kinks (for branch
+// overrides, an elementwise one), and a must be an FP_I8 array of x's shape.
+fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool branch) noexcept {
+    if (!ws || !ws->op || !ws->keep || !ws->op->has_kinks()) return FP_EINVAL;
+    if (branch && !ws->op->elementwise()) return FP_EINVAL;
     if (!ws->valid) return FP_EINVAL;
     if (!aa) return FP_OK;
     if (fp_status s = to_arr(aa, *a, true)) return s;
@@ -416,11 +417,15 @@ fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a) noexce
 fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *count) {
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr m;
-    if (fp_status s = kink_arrays(ws, ma, &m)) return s;
+    if (fp_status s = kink_arrays(ws, ma, &m, false)) return s;
     const Arr *mp = ma ? &m : nullptr;
-    const int64_t c = ws->numel == 0 ? 0
-                      : ws->dtype == FP_F32 ? kinks_driver<float>(*ws->op, *ws, tol, mp)
-                                            : kinks_driver<double>(*ws->op, *ws, tol, mp);
+    const bool f32 = ws->dtype == FP_F32;
+    const fp_op &op = *ws->op;
+    int64_t c = 0;
+    if (ws->numel == 0) c = 0;
+    else if (op.elementwise()) c = f32 ? kinks_driver<float>(op, *ws, tol, mp) : kinks_driver<double>(op, *ws, tol, mp);
+    else if (ws->image_ndim) c = f32 ? image_kinks_driver<float>(op, *ws, tol, mp) : image_kinks_driver<double>(op, *ws, tol, mp);
+    else c = f32 ? row_kinks_driver<float>(op, *ws, tol, mp) : row_kinks_driver<double>(op, *ws, tol, mp);
     if (count) *count = c;
     return FP_OK;
 }
@@ -433,7 +438,7 @@ fp_status set_branch_impl(fp_workspace *ws, const fp_array *sa, double tol) {
     }
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr a;
-    if (fp_status s = kink_arrays(ws, sa, &a)) return s;
+    if (fp_status s = kink_arrays(ws, sa, &a, true)) return s;
     // Into the workspace in C order, the order of the saved entries.
     const int64_t *st[1] = {a.strides};
     const ElemPlan p = make_elem_plan(a.ndim, a.shape, ws->axis, false, 1, st);

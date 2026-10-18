@@ -1477,6 +1477,53 @@ static void test_kinks() {
     }
     CHECK(masks[0] == masks[1]);
     fp_op_free(op);
+
+    // Since 0.3: the tie of l0 at |x| = sqrt(2 gamma lambda) = 1 is a kink, and
+    // its sides are the zero and identity pieces.
+    {
+        fp_op *l0;
+        CHECK_OK(fp_op_l0(0.625, nullptr, &l0));
+        Arr xl({4}, {1.0, -1.0, 0.5, 2.0}), zl({4}), dl({4}), one4({4}, Vec(4, 1.0));
+        fp_options ol = opts(-1, 0, 1);
+        fp_workspace *wl;
+        CHECK_OK(fp_workspace_create(l0, &xl.a, &ol, &wl));
+        CHECK_OK(fp_prox(l0, 0.8, &xl.a, &zl.a, &ol, wl, nullptr));
+        I8 ml({4}, {1}, 4), su({4}, {1}, 4);
+        CHECK_OK(fp_workspace_kinks(wl, 0.0, &ml.a, &count));
+        CHECK(count == 2 && ml.data == std::vector<int8_t>({1, 1, 0, 0}));
+        for (auto &v : su.data) v = 1;
+        CHECK_OK(fp_workspace_set_branch(wl, &su.a, 0.0));
+        CHECK_OK(fp_jvp(l0, wl, &one4.a, 0.0, nullptr, &dl.a));
+        CHECK(dl.data == Vec({1.0, 0.0, 0.0, 1.0}));  // x + eps: the identity at +1, zero at -1
+        fp_workspace_free(wl);
+        fp_op_free(l0);
+    }
+    // 1D, anisotropic and isotropic TV: rows (0, 1) at gamma = 1/2 have the
+    // mean as their solution with the dual exactly on its bound, a kink at the
+    // tail of the edge; (0, 3) does not. Branch overrides are elementwise only.
+    {
+        Arr xt({2, 2}, {0.0, 1.0, 0.0, 3.0}), zt({2, 2});
+        fp_op *tv, *an, *is;
+        CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+        Arr w01({2}, {0.0, 1.0});
+        CHECK_OK(fp_op_tv_aniso(2, &w01.a, &an));
+        CHECK_OK(fp_op_tv_iso(2, &w01.a, &is));
+        const int8_t bit[3] = {1, 2, 1};  // aniso: bit 1 for an edge along axis 1
+        fp_op *ops3[3] = {tv, an, is};
+        for (int j = 0; j < 3; ++j) {
+            fp_options ot = opts(-1, 0, 1);
+            fp_workspace *wt;
+            CHECK_OK(fp_workspace_create(ops3[j], &xt.a, &ot, &wt));
+            I8 mt({2, 2}, {2, 1}, 4), st({2, 2}, {2, 1}, 4);
+            CHECK(fp_workspace_kinks(wt, 0.0, &mt.a, &count) == FP_EINVAL);  // no kept call yet
+            CHECK_OK(fp_prox(ops3[j], 0.5, &xt.a, &zt.a, &ot, wt, nullptr));
+            CHECK_OK(fp_workspace_kinks(wt, 0.0, &mt.a, &count));
+            CHECK(count == 1 && mt.data == std::vector<int8_t>({bit[j], 0, 0, 0}));
+            CHECK(fp_workspace_set_branch(wt, &st.a, 0.0) == FP_EINVAL);
+            fp_workspace_free(wt);
+        }
+        for (fp_op *o3 : ops3) fp_op_free(o3);
+    }
 }
 
 // ---------------------------------------------------------------- graph TV

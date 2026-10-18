@@ -948,6 +948,46 @@ struct TVAniso final : ImageOp<TVAniso> {
         *v.ncomp = nc;
     }
 
+    // ---- kinks (since 0.3) ----------------------------------------------------
+
+    // Bit a of the code at p when the edge (p, p + e_a) is biactive: its jump
+    // within tol of 0 and its 1D dual p_e = -(sum of q_a along the fiber up to
+    // p) within tol of its bound lam_e = gamma w_a beta_e (edges without a
+    // bound are free, never kinks).
+    bool has_kinks() const noexcept override { return true; }
+    int64_t kink_image(const double *, const double *z, const double *q, const int64_t *shape, double gamma,
+                       double tol, int8_t *mask, const int64_t *ms) const noexcept override {
+        const Geom g(k, shape);
+        const int64_t N = g.N;
+        int64_t count = 0;
+        auto at = [&](int64_t p) {
+            int64_t o = 0;
+            for (int a = 0; a < k; ++a) o += g.coord(p, a) * ms[a];
+            return o;
+        };
+        for (int64_t p = 0; p < N; ++p) mask[at(p)] = 0;
+        for (int a = 0; a < k; ++a) {
+            const double lam = gamma * w[a];
+            if (!(lam > 0.0) || g.L[a] == 1) continue;
+            const int64_t s = g.S[a], L = g.L[a];
+            const double *qa = q + a * N, *ba = bw(a, N);
+            for (int64_t st = 0; st < N; ++st) {
+                if (g.coord(st, a) != 0) continue;
+                double acc = 0.0;
+                for (int64_t l = 0; l + 1 < L; ++l) {
+                    const int64_t i = st + l * s;
+                    acc += qa[i];
+                    const double r = ba ? lam * ba[i] : lam;
+                    if (!(r > 0.0) || !(std::fabs(z[i + s] - z[i]) <= tol) || !(std::fabs(acc) >= r - tol)) continue;
+                    int8_t &m = mask[at(i)];
+                    count += m == 0;  // entries, not edges
+                    m = static_cast<int8_t>(m | (1 << a));
+                }
+            }
+        }
+        return count;
+    }
+
     // ---- derivatives (structure saved by prox_img) --------------------------
 
     // dz_C = mean_C(dx) - (1/|C|) sum_a (dgamma w_a + gamma dw_a) S_{C,a}, and

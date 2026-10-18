@@ -372,12 +372,27 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *   SCAD               1: |x| = gamma w lambda, 2: |x| = (1 + gamma w) lambda,
  *                      3: |x| = a lambda
  *   MCP                1: |x| = gamma w lambda, 2: |x| = b lambda
+ *   l0 (since 0.3)     1: the tie |x| = sqrt(2 gamma lambda w)
+ *   lq (since 0.3)     1: the tie |x| = tau
+ *   log (since 0.3)    1: the tie, or |x| = gamma lambda / eps where the map
+ *                      is continuous (gamma lambda <= eps^2)
  * (breakpoints of a map that is the identity, gamma w = 0 or lambda = 0, are
- * not kinks). fp_workspace_kinks writes the codes into mask (FP_I8, the shape
+ * not kinks). Since 0.3 also, from the saved solution and dual:
+ *   1D TV              1 at entry i when the edge (i, i + 1) has no jump
+ *                      (|z_{i+1} - z_i| <= tol) and its dual sum_{j <= i}
+ *                      (x_j - z_j) is within tol of its bound gamma w_i
+ *   anisotropic TV     bit a (value 1 << a) at pixel p for such an edge
+ *                      (p, p + e_a), its 1D dual within tol of gamma w_a beta
+ *   isotropic TV       1 at a pixel with |(W D z)_p| <= tol whose dual is
+ *                      within tol of its sphere, |u_p| >= gamma alpha_p - tol
+ * (edges and pixels of zero bound are free, not kinks).
+ * fp_workspace_kinks writes the codes into mask (FP_I8, the shape
  * of x, any strides; NULL for the count only) and the number of entries at a
- * kink into *count (may be NULL). The mask is the same for any thread count.
+ * kink into *count (may be NULL).
+ * The mask is the same for any thread count.
  *
- * fp_workspace_set_branch chooses, for the entries at a kink (with its own
+ * fp_workspace_set_branch (elementwise operators only; FP_EINVAL for the
+ * TV operators) chooses, for the entries at a kink (with its own
  * tol), which piece fp_jvp and fp_vjp differentiate: side (FP_I8, the shape
  * of x, values -1, 0, +1) picks the piece on the x - eps side (-1) or the
  * x + eps side (+1) of the breakpoint, with its formula taken at x; 0, and

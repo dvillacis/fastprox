@@ -142,11 +142,16 @@ class Context:
 
     def kinks(self, tol=0.0):
         """Kink codes of the saved point, an int8 array of its shape (since
-        0.2; soft thresholding, l1 over a box, SCAD and MCP): 0 away from a
-        kink, k >= 1 within ``tol`` (absolute, in the units of the input) of
-        the operator's breakpoint k, the nearest one (see ``fp_workspace_kinks``
-        in fastprox.h for the numbering). Pass the entries to keep and the
-        side to ``jvp``/``vjp`` as ``branch``."""
+        0.2; soft thresholding, l1 over a box, SCAD and MCP, and since 0.3 the
+        ties of l0, lq and the log penalty): 0 away from a kink, k >= 1 within
+        ``tol`` (absolute, in the units of the input) of the operator's
+        breakpoint k, the nearest one (see ``fp_workspace_kinks`` in
+        fastprox.h for the numbering). Pass the entries to keep and the side
+        to ``jvp``/``vjp`` as ``branch``. Since 0.3 also 1D TV (1 at the tail
+        of an edge whose dual is on its bound with no jump), anisotropic TV
+        (bit a for such an edge along axis a) and isotropic TV (1 at a pixel
+        with no gradient whose dual is on its sphere); their branch
+        overrides are not available yet."""
         mask = np.empty(self.shape, np.int8)
         _C.kinks(self.ws, float(tol), mask)
         return mask
@@ -880,17 +885,17 @@ class TVIso(_ImageOperator):
         return f
 
     def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
-            max_iter=10000):
+            max_iter=10000, branch=None, kink_tol=0.0):
         self._check_ctx(ctx)
         _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-        dz = super().jvp(ctx, dx, dgamma, dparams, out=out)
+        dz = super().jvp(ctx, dx, dgamma, dparams, out=out, branch=branch, kink_tol=kink_tol)
         ctx.deriv = _C.deriv_info(ctx.ws)
         return dz
 
-    def vjp(self, ctx, g, *, out=None, tol=None, max_iter=10000):
+    def vjp(self, ctx, g, *, out=None, tol=None, max_iter=10000, branch=None, kink_tol=0.0):
         self._check_ctx(ctx)
         _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-        res = super().vjp(ctx, g, out=out)
+        res = super().vjp(ctx, g, out=out, branch=branch, kink_tol=kink_tol)
         ctx.deriv = _C.deriv_info(ctx.ws)
         return res
 

@@ -514,6 +514,37 @@ struct TVIso final : ImageOp<TVIso> {
         *s.ncomp = nc;
     }
 
+    // ---- kinks (since 0.3) -----------------------------------------------------------
+
+    // Code 1 at a pixel whose gradient |(W D z)_p| is within tol of 0 while its
+    // dual is within tol of the sphere, |u_p| >= gamma alpha_p - tol (pixels
+    // of zero radius are free, never kinks).
+    bool has_kinks() const noexcept override { return true; }
+    int64_t kink_image(const double *, const double *z, const double *u, const int64_t *shape, double gamma,
+                       double tol, int8_t *mask, const int64_t *ms) const noexcept override {
+        const Geom g(k, shape);
+        const int64_t N = g.N;
+        const double *al = pixel_weights();
+        int64_t count = 0;
+        for (int64_t p = 0; p < N; ++p) {
+            double gg = 0.0, uu = 0.0;
+            for (int a = 0; a < k; ++a) {
+                if (w[a] > 0.0 && g.has_next(p, a)) {
+                    const double t = w[a] * (z[p + g.S[a]] - z[p]);
+                    gg += t * t;
+                }
+                uu += u[a * N + p] * u[a * N + p];
+            }
+            const double r = radius(gamma, al, p, kInf);
+            const int8_t code = r > 0.0 && std::sqrt(gg) <= tol && std::sqrt(uu) >= r - tol;
+            int64_t o = 0;
+            for (int a = 0; a < k; ++a) o += g.coord(p, a) * ms[a];
+            mask[o] = code;
+            count += code;
+        }
+        return count;
+    }
+
     // ---- derivatives ----------------------------------------------------------------
 
     struct Sys {

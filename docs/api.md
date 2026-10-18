@@ -482,7 +482,8 @@ directions that leave the chosen piece. Finite-difference tests therefore
 avoid kinks.
 
 **Kink masks and branch overrides (*since 0.2*).** For soft thresholding,
-ℓ1 over a box, SCAD and MCP, the kinks of a kept prox call can be read and
+ℓ1 over a box, SCAD and MCP (since 0.3 also ℓ0, ℓq and the log penalty, and
+masks for 1D, anisotropic and isotropic TV), the kinks of a kept prox call can be read and
 the piece differentiated there chosen, which gives the other elements of the
 B-subdifferential, for example both elements at a biactive entry, or the
 SCD subspaces of each entry:
@@ -493,8 +494,23 @@ SCD subspaces of each entry:
   rarely occurs in a computed solution, so `tol` is usually set from its
   accuracy. Breakpoints: soft thresholding 1: |x| = γλwᵢ; ℓ1 over a box 1:
   |x| = γλwᵢ, 2: soft(x) = lower, 3: soft(x) = upper; SCAD 1: |x| = γwᵢλ,
-  2: (1 + γwᵢ)λ, 3: aλ; MCP 1: |x| = γwᵢλ, 2: bλ. A map that is the identity
-  (γwᵢ = 0 or λ = 0) has none. The mask is the same for any thread count.
+  2: (1 + γwᵢ)λ, 3: aλ; MCP 1: |x| = γwᵢλ, 2: bλ. Since 0.3 the ties of the
+  nonconvex maps too, each with code 1: ℓ0 at |x| = √(2γλwᵢ), ℓq at its
+  threshold τ, the log penalty at its tie (found by bisection) or, where its
+  map is continuous (γλ ≤ ε²), at |x| = γλ/ε; their two sides are the zero
+  piece and the nonzero branch, taken at max(|x|, τ) where the branch starts
+  at τ. A map that is the identity (γwᵢ = 0 or λ = 0) has none. The mask is
+  the same for any thread count.
+- **TV kinks** (*since 0.3*), from the saved solution z and dual: 1D TV
+  flags (code 1) the entry i at the tail of an edge with no jump,
+  |z_{i+1} − z_i| ≤ `tol`, whose dual Σ_{j≤i}(x_j − z_j) is within `tol` of
+  its bound γwᵢ; anisotropic TV sets bit a (value 2ᵃ) at pixel p for such an
+  edge along axis a (its 1D dual against γwₐβ_e); isotropic TV flags a pixel
+  with ‖(W D z)_p‖ ≤ `tol` whose dual is within `tol` of its sphere,
+  ‖u_p‖ ≥ γα_p − `tol`. These are the biactive edges and pixels of the table
+  above, where the derivative is set-valued (joined or apart). Zero bounds
+  (free edges, zero weights) are never kinks. Branch overrides for TV are not available yet
+  (`fp_workspace_set_branch` returns `FP_EINVAL`).
 - `fp_workspace_set_branch(ws, side, tol)` sets the piece that `fp_jvp` and
   `fp_vjp` differentiate at the entries within `tol` of a breakpoint: side
   −1 or +1 (int8, the shape of x) takes the piece on the x − ε or x + ε side
