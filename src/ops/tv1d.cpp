@@ -407,6 +407,11 @@ struct TV1D final : RowOp<TV1D> {
     template <class T>
     void solve_weighted(const T *x, T *z, int64_t m, double gamma, const double *we, double range,
                         uint8_t *code, void *scr) const noexcept {
+        solve_weighted(x, z, m, gamma, we, wmax, range, code, scr);
+    }
+    template <class T>
+    void solve_weighted(const T *x, T *z, int64_t m, double gamma, const double *we, double wmax,
+                        double range, uint8_t *code, void *scr) const noexcept {
         // Fast path: every radius is at most 2 range, below the smallest
         // clamping bound, and comparable to the data, so the scan reads
         // gamma w_e directly. we[m - 1] is the zero that ends the piece
@@ -492,6 +497,34 @@ struct TV1D final : RowOp<TV1D> {
                     if (s > 0) code[s] = kFree;
                     if (e < n - 1) code[e + 1] = kFree;
                 }
+                s = e + 1;
+            }
+        }
+        return kRowOk;
+    }
+
+    // The prox of gamma sum_e we[e] |z_{e+1} - z_e| for weights given per call
+    // (we[n - 1] = 0 ends the row), as for this operator's own weights.
+    int prox_edges(const double *x, double *z, int64_t n, double gamma, const double *we,
+                   void *scr) const noexcept override {
+        double lo, hi;
+        if (!finite_range(x, n, lo, hi)) {
+            bool nan;
+            if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
+            fill_nan(z, n);
+            return kRowOk;
+        }
+        const double range = hi - lo;
+        double wm = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) wm = std::max(wm, we[e]);
+        if (gamma == 0.0 || range == 0.0 || wm == 0.0) {
+            std::memcpy(z, x, static_cast<size_t>(n) * sizeof(double));
+            return kRowOk;
+        }
+        int64_t s = 0;
+        for (int64_t e = 0; e < n; ++e) {
+            if (e == n - 1 || we[e] == 0.0) {
+                solve_weighted(x + s, z + s, e - s + 1, gamma, we + s, wm, range, nullptr, scr);
                 s = e + 1;
             }
         }

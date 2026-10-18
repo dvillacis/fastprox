@@ -1192,6 +1192,154 @@ static void test_tv_iso() {
     fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- spatial weights
+
+// Isotropic TV with pixel weights (iso) or anisotropic TV with edge weights,
+// for images of shape img: weights of size m per image (pixel weights, or
+// ndim blocks of edge weights).
+static fp_op *make_spatial(bool iso, int k, const std::vector<int64_t> &img, Vec w, const Vec &sw) {
+    fp_op *op = nullptr;
+    Arr wa({static_cast<int64_t>(w.size())}, w);
+    std::vector<int64_t> sh(img);
+    if (!iso) sh.insert(sh.begin(), k);
+    Arr sa(sh, sw);
+    CHECK_OK(iso ? fp_op_tv_iso_weighted(k, &wa.a, &sa.a, &op) : fp_op_tv_aniso_weighted(k, &wa.a, &sa.a, &op));
+    return op;
+}
+
+static void test_tv_spatial_weights() {
+    struct Case {
+        bool iso;
+        int k;
+        std::vector<int64_t> shape;  // batch axes first
+        double gamma;
+        Vec w;
+    };
+    const std::vector<Case> cases = {
+        {true, 2, {2, 9, 11}, 0.4, {1.0, 0.7}}, {true, 3, {4, 5, 6}, 0.3, {1.0}},
+        {false, 2, {2, 9, 11}, 0.4, {1.0, 0.7}}, {false, 3, {4, 5, 6}, 0.3, {1.0, 0.5, 1.2}},
+        {false, 2, {1, 13}, 0.5, {1.0}},
+    };
+    for (const auto &c : cases) {
+        const std::vector<int64_t> img(c.shape.end() - c.k, c.shape.end());
+        int64_t N = 1, Ni = 1;
+        for (int64_t s : c.shape) N *= s;
+        for (int64_t s : img) Ni *= s;
+        const int64_t m = c.iso ? Ni : c.k * Ni;
+        Vec sw(static_cast<size_t>(m));
+        for (int64_t i = 0; i < m; ++i) sw[i] = i % 7 == 3 ? 0.0 : 0.3 + 1.4 * std::fabs(std::sin(1.7 * i));
+        fp_op *op = make_spatial(c.iso, c.k, img, c.w, sw);
+        Arr x(c.shape, image_signal(N));
+
+        // Weights of one equal the unweighted operator bit for bit; the
+        // weighted solve is the same for any thread count.
+        {
+            fp_op *one = make_spatial(c.iso, c.k, img, c.w, Vec(static_cast<size_t>(m), 1.0));
+            fp_op *plain = nullptr;
+            Arr wa({static_cast<int64_t>(c.w.size())}, c.w);
+            CHECK_OK(c.iso ? fp_op_tv_iso(c.k, &wa.a, &plain) : fp_op_tv_aniso(c.k, &wa.a, &plain));
+            fp_options o = opts();
+            o.tol = 1e-10;
+            o.max_iter = 100000;
+            Arr z1(c.shape), z2(c.shape);
+            CHECK_OK(fp_prox(one, c.gamma, &x.a, &z1.a, &o, nullptr, nullptr));
+            CHECK_OK(fp_prox(plain, c.gamma, &x.a, &z2.a, &o, nullptr, nullptr));
+            CHECK(z1.data == z2.data);
+            fp_op_free(one);
+            fp_op_free(plain);
+            std::vector<Vec> outs;
+            for (int t : {1, 2, 8}) {
+                fp_options ot = opts(-1, t);
+                ot.tol = 1e-10;
+                ot.max_iter = 100000;
+                Arr z(c.shape);
+                fp_info info;
+                CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &ot, nullptr, &info));  // FP_ENOTCONV otherwise
+                outs.push_back(z.data);
+            }
+            CHECK(outs[0] == outs[1] && outs[0] == outs[2]);
+        }
+
+        // Derivatives in (x, gamma, w, spatial weights): adjointness and
+        // finite differences (only positive weights move).
+        const int64_t P = c.k + m;
+        fp_options o = opts(-1, 0, 1);
+        o.tol = 1e-14;
+        o.max_iter = 1000000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_workspace_set_deriv_tol(ws, 1e-12, 100000));
+        Arr z(c.shape);
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
+        Arr dx(c.shape, randn(N)), jv(c.shape), g(c.shape, randn(N)), gx(c.shape);
+        Vec wv(static_cast<size_t>(c.k));
+        for (int a = 0; a < c.k; ++a) wv[a] = c.w[c.w.size() == 1 ? 0 : a];
+        Arr dp({P}, randn(P)), gp({P});
+        for (int64_t i = 0; i < m; ++i)
+            if (sw[i] == 0.0) dp.data[c.k + i] = 0.0;
+        const double dg = 0.2;
+        CHECK_OK(fp_jvp(op, ws, &dx.a, dg, &dp.a, &jv.a));
+        double gg = 0;
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
+        double lhs = 0, rhs = gg * dg;
+        for (int64_t i = 0; i < N; ++i) {
+            lhs += g.data[i] * jv.data[i];
+            rhs += gx.data[i] * dx.data[i];
+        }
+        for (int64_t i = 0; i < P; ++i) rhs += gp.data[i] * dp.data[i];
+        CHECK(std::fabs(lhs - rhs) <= 1e-8 * (1 + std::fabs(lhs)));
+        // Anisotropic TV is piecewise affine and solved exactly once polished: a
+        // step of 1e-6 crossed a breakpoint here.
+        const double h = c.iso ? 1e-6 : 1e-8;
+        Vec zs[2];
+        for (int sgn = 0; sgn < 2; ++sgn) {
+            const double e = sgn ? -h : h;
+            Vec wp(wv), sp(sw), xp(x.data);
+            for (int a = 0; a < c.k; ++a) wp[a] += e * dp.data[a];
+            for (int64_t i = 0; i < m; ++i) sp[i] += e * dp.data[c.k + i];
+            for (int64_t i = 0; i < N; ++i) xp[i] += e * dx.data[i];
+            fp_op *op2 = make_spatial(c.iso, c.k, img, wp, sp);
+            Arr xa(c.shape, xp), za(c.shape);
+            fp_options o2 = o;
+            o2.keep_structure = 0;
+            CHECK_OK(fp_prox(op2, c.gamma + e * dg, &xa.a, &za.a, &o2, nullptr, nullptr));
+            zs[sgn] = za.data;
+            fp_op_free(op2);
+        }
+        double err = 0, scale = 1;
+        for (int64_t i = 0; i < N; ++i) {
+            const double fd = (zs[0][i] - zs[1][i]) / (2 * h);
+            err = std::max(err, std::fabs(fd - jv.data[i]));
+            scale = std::max(scale, std::fabs(fd));
+        }
+        CHECK(err <= 1e-4 * scale);
+        if (err > 1e-4 * scale) std::fprintf(stderr, "  spatial iso=%d k=%d fd error %.2e\n", c.iso, c.k, err);
+        fp_workspace_free(ws);
+
+        // Images of another shape are rejected.
+        std::vector<int64_t> other(c.shape);
+        other.back() += 1;
+        Arr xo(other, randn(N / c.shape.back() * other.back())), zo(other);
+        CHECK(fp_prox(op, c.gamma, &xo.a, &zo.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        fp_op_free(op);
+    }
+
+    fp_op *bad = nullptr;
+    Arr pw({4, 5}, Vec(20, 1.0)), pwn({4, 5}, Vec(20, 1.0)), p1({20}, Vec(20, 1.0));
+    pwn.data[7] = -1.0;
+    CHECK(fp_op_tv_iso_weighted(2, nullptr, nullptr, &bad) == FP_EINVAL);
+    CHECK(fp_op_tv_iso_weighted(2, nullptr, &pwn.a, &bad) == FP_EPARAM);
+    CHECK(fp_op_tv_iso_weighted(2, nullptr, &p1.a, &bad) == FP_ESHAPE);
+    CHECK(fp_op_tv_iso_weighted(3, nullptr, &pw.a, &bad) == FP_ESHAPE);
+    Arr ew({3, 4, 5}, Vec(60, 1.0)), ewn({2, 4, 5}, Vec(40, 1.0));
+    ewn.data[11] = NAN;
+    CHECK(fp_op_tv_aniso_weighted(2, nullptr, nullptr, &bad) == FP_EINVAL);
+    CHECK(fp_op_tv_aniso_weighted(2, nullptr, &ewn.a, &bad) == FP_EPARAM);
+    CHECK(fp_op_tv_aniso_weighted(2, nullptr, &ew.a, &bad) == FP_ESHAPE);
+    CHECK(fp_op_tv_aniso_weighted(2, nullptr, &pw.a, &bad) == FP_ESHAPE);
+    CHECK(bad == nullptr);
+}
+
 // ---------------------------------------------------------------- misc
 // ---------------------------------------------------------------- kinks and branch overrides
 
@@ -1647,14 +1795,21 @@ static void test_no_allocation() {
         fp_op_free(op);
     }
 
-    // Anisotropic TV: a single image (threads inside it) and a batch.
+    // Anisotropic TV: a single image (threads inside it) and a batch, with
+    // and without spatial weights.
+    for (int wtd = 0; wtd < 2; ++wtd)
     for (int iso = 0; iso < 2; ++iso)
     for (std::vector<int64_t> shape : {std::vector<int64_t>{120, 130}, std::vector<int64_t>{6, 30, 40}}) {
         fp_op *iop;
-        CHECK_OK(iso ? fp_op_tv_iso(2, nullptr, &iop) : fp_op_tv_aniso(2, nullptr, &iop));
+        const std::vector<int64_t> img(shape.end() - 2, shape.end());
+        const int64_t Ni = img[0] * img[1];
+        Arr pw(img, Vec(static_cast<size_t>(Ni), 0.8)), ew({2, img[0], img[1]}, Vec(static_cast<size_t>(2 * Ni), 0.8));
+        if (wtd) CHECK_OK(iso ? fp_op_tv_iso_weighted(2, nullptr, &pw.a, &iop) : fp_op_tv_aniso_weighted(2, nullptr, &ew.a, &iop));
+        else CHECK_OK(iso ? fp_op_tv_iso(2, nullptr, &iop) : fp_op_tv_aniso(2, nullptr, &iop));
         int64_t N = 1;
         for (int64_t s : shape) N *= s;
-        Arr ix(shape, randn(N)), iz(shape), ig(shape, randn(N)), igx(shape), iq({2});
+        Arr ix(shape, randn(N)), iz(shape), ig(shape, randn(N)), igx(shape),
+            iq({2 + (wtd ? (iso ? Ni : 2 * Ni) : 0)});
         std::vector<int64_t> qs = {2};
         qs.insert(qs.end(), shape.begin(), shape.end());
         Arr dual(qs);
@@ -1837,6 +1992,7 @@ int main() {
     test_batching();
     test_tv_aniso();
     test_tv_iso();
+    test_tv_spatial_weights();
     test_graph_tv();
     test_tree_tv();
     test_nonconvex();

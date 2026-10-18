@@ -1,5 +1,10 @@
 // Isotropic TV of 2D and 3D images: the prox of
-//   gamma sum_p | (w_0 D_0 z, ..., w_{k-1} D_{k-1} z)_p |_2
+//   gamma sum_p alpha_p | (w_0 D_0 z, ..., w_{k-1} D_{k-1} z)_p |_2
+// with axis weights w and, since 0.3, optional pixel weights alpha >= 0
+// (alpha = 1 without them), for which the operator is built for one image
+// shape. The pixel weights enter only the dual bound, |u_p| <= gamma alpha_p
+// (the radius r_p below); everything else is unchanged. With them, a single
+// active axis runs the 2D method rather than the exact 1D TV pass.
 // with forward differences D_a along the last k axes (zero past the last
 // entry), by the fast dual proximal gradient method (FISTA on the dual):
 // A. Beck and M. Teboulle, "Fast gradient-based algorithms for constrained
@@ -73,6 +78,13 @@
 // change it (2 x 128^2 at gamma = 0.1, tol 1e-4 to 1e-10: 34, 172, 545 and
 // about 1900 iterations against 182, 502, 1346 and 3369 to 1e-10).
 //
+// Pixel weights: the radius r_p = gamma alpha_p replaces gamma in the
+// projection, the gap, the flat test and the curvature, and dr_p = dgamma
+// alpha_p + gamma dalpha_p enters the right-hand side as dgamma did (c_p =
+// dr_p n_p); the VJP's gradient in alpha_p is -gamma <(G v)_p, n_p> on
+// non-flat pixels and 0 on flat ones. A pixel with alpha_p = 0 has u_p = 0:
+// no coupling, its jumps are free.
+//
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "core/parallel.hpp"
@@ -101,23 +113,40 @@ constexpr double kDualEta = 1e-9;
 constexpr double kCurvRms = 0.1;
 // The tightest default tolerance of the derivative's conjugate gradients.
 constexpr double kDerivFloor = 1e-10;
+constexpr double kInf = std::numeric_limits<double>::infinity();
 
 struct TVIso final : ImageOp<TVIso> {
     int k;
     double w[3];
     std::unique_ptr<fp_op> tv;  // exact 1D TV, for a single active axis
+    Vec alpha;                  // pixel weights (C order over ashape), or empty
+    int64_t ashape[3] = {1, 1, 1};
 
-    TVIso(int kk, const double *ww, std::unique_ptr<fp_op> t) : k(kk), tv(std::move(t)) {
+    TVIso(int kk, const double *ww, std::unique_ptr<fp_op> t, Vec al = {}, const int64_t *ash = nullptr)
+        : k(kk), tv(std::move(t)), alpha(std::move(al)) {
         for (int a = 0; a < 3; ++a) w[a] = a < k ? ww[a] : 0.0;
+        if (ash)
+            for (int a = 0; a < k; ++a) ashape[a] = ash[a];
     }
 
     const char *name() const noexcept override { return "tv_iso"; }
-    int64_t nparams() const noexcept override { return k; }
+    int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }
     fp_status check_image(const int64_t *shape) const noexcept override {
         double n = 1.0;
         for (int a = 0; a < k; ++a) n *= static_cast<double>(shape[a]);
+        if (!alpha.empty())
+            for (int a = 0; a < k; ++a)
+                if (shape[a] != ashape[a]) return FP_ESHAPE;
         return n < 2147483647.0 ? FP_OK : FP_ESHAPE;  // 32-bit region labels
+    }
+    const double *pixel_weights() const noexcept { return alpha.empty() ? nullptr : alpha.data(); }
+    // The radius gamma alpha_p, capped at bound (gamma = inf with alpha_p = 0 is 0).
+    static double radius(double gamma, const double *al, int64_t p, double bound) noexcept {
+        if (!al) return gamma;
+        if (al[p] == 0.0) return 0.0;
+        const double r = gamma * al[p];
+        return r <= bound ? r : bound;
     }
 
     // prox: d, z (N), u, v (k N), per-row sums; derivatives: the gradient of z
@@ -203,9 +232,10 @@ struct TVIso final : ImageOp<TVIso> {
         }
     }
 
-    double gap(const Geom &g, const ImageCall &c, const double *wa, double gamma, const double *z,
+    double gap(const Geom &g, const ImageCall &c, const double *wa, double gamma, double bound, const double *z,
                const double *u, double *part) const {
         const int64_t N = g.N;
+        const double *al = pixel_weights();
         return row_sum(g, c, part, [&](int64_t r) {
             double s = 0.0;
             grad_rows(g, wa, z, r, [&](int64_t p, const double *gv) {
@@ -214,7 +244,7 @@ struct TVIso final : ImageOp<TVIso> {
                     nn += gv[a] * gv[a];
                     dot += gv[a] * u[a * N + p];
                 }
-                s += gamma * std::sqrt(nn) - dot;
+                s += radius(gamma, al, p, bound) * std::sqrt(nn) - dot;
             });
             return s;
         });
@@ -259,7 +289,7 @@ struct TVIso final : ImageOp<TVIso> {
         if (na == 0) {
             std::memcpy(z, d, static_cast<size_t>(N) * sizeof(double));
             std::fill(q, q + k * N, 0.0);
-        } else if (na == 1) {  // exactly 1D TV along the active axis
+        } else if (na == 1 && alpha.empty()) {  // exactly 1D TV along the active axis
             const int a = act[0];
             const double lam = c.gamma * w[a];
             std::fill(q, q + k * N, 0.0);
@@ -315,7 +345,9 @@ struct TVIso final : ImageOp<TVIso> {
         });
         double gamma = c.gamma * wmax;
         const double bound = 2.0 * imbalance / whmin + std::numeric_limits<double>::min();
-        if (!(gamma <= bound)) gamma = bound;  // also catches gamma * wmax = inf
+        if (!(gamma <= bound) && alpha.empty()) gamma = bound;  // also catches gamma * wmax = inf
+        // With pixel weights each radius gamma alpha_p is capped at bound instead.
+        const double *al = pixel_weights();
         double L2 = 0.0;
         for (int a = 0; a < k; ++a) L2 += 4.0 * wa[a] * wa[a];
         const double tau = 1.0 / L2;
@@ -337,8 +369,9 @@ struct TVIso final : ImageOp<TVIso> {
                     if (wa[a] == 0.0 || !has || !std::isfinite(ua)) ua = 0.0;
                     nn += ua * ua;
                 }
-                if (std::sqrt(nn) > gamma) {  // not nn > gamma^2: gamma may be ~1e300
-                    const double sc = gamma / std::sqrt(nn);
+                const double rp = radius(gamma, al, p, bound);
+                if (std::sqrt(nn) > rp) {  // not nn > rp^2: rp may be ~1e300
+                    const double sc = rp / std::sqrt(nn);
                     for (int a = 0; a < k; ++a) u[a * N + p] *= sc;
                 }
             }
@@ -351,7 +384,7 @@ struct TVIso final : ImageOp<TVIso> {
         });
         auto primal = [&]() {
             divergence(g, c, wa, d, u, z);
-            return gap(g, c, wa, gamma, z, u, part);
+            return gap(g, c, wa, gamma, bound, z, u, part);
         };
         double t = 1.0;
         int it = 0, since = 0, last = 0;
@@ -374,8 +407,8 @@ struct TVIso final : ImageOp<TVIso> {
                         cv[a] = wa[a] != 0.0 ? v[a * N + p] + tau * gv[a] : 0.0;
                         nn += cv[a] * cv[a];
                     }
-                    const double nr = std::sqrt(nn);
-                    const double sc = nr > gamma ? gamma / nr : 1.0;
+                    const double nr = std::sqrt(nn), rp = radius(gamma, al, p, bound);
+                    const double sc = nr > rp ? rp / nr : 1.0;
                     for (int a = 0; a < k; ++a) {
                         const double un = cv[a] * sc;
                         double &ua = u[a * N + p];
@@ -430,7 +463,7 @@ struct TVIso final : ImageOp<TVIso> {
         }
         for (int a = 0; a < k; ++a) wmax = std::max(wmax, wa[a]);
         const double thr = from_dual ? wmax * 64.0 * 2.2e-16 * scale : 0.0;
-        const double in = c.gamma * (1.0 - kDualEta);
+        const double *al = pixel_weights();
         *s.rel = dd > 0.0 ? std::sqrt(2.0 * std::max(c.gap, 0.0) / dd) : 0.0;
         *s.mu = from_dual ? kCurvRms * wmax * std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N)) : 0.0;
         // Union-find over the edges of flat entries, roots at the smallest index.
@@ -456,7 +489,7 @@ struct TVIso final : ImageOp<TVIso> {
             if (from_dual && !flat) {
                 double uu = 0.0;
                 for (int a = 0; a < k; ++a) uu += s.u[a * N + p] * s.u[a * N + p];
-                flat = std::sqrt(uu) < in;
+                flat = std::sqrt(uu) < radius(c.gamma, al, p, kInf) * (1.0 - kDualEta);
             }
             s.flat[p] = flat ? 1 : 0;
             if (!flat || !any) continue;
@@ -488,12 +521,15 @@ struct TVIso final : ImageOp<TVIso> {
         const Geom &g;
         View s;
         double gamma;
+        const double *alpha;  // pixel weights or null
         double wa[3];
         double *gz;   // k N: W D z at each entry
         double *pix;  // N
         double *hbuf; // k N scratch
         int64_t nc;
 
+        // The radius gamma alpha_p of pixel p.
+        double r(int64_t p) const noexcept { return radius(gamma, alpha, p, kInf); }
         // y_p = (G x)_p, the scaled forward differences of the image x.
         void grad(const double *x, double *y) const {
             const int64_t N = g.N;
@@ -524,7 +560,7 @@ struct TVIso final : ImageOp<TVIso> {
                 for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
                 const double nr = std::sqrt(nn);
                 for (int a = 0; a < op.k; ++a) dot += gz[a * N + p] * y[a * N + p];
-                const double h = gamma / std::max(nr, *s.mu);
+                const double h = r(p) / std::max(nr, *s.mu);
                 for (int a = 0; a < op.k; ++a) {
                     const double na = gz[a * N + p] / nr;
                     y[a * N + p] = h * (y[a * N + p] - na * dot / nr);
@@ -541,7 +577,7 @@ struct TVIso final : ImageOp<TVIso> {
                 if (s.flat[p]) continue;
                 double nn = 0.0;
                 for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
-                const double nr = std::sqrt(nn), hs = gamma / std::max(nr, *s.mu);
+                const double nr = std::sqrt(nn), hs = r(p) / std::max(nr, *s.mu);
                 int64_t lab[4];
                 bool has[3];
                 lab[0] = s.label[p];
@@ -630,7 +666,7 @@ struct TVIso final : ImageOp<TVIso> {
     }
 
     Sys system(const char *save, const Geom &g, double gamma, char *work) const {
-        Sys S{*this, g, view(const_cast<char *>(save), g.N), gamma, {0, 0, 0}, nullptr, nullptr, nullptr, 0};
+        Sys S{*this, g, view(const_cast<char *>(save), g.N), gamma, pixel_weights(), {0, 0, 0}, nullptr, nullptr, nullptr, 0};
         for (int a = 0; a < k; ++a) S.wa[a] = (gamma > 0.0 && w[a] > 0.0 && g.L[a] > 1) ? w[a] : 0.0;
         double *base = reinterpret_cast<double *>(work);
         S.gz = base;
@@ -649,7 +685,8 @@ struct TVIso final : ImageOp<TVIso> {
         Sys S = system(save, g, gamma, work);
         double *rhs = S.pix + N, *cb = rhs + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         // rhs = dx + sum_a dw_a (u_a[p] - u_a[p - e_a]) - G_A^T c_A,
-        // c_p = H_p (dW D z)_p + dgamma n_p on non-flat entries.
+        // c_p = H_p (dW D z)_p + dr_p n_p on non-flat entries, with
+        // dr_p = dgamma alpha_p + gamma dalpha_p (dalpha_p = dparams[k + p]).
         for (int64_t p = 0; p < N; ++p) rhs[p] = static_cast<double>(dx[p]);
         if (dparams) {
             for (int a = 0; a < k; ++a) {
@@ -672,7 +709,9 @@ struct TVIso final : ImageOp<TVIso> {
             double nn = 0.0;
             for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
             const double nr = std::sqrt(nn);
-            for (int a = 0; a < k; ++a) cA[a * N + p] += dgamma * S.gz[a * N + p] / nr;
+            double dr = dgamma;
+            if (S.alpha) dr = dgamma * S.alpha[p] + (dparams ? gamma * dparams[k + p] : 0.0);
+            for (int a = 0; a < k; ++a) cA[a * N + p] += dr * S.gz[a * N + p] / nr;
         }
         S.sub_gradT(cA, rhs);  // rhs -= G^T c
         std::fill(cb, cb + S.nc, 0.0);
@@ -697,9 +736,10 @@ struct TVIso final : ImageOp<TVIso> {
             gx[p] = static_cast<T>(vpix[p]);
         }
         // Parameter gradients from v = J^T g:
-        //   d/dw_a:   -<D_a v, u_a> - sum_A [H_p (G v)_p]_a (D_a z)_p
-        //   d/dgamma: -sum_A <(G v)_p, n_p>
-        const int64_t P = k;
+        //   d/dw_a:     -<D_a v, u_a> - sum_A [H_p (G v)_p]_a (D_a z)_p
+        //   d/dgamma:   -sum_A alpha_p <(G v)_p, n_p>
+        //   d/dalpha_p: -gamma <(G v)_p, n_p> on A, 0 elsewhere
+        const int64_t P = nparams();
         double *gv = S.hbuf;
         S.grad(vpix, gv);  // G v
         for (int a = 0; a < k; ++a) {
@@ -716,7 +756,14 @@ struct TVIso final : ImageOp<TVIso> {
             double nn = 0.0;
             for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
             const double nr = std::sqrt(nn);
-            for (int a = 0; a < k; ++a) ggam += gv[a * N + p] * S.gz[a * N + p] / nr;
+            double t = 0.0;
+            for (int a = 0; a < k; ++a) t += gv[a * N + p] * S.gz[a * N + p] / nr;
+            if (S.alpha) {
+                ggam += S.alpha[p] * t;
+                acc[k + p] -= gamma * t;
+            } else {
+                ggam += t;
+            }
         }
         acc[P] -= ggam;
         S.hess(gv);  // H G v
@@ -732,7 +779,7 @@ struct TVIso final : ImageOp<TVIso> {
 
 }  // namespace
 
-fp_status make_tv_iso(int ndim, Vec w, fp_op **out) {
+fp_status make_tv_iso(int ndim, Vec w, fp_op **out, Vec alpha, const int64_t *shape) {
     if (ndim != 2 && ndim != 3) return FP_EPARAM;
     double ww[3] = {1.0, 1.0, 1.0};
     if (w.size() == 1) {
@@ -743,10 +790,17 @@ fp_status make_tv_iso(int ndim, Vec w, fp_op **out) {
     }
     for (int a = 0; a < ndim; ++a)
         if (!finite_nonneg(ww[a])) return FP_EPARAM;
+    if (!alpha.empty()) {
+        double n = 1.0;
+        for (int a = 0; a < ndim; ++a) n *= static_cast<double>(shape[a]);
+        if (!(n < 2147483647.0)) return FP_ESHAPE;  // 32-bit region labels
+        for (double v : alpha)
+            if (!finite_nonneg(v)) return FP_EPARAM;
+    }
     fp_op *t = nullptr;
     if (fp_status s = make_tv1d(Vec{1.0}, FP_TV1D_AUTO, &t)) return s;
     std::unique_ptr<fp_op> tv(t);
-    *out = new TVIso(ndim, ww, std::move(tv));
+    *out = new TVIso(ndim, ww, std::move(tv), std::move(alpha), shape);
     return FP_OK;
 }
 

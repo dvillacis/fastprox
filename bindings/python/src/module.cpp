@@ -26,6 +26,7 @@ namespace {
 using InArr = nb::ndarray<nb::ro, nb::device::cpu>;
 using OutArr = nb::ndarray<nb::device::cpu>;
 using Params = nb::ndarray<nb::ro, const double, nb::ndim<1>, nb::device::cpu>;
+using NdParams = nb::ndarray<nb::ro, const double, nb::device::cpu>;  // e.g. pixel weights
 using IdArr = nb::ndarray<nb::ro, const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
 void check(fp_status s) {
@@ -316,6 +317,16 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv_iso(ndim, pw.get(), o); });
     }, "ndim"_a, "weights"_a.none());
+    m.def("tv_aniso_weighted", [](int ndim, std::optional<Params> w, NdParams beta) {
+        const ParamView pw(w);
+        const fp_array pb = view(beta);
+        return make([&](fp_op **o) { return fp_op_tv_aniso_weighted(ndim, pw.get(), &pb, o); });
+    }, "ndim"_a, "weights"_a.none(), "edge_weights"_a);
+    m.def("tv_iso_weighted", [](int ndim, std::optional<Params> w, NdParams alpha) {
+        const ParamView pw(w);
+        const fp_array pa = view(alpha);
+        return make([&](fp_op **o) { return fp_op_tv_iso_weighted(ndim, pw.get(), &pa, o); });
+    }, "ndim"_a, "weights"_a.none(), "pixel_weights"_a);
     m.def("graph_tv", [](int64_t n, IdArr edges, std::optional<Params> w) {
         const ParamView pw(w);
         const int64_t m = static_cast<int64_t>(edges.shape(0)) / 2;

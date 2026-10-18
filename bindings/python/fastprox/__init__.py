@@ -323,7 +323,8 @@ class Operator:
         if isinstance(dparams, dict):
             parts = []
             for name, length, _ in self._layout:
-                v = np.broadcast_to(np.asarray(dparams.get(name, 0.0), np.float64), (length,))
+                v = np.asarray(dparams.get(name, 0.0), np.float64)
+                v = v.reshape(-1) if v.size == length else np.broadcast_to(v, (length,))
                 parts.append(v)
             return np.concatenate(parts) if parts else np.zeros(0)
         return _vec(dparams)
@@ -741,20 +742,40 @@ class TVAniso(_ImageOperator):
     """Anisotropic total variation of 2D or 3D images, on the last ``ndim``
     axes and batched over the others:
 
-        g(z) = sum_a w_a * (sum of |z_{p + e_a} - z_p| along image axis a)
+        g(z) = sum_a w_a * (sum of beta_{a,p} |z_{p + e_a} - z_p| along image axis a)
 
+    with optional edge weights beta >= 0 (since 0.3; 1 without them) of shape
+    (ndim, *image shape), beta[a][p] weighting the edge from p to its forward
+    neighbour along a (the last entries along a are unused), for spatially
+    varying regularisation; the operator then takes only images of that
+    shape.
     Iterative (accelerated dual block methods with exact 1D TV steps): each
     image stops when its duality gap is at most ``tol * ||x||^2 / 2``.
     ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
     ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
     dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
     the dual of the previous call on that context. Parameters: weights (one
-    per axis, or a scalar for all)."""
+    per axis, or a scalar for all), and edge_weights when given (a gradient of
+    their shape, zero at the unused entries)."""
 
-    def __init__(self, ndim=2, weights=None):
+    def __init__(self, ndim=2, weights=None, edge_weights=None):
         if ndim not in (2, 3):
             raise ValueError("ndim must be 2 or 3")
-        super().__init__(_C.tv_aniso(int(ndim), _vec(weights)), ndim)
+        if edge_weights is None:
+            super().__init__(_C.tv_aniso(int(ndim), _vec(weights)), ndim)
+            return
+        b = np.asarray(edge_weights, np.float64)
+        if b.ndim != ndim + 1 or b.shape[0] != ndim:
+            raise ValueError(f"edge_weights must have shape (ndim, *image shape) with ndim = {ndim}")
+        super().__init__(_C.tv_aniso_weighted(int(ndim), _vec(weights), b), ndim)
+        self.image_shape = b.shape[1:]
+        self._layout = [("weights", self.ndim, False), ("edge_weights", b.size, False)]
+
+    def _fields(self, gp):
+        f = super()._fields(gp)
+        if "edge_weights" in f:
+            f["edge_weights"] = f["edge_weights"].reshape((self.ndim, *self.image_shape))
+        return f
 
 
 class GraphTV(_ImageOperator):
@@ -823,22 +844,40 @@ class TVIso(_ImageOperator):
     """Isotropic total variation of 2D or 3D images, on the last ``ndim`` axes
     and batched over the others:
 
-        g(z) = sum_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
+        g(z) = sum_p alpha_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
 
     with forward differences (zero past the last entry); the weights scale
-    each axis inside the norm (e.g. voxel spacing). Iterative (fast gradient
+    each axis inside the norm (e.g. voxel spacing), and the optional pixel
+    weights alpha >= 0 (since 0.3; 1 without them) each pixel's term, for
+    spatially varying regularisation. With pixel weights the operator takes
+    only images of their shape. Iterative (fast gradient
     projection on the dual), with the gap, warm starts and ``keep`` as in
-    :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has |u_p| <= gamma and
+    :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has |u_p| <= gamma alpha_p and
     z = x - sum_a w_a D_a^T u_a. ``jvp`` and ``vjp`` solve a linear system by
     conjugate gradients to relative residual ``tol`` and record the residual
     and iterations reached in ``ctx.deriv``; by default (``tol=None``) they
     stop at the relative error of z that the prox's gap certifies,
-    sqrt(2 gap) / |x|, and at 1e-10 at the tightest. Parameters: weights."""
+    sqrt(2 gap) / |x|, and at 1e-10 at the tightest. Parameters: weights,
+    and pixel_weights when given (a gradient of their shape)."""
 
-    def __init__(self, ndim=2, weights=None):
+    def __init__(self, ndim=2, weights=None, pixel_weights=None):
         if ndim not in (2, 3):
             raise ValueError("ndim must be 2 or 3")
-        super().__init__(_C.tv_iso(int(ndim), _vec(weights)), ndim)
+        if pixel_weights is None:
+            super().__init__(_C.tv_iso(int(ndim), _vec(weights)), ndim)
+            return
+        a = np.asarray(pixel_weights, np.float64)
+        if a.ndim != ndim:
+            raise ValueError(f"pixel_weights must have ndim = {ndim} axes, the image shape")
+        super().__init__(_C.tv_iso_weighted(int(ndim), _vec(weights), a), ndim)
+        self.image_shape = a.shape
+        self._layout = [("weights", self.ndim, False), ("pixel_weights", a.size, False)]
+
+    def _fields(self, gp):
+        f = super()._fields(gp)
+        if "pixel_weights" in f:
+            f["pixel_weights"] = f["pixel_weights"].reshape(self.image_shape)
+        return f
 
     def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
             max_iter=10000):

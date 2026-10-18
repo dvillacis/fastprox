@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 DIR = pathlib.Path(__file__).parents[2] / "examples"
@@ -68,6 +69,12 @@ def test_weighted_glasso_beats_the_graphical_lasso():
     assert a_extra < g_extra / 2 and a_missed <= g_missed + 2 and m_missed <= a_missed
     assert m_err < a_err < g_err
     assert max(res["kkt"].values()) < 1e-5     # the convex solves are optimal
+
+
+def test_reweighted_tv_reaches_a_stationary_point():
+    tv, tvq, objs, step = _load("reweighted_tv").main()
+    assert np.all(np.diff(objs) <= 1e-9 * np.abs(objs[1:]))  # majorize-minimize: never up
+    assert step < 1e-6 and tvq > tv + 3
 
 
 def test_autodiff_frameworks_learn():
