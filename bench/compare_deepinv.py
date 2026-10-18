@@ -2,6 +2,10 @@
 
   uv run --group interop --with deepinv python bench/compare_deepinv.py [size] [batch] [iso|aniso]
 
+The float64 reference is cached in deepinv_ref_<mode>_<size>_<batch>.npz in
+the working directory (see main), so a machine with few cores can be handed
+one computed elsewhere.
+
 DeepInverse's ``TVDenoiser`` solves the same problem as ``TVIso`` (checked
 here to 1e-12), and ``TVL1Denoiser`` (the same method with the dual clamped
 per component) that of ``TVAniso``: an over-relaxed Chambolle-Pock method
@@ -31,6 +35,7 @@ Reported, on every PyTorch device available:
 
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -110,12 +115,29 @@ def main():
     rng = np.random.default_rng(0)
     x64 = images(size, batch, rng)
     c64 = rng.normal(size=x64.shape)
-    op = Op(2)
-    ref, ctx = op.prox(x64, GAMMA, keep=True, tol=1e-13, max_iter=10 ** 6)
-    if mode == "iso":
-        gref, _ = op.vjp(ctx, c64, tol=1e-10, max_iter=10 ** 5)  # 18 548 iterations here; the default cap is 10 000
+    # The float64 reference depends only on (mode, size, batch): it is read from
+    # deepinv_ref_<mode>_<size>_<batch>.npz in the working directory when that
+    # file exists (computing it takes minutes on two cores, e.g. on Colab), and
+    # written there otherwise.
+    cache = Path(f"deepinv_ref_{mode}_{size}_{batch}.npz")
+    if cache.exists():
+        # The images and cotangent are taken from the file, so that they match
+        # the reference exactly: regenerated elsewhere they can differ in the
+        # last bit (NumPy's normal sampler calls the platform's exp and log).
+        with np.load(cache) as f:
+            ref, gref = f["ref"], f["gref"]
+            assert np.allclose(f["x"], x64, rtol=0, atol=1e-12) and np.allclose(f["c"], c64, rtol=0, atol=1e-12), \
+                f"{cache} is for other data"
+            x64, c64 = f["x"], f["c"]
+        print(f"reference read from {cache}", flush=True)
     else:
-        gref, _ = op.vjp(ctx, c64)  # exact region averages
+        op = Op(2)
+        ref, ctx = op.prox(x64, GAMMA, keep=True, tol=1e-13, max_iter=10 ** 6)
+        if mode == "iso":
+            gref, _ = op.vjp(ctx, c64, tol=1e-10, max_iter=10 ** 5)  # 18 548 iterations here; the default cap is 10 000
+        else:
+            gref, _ = op.vjp(ctx, c64)  # exact region averages
+        np.savez_compressed(cache, ref=ref, gref=gref, x=x64, c=c64)
     devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else []) + \
         (["cuda"] if torch.cuda.is_available() else [])
     name = "isotropic" if mode == "iso" else "anisotropic"

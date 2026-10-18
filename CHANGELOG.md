@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `bench/compare_deepinv.py` caches its float64 reference in `deepinv_ref_<mode>_<size>_<batch>.npz` (read when present, written otherwise), so that a machine with few cores, such as Colab, can use one computed elsewhere. docs/benchmarks.md has the comparison on an NVIDIA T4.
+
 ## [0.3.0rc1] — 2026-10-18
 
 Graph and tree TV, PyTorch and JAX wrappers, and image TV on the GPU, with
