@@ -234,7 +234,13 @@ image-by-image calls, for any thread count.
   iterations.
 - **Derivatives** are exact for the identified regions: averaging over each
   region, with γ and weight terms from the jump signs on its boundary. They
-  cost O(n), with no linear solve.
+  cost O(n), with no linear solve. The regions are those of the polish, read
+  off the dual: an edge whose 1D dual is strictly inside its bound,
+  |p_e| < γwₐ(1 − 10⁻⁹), has no jump at the solution, and a boundary edge
+  takes the sign of p_e. Once the dual identifies the regions (here from a
+  gap tolerance of 1e-10, or sooner where the polish succeeds) the
+  derivative is the exact one; at 1e-8 on 128² images its error was 2–5%,
+  against 7–19% from a threshold on the jumps of z.
 - **Special values.** A NaN anywhere in an image makes that whole image NaN
   (the rest of the batch is unaffected); ±Inf is rejected with `FP_EINVAL`.
   Images are limited to 2³¹ − 1 entries.
@@ -255,10 +261,22 @@ TV_I.
   given dual onto the current ball, so a dual from another γ can be reused.
   The gap is Σ_p (γ‖g_p‖ − ⟨g_p, u_p⟩) with g = W D z, each term ≥ 0.
 - **Derivatives** come from implicit differentiation of the optimality
-  conditions. Entries with a vanishing gradient (below a threshold set by
-  the certified error) keep z constant across their edges, which reduces the
-  unknowns to one per flat region; elsewhere the dual turns on the sphere
-  (H_p = γ/‖g_p‖ (I − n nᵀ)). The resulting symmetric positive definite system
+  conditions. Flat entries keep z constant across their edges, which reduces
+  the unknowns to one per flat region; elsewhere the dual turns on the sphere
+  (H_p = γ/‖g_p‖ (I − n nᵀ)). An entry is flat when its dual is strictly
+  inside the ball, ‖u_p‖ < γ(1 − 10⁻⁹) (complementary slackness), or its
+  gradient is at the rounding level of x. Pixels on the sphere with a small
+  gradient make the system stiff, more so as the gap shrinks, though such
+  gradients are below the error that the gap certifies; the curvature
+  γ/‖g_p‖ is capped at γ/μ with μ = 0.1 w_max rms(gap), rms(gap) =
+  √(2 gap / N) (a Huber smoothing at that level, which vanishes with the
+  gap). On 128² images the derivative's error against the exact one is
+  4% at a gap tolerance of 1e-6 and 0.5–0.7% at 1e-8, against 18–57% and
+  5–24% from the earlier threshold on ‖g_p‖ set by the certified error, at
+  3–8× its conjugate gradient iterations. Below about 1% the comparison
+  reaches pixels that sit on the sphere with a gradient near zero even at
+  a gap of 5e-16, where the derivative is set-valued (two valid choices
+  differ by 0.8% at γ = 0.1). The resulting symmetric positive definite system
   is solved by conjugate gradients, to a relative residual of 1e-10 by
   default: `fp_workspace_set_deriv_tol(ws, tol, max_iter)` changes it and
   `fp_workspace_deriv_info(ws, &residual, &iters)` reports the last solve
@@ -378,10 +396,10 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | 1D TV, ℓ2 of differences | the dual minimiser on the sphere, ‖u₀‖ = γ | inside: piecewise averaging |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
-| anisotropic TV | adjacent regions with equal values | the regions identified at the end (jumps below the threshold merged), each averaged on its own |
+| anisotropic TV | an edge with no jump whose dual is on its bound | not joined: its two sides averaged apart, with the sign of the dual |
 | ℓ0, ℓq, log penalty | \|xᵢ\| on the threshold (two minimisers) | the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
 | SCAD, MCP | \|xᵢ\| at a breakpoint | the branch below it (at γλ: thresholded) |
-| isotropic TV | an entry with a vanishing gradient | flat: z held constant across its edges (the gradient below the threshold counts as zero) |
+| isotropic TV | an entry with a vanishing gradient whose dual is on the sphere | not flat: H_p from its gradient (flat only when the gradient is at the rounding level) |
 
 The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
 x − γλ P(x/(γλ)), with P the projection onto the ℓ1 ball, so an entry kept
@@ -748,8 +766,11 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   Agreement with the C kernels: ‖z − z_C‖² ≤ 2 (gap + gap_C).
 - **Backward** (PyTorch: reverse and forward mode; JAX: reverse mode, under
   `vmap` too) in `x`, `gamma` and `weights`: the C kernels' systems on the
-  flat regions of the solution. Anisotropic TV averages over the regions
-  exactly; isotropic TV solves one unknown per region by conjugate gradients
+  flat regions of the solution, with the flat pixels and edges read off the
+  dual and the isotropic curvature capped as there (the bound's margin is
+  max(10⁻⁹, 64 ε)). Anisotropic TV
+  averages over the regions exactly; isotropic TV solves one unknown per
+  region by conjugate gradients with the C kernel's Jacobi preconditioner
   (`deriv_tol`, default 1e-10 in float64 and 100 ε in float32). The regions
   are found by label propagation and summed by a sort and a segmented scan,
   so memory is a few images and does not grow with the iterations.

@@ -201,26 +201,27 @@ class Regions:
 
 
 def _structure(x, z, u, gap, gamma, w, iso):
+    """Flat entries from the dual, as in _tv_torch.Structure."""
     k = w.shape[0]
     ops = Ops(k, w, iso)
     B, nd = z.shape[0], z.ndim - 1
-    N = z[0].size
     g = ops.G(z)
-    gn = ops.pnorm(g) if iso else jnp.abs(g)
     eps = jnp.finfo(z.dtype).eps
-    scale = jnp.abs(x).reshape(B, -1).max(1)
-    rms = jnp.sqrt(2 * jnp.maximum(gap, 0) / N)
-    thr = jnp.max(w) * (8 * rms + 64 * eps * scale)
-    flat = gn <= _bimg(thr, nd)
-    safe = jnp.where(flat, 1.0, gn)
+    inside = gamma * (1 - max(1e-9, 64 * float(eps)))
     live = [w[a] != 0 for a in range(k)]
     if iso:
+        gn = ops.pnorm(g)
+        floor = jnp.max(w) * 64 * eps * jnp.abs(x).reshape(B, -1).max(1)
+        flat = (gn <= _bimg(floor, nd)) | (ops.pnorm(u) < inside)
+        safe = jnp.where(flat, 1.0, gn)
         join = [flat & live[a] for a in range(k)]
         n = jnp.where(flat[None], 0.0, g / safe[None])
-        h = jnp.where(flat | (gamma <= 0), 0.0, gamma / safe)
+        mu = _bimg(0.1 * jnp.max(w) * jnp.sqrt(2 * jnp.maximum(gap, 0) / z[0].size), nd)  # _tv_torch.CURV_RMS
+        h = jnp.where(flat | (gamma <= 0), 0.0, gamma / jnp.maximum(safe, mu))
     else:
+        flat = jnp.abs(u) < inside
         join = [flat[a] & live[a] for a in range(k)]
-        n = jnp.where(flat, 0.0, g / safe)
+        n = jnp.where(flat, 0.0, jnp.sign(u))
         h = None
     return ops, n, h, Regions(join, B, z.shape[1:])
 
@@ -229,11 +230,47 @@ def _H(n, h, v):
     return h[None] * (v - n * (n * v).sum(0, keepdims=True))
 
 
+def _jacobi(w, n, h, R, dtype):
+    """1 / diag(K) in region space (see _tv_torch.Structure.jacobi)."""
+    k = w.shape[0]
+    lab = R.at.reshape((R.B,) + tuple(R.img))
+    nxt = []
+    for a in range(k):
+        dim, m = 1 + a, lab.shape[1 + a]
+        t = jnp.full_like(lab, -1)
+        if m > 1:
+            pad = [(0, 0)] * lab.ndim
+            pad[dim] = (0, 1)
+            t = jnp.pad(lax.slice_in_dim(lab, 1, m, axis=dim), pad, constant_values=-1)
+        nxt.append(jnp.where(w[a] != 0, t, -1))
+
+    def term(e):
+        ee = sum(t * t for t in e)
+        ne = sum(n[a] * e[a] for a in range(k))
+        return h * (ee - ne * ne)
+
+    has = [t >= 0 for t in nxt]
+    own = term([-w[a] * (has[a] & (nxt[a] != lab)).astype(dtype) for a in range(k)])
+    for a in range(k):
+        C = nxt[a]
+        new = has[a] & (C != lab)
+        for b in range(a):
+            new = new & (nxt[b] != C)
+        t = jnp.where(new, term([w[b] * (nxt[b] == C).astype(dtype) for b in range(k)]), 0.0)
+        dim, m = 1 + a, lab.shape[1 + a]
+        if m > 1:
+            pad = [(0, 0)] * lab.ndim
+            pad[dim] = (1, 0)
+            own = own + jnp.pad(lax.slice_in_dim(t, 0, m - 1, axis=dim), pad)
+    d = R.size.astype(dtype) + R.sum(own)
+    return jnp.where(R.end, 1.0 / jnp.where(R.end, d, 1.0), 0.0).astype(dtype)
+
+
 def _region_solve(ops, n, h, R, b, tol, max_iter):
     """K c = b in region space (see _tv_torch.Structure.solve)."""
-    inv = jnp.where(R.end, 1.0 / jnp.where(R.end, R.size, 1), 0.0).astype(b.dtype)
     if h is None:
-        return b * inv
+        return b * jnp.where(R.end, 1.0 / jnp.where(R.end, R.size, 1), 0.0).astype(b.dtype)
+    inv = _jacobi(ops.w, n, h, R, b.dtype)
 
     def K(c):
         v = R.spread(c)

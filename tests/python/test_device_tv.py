@@ -158,6 +158,72 @@ def test_gradcheck(fw, iso):
                     (jnp.asarray(x), 0.35, jnp.asarray(w)), order=1, modes=["rev"], eps=1e-6)
 
 
+
+def disk_and_band(n, seed):
+    rng = np.random.default_rng(seed)
+    a, b = np.mgrid[0:n, 0:n] / n
+    return (((a - 0.5) ** 2 + (b - 0.45) ** 2 < 0.08) + 0.5 * (b > 0.7)) + 0.1 * rng.normal(size=(n, n))
+
+
+@pytest.mark.parametrize("iso", [True, False])
+def test_derivatives_at_loose_tolerances(fw, iso):
+    """Flat pixels and edges from the dual, as in the C kernels: close to
+    the exact derivative after a loose solve (isotropic: 2.4e-2 at a gap
+    tolerance of 1e-6 and 2.6e-3 at 1e-8, against 0.49 and 0.15 from a
+    threshold on |G z|); anisotropic: exact here."""
+    x = disk_and_band(32, 0)[None]
+    c = np.random.default_rng(9).normal(size=x.shape)
+    op = C[iso](2)
+    _, ctx = op.prox(x, 0.1, keep=True, tol=1e-15, max_iter=10 ** 7)
+    gref, _ = op.vjp(ctx, c, max_iter=10 ** 5) if iso else op.vjp(ctx, c)
+    tv = fw.tv(iso)
+    for tol, bound in ((1e-6, 0.08), (1e-8, 1e-2)):
+        if fw.name == "torch":
+            torch = fw.mod
+            xt = torch.tensor(x, requires_grad=True)
+            (g,) = torch.autograd.grad(tv(xt, 0.1, tol=tol, max_iter=10 ** 6), xt, torch.tensor(c))
+            g = g.numpy()
+        else:
+            import jax
+            import jax.numpy as jnp
+            g = np.asarray(jax.grad(lambda x: jnp.vdot(tv(x, 0.1, tol=tol, max_iter=10 ** 6), c))(jnp.asarray(x)))
+        err = np.linalg.norm(g - gref) / np.linalg.norm(gref)
+        assert err <= (bound if iso else 1e-12)
+
+
+@pytest.mark.parametrize("shape,w", [((2, 9, 11), [1.0, 0.7]), ((1, 5, 6, 4), [1.0, 0.0, 2.0])])
+def test_jacobi_preconditioner(fw, shape, w):
+    """The isotropic backward's preconditioner is the diagonal of its
+    region-space system, column by column."""
+    rng = np.random.default_rng(3)
+    x = np.round(rng.normal(size=shape) * 2) / 2 + 0.05 * rng.normal(size=shape)
+    if fw.name == "torch":
+        torch = fw.mod
+        import fastprox._tv_torch as T
+        xt = torch.tensor(x)
+        z, u, gap, _, _ = T.solve(xt, 0.3, w, True, 1e-8, 10 ** 5, None)
+        S = T.Structure(xt, z, u, gap, 0.3, w, True)
+        R, dinv, K = S.R, S.jacobi(torch.float64).numpy(), lambda e: S.K(torch.tensor(e)).numpy()
+        end = R.end.numpy()
+    else:
+        import jax.numpy as jnp
+        import fastprox._tv_jax as J
+        wj = jnp.asarray(w)
+        z, u, gap, _, _ = J.solve(jnp.asarray(x), 0.3, wj, jnp.zeros((len(w),) + shape), True, 1e-8, 10 ** 5)
+        ops, n, h, R = J._structure(jnp.asarray(x), z, u, gap, 0.3, wj, True)
+        dinv = np.asarray(J._jacobi(wj, n, h, R, jnp.float64))
+        K = lambda e: np.asarray(R.sum(R.spread(jnp.asarray(e)) + ops.Gt(J._H(n, h, ops.G(R.spread(jnp.asarray(e)))))))
+        end = np.asarray(R.end)
+    B, N = end.shape
+    assert (end.sum(1) < N).all()  # some regions have more than one pixel
+    diag = np.zeros((B, N))
+    for j in range(N):
+        e = np.zeros((B, N))
+        e[:, j] = end[:, j]
+        diag[:, j] = K(e)[:, j]
+    ref = np.where(end, 1 / np.where(end, diag, 1.0), 0.0)
+    np.testing.assert_allclose(dinv, ref, rtol=1e-13, atol=0)
+
 @pytest.mark.parametrize("iso", [True, False])
 def test_warm_starts(fw, iso):
     x = images((2, 14, 15), 6)

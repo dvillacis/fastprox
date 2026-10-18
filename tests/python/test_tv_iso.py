@@ -128,6 +128,29 @@ def test_derivatives(shape, k, conj):
     assert np.abs(fd - jv).max() <= 3e-3 * max(1.0, np.abs(fd).max())
 
 
+def disk_and_band(n, seed):
+    """A disk and a band plus noise 0.1, the images of bench/compare_deepinv.py."""
+    rng = np.random.default_rng(seed)
+    a, b = np.mgrid[0:n, 0:n] / n
+    return (((a - 0.5) ** 2 + (b - 0.45) ** 2 < 0.08) + 0.5 * (b > 0.7)) + 0.1 * rng.normal(size=(n, n))
+
+
+@pytest.mark.parametrize("n,gamma,bounds", [(40, 0.05, (0.05, 5e-3)), (32, 0.1, (0.08, 1e-2))])
+def test_derivatives_at_loose_tolerances(n, gamma, bounds):
+    """Flat pixels are read off the dual (strictly inside the ball), so a
+    loose solve's derivative is close to the exact one: errors 0.016-0.024 at
+    a gap tolerance of 1e-6 and 0.001-0.003 at 1e-8. A threshold on |D z|
+    from the gap gave 0.24-0.49 and 0.06-0.15 on these images."""
+    x = disk_and_band(n, 0)
+    c = np.random.default_rng(9).normal(size=x.shape)
+    op = fp.TVIso(2)
+    _, ctx = op.prox(x, gamma, keep=True, tol=1e-15, max_iter=10 ** 7)
+    gref, _ = op.vjp(ctx, c, max_iter=10 ** 5)
+    for tol, bound in zip((1e-6, 1e-8), bounds):
+        _, cx = op.prox(x, gamma, keep=True, tol=tol, max_iter=10 ** 6)
+        g, _ = op.vjp(cx, c, max_iter=10 ** 5)
+        assert np.linalg.norm(g - gref) <= bound * np.linalg.norm(gref)
+
 def test_derivative_tolerance_controls():
     op = fp.TVIso(2)
     z, ctx = op.prox(image((20, 25), 6), 0.5, keep=True, tol=1e-10, max_iter=100000)

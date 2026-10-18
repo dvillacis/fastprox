@@ -33,7 +33,7 @@
 //
 // Derivatives by implicit differentiation of the optimality conditions
 // z - d + D^T W u = 0, u_p = gamma g_p / |g_p| where g_p != 0. Entries with
-// g_p ~ 0 (flat) keep z constant across their edges, so dz lies in the space
+// g_p = 0 (flat) keep z constant across their edges, so dz lies in the space
 // of images constant on the connected flat regions (one unknown per region);
 // elsewhere u_p moves along the tangent of the sphere, du_p = H_p (W D dz)_p
 // with H_p = gamma / |g_p| (I - n_p n_p^T), n_p = g_p / |g_p|. Then
@@ -42,6 +42,29 @@
 // preconditioned with its diagonal (|C| plus the H_p terms of the boundary
 // entries of each region; 1.4-3x fewer iterations than |C| alone in most
 // expensive solves, up to 40% more in cheap ones at small gamma).
+//
+// Flat entries are read off the dual: |u_p| < gamma forces g_p = 0
+// (complementary slackness), so an entry strictly inside its ball,
+// |u_p| < gamma (1 - kDualEta), is flat, as are entries with g_p at the
+// rounding level. A threshold on |g_p| instead (8 times the rms error that
+// the gap certifies) also flattened entries with small true jumps: against
+// the exact derivative on 2 x 128^2 images at gamma = 0.03 and 0.1, errors
+// of 0.18-0.57 at a gap tolerance of 1e-6 and 0.05-0.24 at 1e-8, against
+// 0.04-0.05 and 0.007-0.016 now.
+//
+// Entries on the sphere with small |g_p| make the system stiff, and stiffer
+// as the gap shrinks (|g_p| near 1e-10 at a gap of 1e-13: a curvature near
+// 1e9), although such gradients are far below the error of z that the gap
+// certifies. The curvature gamma / |g_p| is therefore capped at gamma / mu,
+// mu = kCurvRms w_max rms(gap): the Huber smoothing of TV at that level, as
+// in the semismooth Newton methods for TV of M. Hintermueller and G.
+// Stadler, SIAM J. Sci. Comput. 28 (2006) 1-23, and in bilevel learning,
+// J. C. De los Reyes, C.-B. Schoenlieb and T. Valkonen, J. Math. Imaging
+// Vis. 57 (2017) 1-25. It vanishes with the gap. On those images at
+// gamma = 0.1: errors 0.041, 0.016 and 0.0019 at 1e-6, 1e-8 and 1e-10 with
+// 536, 1272 and 3600 iterations, against 0.048, 0.0074, 0.0026 and 960,
+// 3560, 12832 uncapped; a cap at mu = rms, or flat entries below it, lost
+// accuracy (up to 0.04 and 0.29).
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -62,6 +85,13 @@ namespace fp {
 namespace {
 
 constexpr int kCheck = 4;  // iterations between gap checks
+// Entries whose dual is within this relative distance of the ball's radius
+// count as on the sphere (the projection leaves them there to rounding).
+constexpr double kDualEta = 1e-9;
+// The curvature gamma / |g_p| of the derivative system is capped at
+// gamma / mu with mu = kCurvRms w_max rms, rms = sqrt(2 gap / N) the error of z
+// that the gap certifies (a Huber smoothing at the level of that error).
+constexpr double kCurvRms = 0.1;
 
 struct TVIso final : ImageOp<TVIso> {
     int k;
@@ -92,15 +122,17 @@ struct TVIso final : ImageOp<TVIso> {
     size_t image_thread_bytes(const int64_t *shape) const noexcept override {
         return fiber_thread_bytes(*tv, Geom(k, shape));
     }
-    // Saved: number of regions, labels, flat flags, z, u (k blocks), 1/|C|.
+    // Saved: number of regions, the curvature floor mu, labels, flat flags,
+    // z, u (k blocks), 1/|C|.
     static size_t r8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N);
-        return 8 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
+        return 16 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
     }
     struct View {
         int64_t *ncomp;
+        double *mu;
         int32_t *label;
         uint8_t *flat;
         double *z, *u, *inv;
@@ -109,9 +141,10 @@ struct TVIso final : ImageOp<TVIso> {
         View v;
         const size_t n = static_cast<size_t>(N);
         v.ncomp = reinterpret_cast<int64_t *>(s);
-        v.label = reinterpret_cast<int32_t *>(s + 8);
-        v.flat = reinterpret_cast<uint8_t *>(s + 8 + r8(4 * n));
-        v.z = reinterpret_cast<double *>(s + 8 + r8(4 * n) + r8(n));
+        v.mu = reinterpret_cast<double *>(s + 8);
+        v.label = reinterpret_cast<int32_t *>(s + 16);
+        v.flat = reinterpret_cast<uint8_t *>(s + 16 + r8(4 * n));
+        v.z = reinterpret_cast<double *>(s + 16 + r8(4 * n) + r8(n));
         v.u = v.z + N;
         v.inv = v.u + k * N;
         return v;
@@ -210,7 +243,7 @@ struct TVIso final : ImageOp<TVIso> {
         if (nan) {
             for (int64_t i = 0; i < N; ++i) zout[i] = std::numeric_limits<T>::quiet_NaN();
             std::fill(q, q + k * N, std::numeric_limits<double>::quiet_NaN());
-            if (c.save) save(g, c, wa, d, d, nullptr, 0.0);
+            if (c.save) save(g, c, wa, d, d, nullptr);
             return kRowOk;
         }
         if (na == 0) {
@@ -237,7 +270,7 @@ struct TVIso final : ImageOp<TVIso> {
         } else {
             fdpg(g, c, wa, d, z, u, v, part);
         }
-        if (c.save) save(g, c, wa, d, z, na >= 2 ? c.dual : (na == 1 ? c.dual : nullptr), na == 1 ? 0.0 : -1.0);
+        if (c.save) save(g, c, wa, d, z, na >= 1 ? c.dual : nullptr, na >= 2);
         for (int64_t i = 0; i < N; ++i) zout[i] = static_cast<T>(z[i]);
         return kRowOk;
     }
@@ -369,11 +402,12 @@ struct TVIso final : ImageOp<TVIso> {
 
     // ---- structure ----------------------------------------------------------------
 
-    // Flat entries (|g_p| <= tau) and the regions they connect; z and u for
-    // the derivative system. dual null: u = 0. tau_fixed >= 0 overrides the
-    // threshold (0: z is exactly piecewise constant).
+    // Flat entries and the regions they connect; z and u for the derivative
+    // system. dual null: u = 0. from_dual: flat where the dual is strictly
+    // inside its ball or |g_p| is at the rounding level of the data; else
+    // where g_p = 0 exactly (z is exactly piecewise constant).
     void save(const Geom &g, ImageCall &c, const double *wa, const double *d, const double *z, const double *dual,
-              double tau_fixed) const {
+              bool from_dual = false) const {
         const int64_t N = g.N;
         View s = view(c.save, N);
         std::memcpy(s.z, z, static_cast<size_t>(N) * sizeof(double));
@@ -382,8 +416,9 @@ struct TVIso final : ImageOp<TVIso> {
         double scale = 0.0, wmax = 0.0;
         for (int64_t i = 0; i < N; ++i) scale = std::max(scale, std::fabs(d[i]));
         for (int a = 0; a < k; ++a) wmax = std::max(wmax, wa[a]);
-        const double rms = std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N));
-        const double thr = tau_fixed >= 0.0 ? tau_fixed : wmax * (8.0 * rms + 64.0 * 2.2e-16 * scale);
+        const double thr = from_dual ? wmax * 64.0 * 2.2e-16 * scale : 0.0;
+        const double in = c.gamma * (1.0 - kDualEta);
+        *s.mu = from_dual ? kCurvRms * wmax * std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N)) : 0.0;
         // Union-find over the edges of flat entries, roots at the smallest index.
         int32_t *parent = s.label;  // relabelled below, after a copy of the roots
         for (int64_t i = 0; i < N; ++i) parent[i] = static_cast<int32_t>(i);
@@ -403,7 +438,12 @@ struct TVIso final : ImageOp<TVIso> {
                 nn += t * t;
                 any = true;
             }
-            const bool flat = !any || std::sqrt(nn) <= thr;
+            bool flat = !any || std::sqrt(nn) <= thr;
+            if (from_dual && !flat) {
+                double uu = 0.0;
+                for (int a = 0; a < k; ++a) uu += s.u[a * N + p] * s.u[a * N + p];
+                flat = std::sqrt(uu) < in;
+            }
             s.flat[p] = flat ? 1 : 0;
             if (!flat || !any) continue;
             for (int a = 0; a < k; ++a) {
@@ -470,7 +510,7 @@ struct TVIso final : ImageOp<TVIso> {
                 for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
                 const double nr = std::sqrt(nn);
                 for (int a = 0; a < op.k; ++a) dot += gz[a * N + p] * y[a * N + p];
-                const double h = gamma / nr;
+                const double h = gamma / std::max(nr, *s.mu);
                 for (int a = 0; a < op.k; ++a) {
                     const double na = gz[a * N + p] / nr;
                     y[a * N + p] = h * (y[a * N + p] - na * dot / nr);
@@ -487,7 +527,7 @@ struct TVIso final : ImageOp<TVIso> {
                 if (s.flat[p]) continue;
                 double nn = 0.0;
                 for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
-                const double nr = std::sqrt(nn), hs = gamma / nr;
+                const double nr = std::sqrt(nn), hs = gamma / std::max(nr, *s.mu);
                 int64_t lab[4];
                 bool has[3];
                 lab[0] = s.label[p];
