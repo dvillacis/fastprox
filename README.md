@@ -25,7 +25,9 @@ pip install fastprox
 
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS
 (arm64 from 11.0, x86_64 from 10.15) and Windows (amd64), and depend on
-nothing but NumPy.
+nothing but NumPy. The 0.3 release candidate (graph TV, the PyTorch and JAX
+wrappers, image TV on GPUs) installs with `pip install --pre fastprox`;
+PyTorch and JAX are used when installed, never required.
 
 ## Use
 

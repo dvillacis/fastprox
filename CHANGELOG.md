@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0rc1] — 2026-10-18
+
+Graph TV, PyTorch and JAX wrappers, and image TV on the GPU, with more
+accurate image TV derivatives. A release candidate: the remaining 0.3 items
+in ROADMAP.md come before 0.3.0. The C ABI only grows: every 0.2
+declaration and struct is unchanged.
+
 ### Added
 
 - A max-flow engine for graph TV (`src/maxflow/`, internal): Boykov–Kolmogorov augmenting paths on two search trees, written from the paper, whose trees and flow carry over between solves when terminal or edge residuals change. It runs in caller memory without allocating and is tested by optimality certificates and against Dinic's algorithm (`tests/c/test_maxflow.cpp`).
