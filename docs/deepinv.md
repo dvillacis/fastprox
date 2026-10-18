@@ -33,7 +33,10 @@ z = fpt.tv_iso(y, ths, tol=1e-6)                       # fastprox; tv_aniso for 
 | `TVL1Denoiser` | `tv_aniso` | |
 | 3D input (B, C, D, H, W) | `ndim=3` | |
 
-fastprox also takes per-axis `weights` (e.g. voxel spacing), with gradients.
+fastprox also takes per-axis `weights` (e.g. voxel spacing), and per-pixel
+`pixel_weights` (isotropic) or per-edge `edge_weights` (anisotropic), one map
+for all images or one per image, all with gradients: a spatially varying
+regularisation map, learned or predicted by a network.
 
 ## Differences to expect
 

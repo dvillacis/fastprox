@@ -334,9 +334,11 @@ methods, whose convex majorisers of nonconvex TV are weighted TV problems
   weights near zero can need many more iterations to very tight tolerances
   (a 20 × 9 test image: a gap of 2e-11 after 10⁶ iterations, against 1e-14
   unweighted).
-- The device-native `fastprox.torch.tv_iso`/`tv_aniso` do not take spatial
-  weights yet; `fastprox.torch.prox(fp.TVIso, x, gamma, pixel_weights=a)`
-  runs the C kernel with gradients in `a`.
+- The device-native `fastprox.torch.tv_iso`/`tv_aniso` and
+  `fastprox.jax.tv_iso`/`tv_aniso` take them too, as `pixel_weights` and
+  `edge_weights`, with one map per image if wanted (see Device-native image
+  TV below); `fastprox.torch.prox(fp.TVIso, x, gamma, pixel_weights=a)` runs
+  the C kernel with gradients in `a`.
 
 ### Graph TV (*since 0.3*)
 
@@ -824,6 +826,19 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   every image has the same step the projections are those of one scalar;
   distinct steps cost 6% (isotropic) to 24% (anisotropic) more per
   iteration on MPS.
+- **Spatial weights** (*since 0.3*): `tv_iso(..., pixel_weights=alpha)`
+  and `tv_aniso(..., edge_weights=beta)`, the problems of
+  `TVIso(pixel_weights=)` and `TVAniso(edge_weights=)`. `alpha` broadcasts
+  to `x.shape` and `beta` has shape (ndim, ...) with the rest broadcasting
+  to `x.shape`, so one map serves every image, or each image has its own
+  (a regularisation map predicted by a network, say); both are
+  differentiable, their gradients summed back to their shapes, and each
+  image matches the C kernel with its own map. They multiply the radii of
+  the projection, the gap and the flat test, as in the C kernels; an edge
+  of zero weight takes the sign of its jump, as there. PyTorch rejects
+  negative or non-finite weights (JAX cannot check traced values). On MPS
+  (8 × 512², float32, tol 1e-6) a forward costs 7% (isotropic) and 12%
+  (anisotropic) more, at the same iterations; the backward is unchanged.
 - **Forward**: FISTA on the dual with the C kernels' step, restart test and
   stopping rule (each image stops when its gap is at most `tol`·‖x‖²/2), so
   isotropic TV takes the C kernel's iterations. The anisotropic C kernel's

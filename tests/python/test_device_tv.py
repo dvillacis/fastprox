@@ -405,6 +405,113 @@ def test_gamma_per_image_gradcheck(fw, iso):
                     (jnp.asarray(x), jnp.asarray([0.3, 0.45])), order=1, modes=["rev"], eps=1e-6)
 
 
+SKEY = {True: "pixel_weights", False: "edge_weights"}
+
+
+def _spatial_weights(iso, img, seed, zeros=True):
+    rng = np.random.default_rng(seed)
+    size = img if iso else (len(img), *img)
+    v = rng.uniform(0.3, 1.6, size)
+    if zeros:
+        v[rng.random(size) < 0.1] = 0.0
+    return v
+
+
+def _value_and_grads(fw, iso, x, gamma, sw, c, ndim, **kw):
+    """z and the gradients of <z, c> in x, gamma and the spatial weights."""
+    tv = fw.tv(iso)
+    if fw.name == "torch":
+        torch = fw.mod
+        xt = torch.tensor(x, requires_grad=True)
+        gt = torch.tensor(gamma, dtype=torch.float64, requires_grad=True)
+        st = torch.tensor(sw, requires_grad=True)
+        z = tv(xt, gt, ndim=ndim, **{SKEY[iso]: st}, **kw)
+        z.backward(torch.tensor(c))
+        return z.detach().numpy(), xt.grad.numpy(), gt.grad.numpy(), st.grad.numpy()
+    import jax
+    import jax.numpy as jnp
+    f = lambda x, g, s: jnp.vdot(tv(x, g, ndim=ndim, **{SKEY[iso]: s}, **kw), c)
+    z = np.asarray(tv(jnp.asarray(x), jnp.asarray(gamma), ndim=ndim, **{SKEY[iso]: jnp.asarray(sw)}, **kw))
+    gx, gg, gs = jax.grad(f, argnums=(0, 1, 2))(jnp.asarray(x), jnp.asarray(gamma), jnp.asarray(sw))
+    return z, np.asarray(gx), np.asarray(gg), np.asarray(gs)
+
+
+@pytest.mark.parametrize("iso", [True, False])
+@pytest.mark.parametrize("shape", [(2, 10, 12), (2, 5, 6, 7)])
+def test_spatial_weights_match_c(fw, iso, shape):
+    """Pixel or edge weights (since 0.3), some zero: the solution and the
+    gradients in x, gamma and every weight are the C kernel's."""
+    k = len(shape) - 1
+    img = shape[1:]
+    x = images(shape, 20)
+    sw = _spatial_weights(iso, img, 21)
+    c = np.random.default_rng(22).normal(size=shape)
+    op = (fp.TVIso(k, pixel_weights=sw) if iso else fp.TVAniso(k, edge_weights=sw))
+    zc, ctx = op.prox(x, 0.4, keep=True, tol=1e-14, max_iter=10 ** 6)
+    gxc, gr = op.vjp(ctx, c, tol=1e-12) if iso else op.vjp(ctx, c)
+    z, gx, gg, gs = _value_and_grads(fw, iso, x, 0.4, sw, c, k, tol=1e-14, max_iter=10 ** 6, deriv_tol=1e-12)
+    scale = 1 + np.abs(gxc).max()
+    np.testing.assert_allclose(z, zc, atol=1e-10)
+    np.testing.assert_allclose(gx, gxc, atol=1e-8 * scale)
+    np.testing.assert_allclose(gs, getattr(gr, SKEY[iso]), atol=1e-8 * scale)
+    assert float(gg) == pytest.approx(gr.gamma, rel=1e-7, abs=1e-8)
+
+
+@pytest.mark.parametrize("iso", [True, False])
+def test_spatial_weights_per_image(fw, iso):
+    """A weight map per image (shape x.shape, or (ndim, *x.shape)), e.g. from
+    a network: each image matches a call with its own map, and one map of the
+    image shape broadcasts over the batch with its gradient summed."""
+    x = images((2, 9, 10), 23)
+    maps = np.stack([_spatial_weights(iso, (9, 10), s) for s in (24, 25)], axis=0 if iso else 1)
+    c = np.random.default_rng(26).normal(size=x.shape)
+    kw = dict(tol=1e-13, max_iter=10 ** 6, deriv_tol=1e-12)
+    z, gx, _, gs = _value_and_grads(fw, iso, x, 0.3, maps, c, 2, **kw)
+    assert gs.shape == maps.shape
+    for b in range(2):
+        mb = maps[b] if iso else maps[:, b]
+        zb, gxb, _, gsb = _value_and_grads(fw, iso, x[b], 0.3, mb, c[b], 2, **kw)
+        np.testing.assert_allclose(z[b], zb, atol=1e-10)
+        np.testing.assert_allclose(gx[b], gxb, atol=1e-8 * (1 + np.abs(gxb).max()))
+        np.testing.assert_allclose(gs[b] if iso else gs[:, b], gsb, atol=1e-8 * (1 + np.abs(gsb).max()))
+    one = maps[0] if iso else maps[:, 0]                     # one map for both images
+    _, _, _, g1 = _value_and_grads(fw, iso, x, 0.3, one, c, 2, **kw)
+    _, _, _, g2 = _value_and_grads(fw, iso, x, 0.3, np.stack([one, one], axis=0 if iso else 1), c, 2, **kw)
+    np.testing.assert_allclose(g1, g2.sum(0) if iso else g2.sum(1), atol=1e-8 * (1 + np.abs(g1).max()))
+
+
+@pytest.mark.parametrize("iso", [True, False])
+def test_spatial_weights_gradcheck(fw, iso):
+    """Reverse mode (and, in PyTorch, forward mode through the JVP) in the
+    spatial weights, by gradcheck / check_grads."""
+    x = images((2, 5, 6), 27)
+    sw = _spatial_weights(iso, (5, 6), 28, zeros=False)
+    tv = fw.tv(iso)
+    if fw.name == "torch":
+        torch = fw.mod
+        f = lambda x, s: tv(x, 0.35, **{SKEY[iso]: s}, tol=1e-15, max_iter=10 ** 6)
+        args = (torch.tensor(x, requires_grad=True), torch.tensor(sw, requires_grad=True))
+        assert torch.autograd.gradcheck(f, args, check_forward_ad=True, atol=1e-5)
+    else:
+        import jax.numpy as jnp
+        from jax.test_util import check_grads
+        check_grads(lambda x, s: tv(x, 0.35, **{SKEY[iso]: s}, tol=1e-15, max_iter=10 ** 6),
+                    (jnp.asarray(x), jnp.asarray(sw)), order=1, modes=["rev"], eps=1e-6 if iso else 1e-8)
+
+
+def test_spatial_weights_errors(fw):
+    x = fw.arr(np.zeros((2, 4, 5)))
+    with pytest.raises(ValueError):
+        fw.f.tv_iso(x, 0.5, pixel_weights=fw.arr(np.ones((3, 5))))       # does not broadcast
+    with pytest.raises(ValueError):
+        fw.f.tv_aniso(x, 0.5, edge_weights=fw.arr(np.ones((4, 5))))      # needs (2, ...)
+    with pytest.raises(ValueError):
+        fw.f.tv_aniso(x, 0.5, edge_weights=fw.arr(np.ones((3, 4, 5))))
+    if fw.name == "torch":  # values are checked where they are concrete
+        with pytest.raises(ValueError):
+            fw.f.tv_iso(x, 0.5, pixel_weights=fw.arr(-np.ones((4, 5))))
+
+
 def _gpu(torch):
     if torch.cuda.is_available():
         return "cuda"
@@ -431,3 +538,12 @@ def test_torch_gpu(iso):
     assert ((z.detach().cpu().numpy() - zc) ** 2).sum() <= 2 * info.gap * 1.01 + 1e-6
     z.sum().backward()
     assert xt.grad.device.type == dev and torch.isfinite(xt.grad).all()
+    # Spatial weights on the GPU, against the C kernel.
+    sw = _spatial_weights(iso, (40, 44), 11).astype(np.float32)
+    st = torch.tensor(sw, device=dev, requires_grad=True)
+    zw, iw = tv(xt, 0.3, tol=1e-5, return_info=True, **{SKEY[iso]: st})
+    opw = fp.TVIso(2, pixel_weights=sw) if iso else fp.TVAniso(2, edge_weights=sw)
+    zcw, _ = opw.solve(x.astype(np.float64), 0.3, tol=1e-12, max_iter=10 ** 6)
+    assert ((zw.detach().cpu().numpy() - zcw) ** 2).sum() <= 2 * iw.gap * 1.01 + 1e-6
+    zw.sum().backward()
+    assert st.grad.device.type == dev and torch.isfinite(st.grad).all()

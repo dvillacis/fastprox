@@ -97,6 +97,28 @@ def test_derivatives(iso, shape, conj):
     assert np.abs(fd - jv).max() <= 1e-4 * max(1.0, np.abs(fd).max())
 
 
+@pytest.mark.parametrize("iso", [True, False])
+def test_derivative_at_zero_weights(iso):
+    """At a zero weight the derivative is one-sided: the VJP's gradient in a
+    zero pixel or edge weight matches a forward difference."""
+    x = image((2, 10, 12), 10)
+    sw = spatial(iso, (10, 12), 11)
+    op = make(iso, 2, None, sw)
+    z, ctx = op.prox(x, 0.4, keep=True, tol=1e-15, max_iter=10 ** 7)
+    c = np.random.default_rng(12).normal(size=x.shape)
+    _, grads = op.vjp(ctx, c, **({"tol": 1e-12} if iso else {}))
+    g = grads.pixel_weights if iso else grads.edge_weights
+    zeros = np.argwhere(sw == 0)
+    if not iso:  # edges only (the last entry along each axis is unused)
+        zeros = [e for e in zeros if e[1 + e[0]] < (10, 12)[e[0]] - 1]
+    h = 1e-6 if iso else 1e-7
+    for e in [tuple(e) for e in zeros[:6]]:
+        s2 = sw.copy()
+        s2[e] = h
+        fd = float(((make(iso, 2, None, s2).prox(x, 0.4, tol=1e-15, max_iter=10 ** 7) - z) / h * c).sum())
+        assert abs(fd - g[e]) <= 1e-4 * (1 + abs(fd)), (e, fd, g[e])
+
+
 def test_zero_weights_decouple():
     """Zero edge weights across a column split anisotropic TV into two
     independent problems; a zero pixel weight leaves the pixel's dual at 0."""
