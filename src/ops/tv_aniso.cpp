@@ -414,7 +414,10 @@ struct TVAniso final : ImageOp<TVAniso> {
             for (int64_t i = 0; i < N; ++i) z[i] = d[i] - q1[i] - q2[i];
             gp = polish(gap(g, c, lam, d, z, part));
         }
-        if (!(gp <= target) && (c.warm || c.max_iter == 0)) {
+        // Also when the target overflowed (|d|^2 = inf, e.g. a conjugate prox
+        // at a tiny sigma): every gap meets it, so the loop would not run and
+        // z would never be written.
+        if ((!(gp <= target) && (c.warm || c.max_iter == 0)) || !(target < std::numeric_limits<double>::infinity())) {
             pass(g, a1, lam[a1], c, [&](int64_t o) { return d[o] + y[o]; },
                  [&](int64_t o, double zo, double) { z[o] = zo; });
             dual(z);

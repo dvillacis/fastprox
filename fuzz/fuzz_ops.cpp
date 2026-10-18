@@ -81,6 +81,7 @@ struct Case {
     fp_op *op = nullptr;
     std::vector<double> params[3];
     std::vector<int64_t> groups;
+    std::vector<float> fparams;  // float32 copy of params[1] (spatial weights)
 };
 
 fp_array vec(std::vector<double> &v) {
@@ -89,9 +90,36 @@ fp_array vec(std::vector<double> &v) {
     return fp_array{v.data(), FP_F64, 1, shape, nullptr, FP_DEVICE_CPU};
 }
 
-// Builds an operator from the bytes; params are sized for axis length n.
-fp_status make_op(Bytes &b, int64_t n, Case &c) {
-    const int kind = b.u8() % 31;
+// Spatial weights for image TV of k axes on arrays of shape xs (xnd axes):
+// usually the array's last k extents (iso), with a leading k for edge
+// weights, sometimes a wrong shape or number of axes, float64 or float32,
+// some zeros; the values from param() (raw bit patterns included).
+fp_array spatial(Bytes &b, Case &c, int k, bool edges, int xnd, const int64_t *xs) {
+    static thread_local int64_t sh[4];
+    int nd = 0;
+    if (edges) sh[nd++] = b.u8() % 8 ? k : 1 + b.u8() % 4;
+    const int kk = b.u8() % 8 ? k : 1 + b.u8() % 3;
+    for (int a = 0; a < kk; ++a) {
+        const int d = xnd - kk + a;
+        sh[nd++] = (b.u8() % 8 && d >= 0) ? xs[d] : b.u8() % 6;
+    }
+    int64_t m = 1;
+    for (int d = 0; d < nd; ++d) m *= sh[d];
+    std::vector<double> &v = c.params[1];
+    v.resize(static_cast<size_t>(m > 0 ? m : 1));
+    const bool zeros = b.u8() % 3 == 0;
+    for (auto &x : v) x = zeros && b.u8() % 4 == 0 ? 0.0 : b.param();
+    if (b.u8() % 4 == 0) {
+        c.fparams.assign(v.begin(), v.end());
+        return fp_array{c.fparams.data(), FP_F32, nd, sh, nullptr, FP_DEVICE_CPU};
+    }
+    return fp_array{v.data(), FP_F64, nd, sh, nullptr, FP_DEVICE_CPU};
+}
+
+// Builds an operator from the bytes; params are sized for axis length n of
+// an array with xnd axes of extents xs.
+fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
+    const int kind = b.u8() % 33;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -152,6 +180,17 @@ fp_status make_op(Bytes &b, int64_t n, Case &c) {
             if (b.u8() % 4 == 0) c.params[0][0] = 0.0;
             a0 = vec(c.params[0]);
             return fp_op_tv_iso(k, b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 31:    // isotropic TV with pixel weights (since 0.3)
+        case 32: {  // anisotropic TV with edge weights
+            const int k = 2 + b.u8() % 2;
+            fill(c.params[0], b.u8() % 2 ? k : 1);
+            if (b.u8() % 4 == 0) c.params[0][0] = 0.0;
+            a0 = vec(c.params[0]);
+            a1 = spatial(b, c, k, kind == 32, xnd, xs);
+            const fp_array *sw = b.u8() % 16 ? &a1 : nullptr;  // NULL: FP_EINVAL
+            return kind == 31 ? fp_op_tv_iso_weighted(k, b.u8() % 2 ? &a0 : nullptr, sw, &c.op)
+                              : fp_op_tv_aniso_weighted(k, b.u8() % 2 ? &a0 : nullptr, sw, &c.op);
         }
         case 15:
             fill(c.params[0], pick);
@@ -314,7 +353,7 @@ void run(const uint8_t *data, size_t size) {
     void *x0 = xbuf.data() + offset * static_cast<int64_t>(item);
 
     Case c;
-    const fp_status cs = make_op(b, n, c);
+    const fp_status cs = make_op(b, n, c, ndim, shape);
     if (!valid_status(cs)) fail("constructor status");
     if (cs != FP_OK) {
         if (c.op) fail("constructor wrote a handle on failure");
