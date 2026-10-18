@@ -204,24 +204,27 @@ class Regions:
         # Hooking and pointer jumping: every joined edge hooks the larger of
         # its two roots under the smaller (a scatter of minima, the same in
         # any order), then every pixel jumps to its root; O(log N) rounds.
+        # Labels are int32 where they fit: atomic minima on 64-bit integers do
+        # not compile on some Metal GPUs (GitHub's macOS runners).
         shape = (B,) + tuple(img)
-        idx = torch.arange(B * N, device=dev).reshape(shape)
+        ltype = torch.int32 if B * N < 2 ** 31 else torch.int64
+        idx = torch.arange(B * N, device=dev, dtype=ltype).reshape(shape)
         ends = []
         for a, j in enumerate(join):
             dim, n = 1 + a, img[a]
             if n < 2:
                 continue
             p = torch.where(j.narrow(dim, 0, n - 1), idx.narrow(dim, 0, n - 1), idx.narrow(dim, 1, n - 1))
-            ends.append((p.reshape(-1), idx.narrow(dim, 1, n - 1).reshape(-1)))
+            ends.append((p.reshape(-1).long(), idx.narrow(dim, 1, n - 1).reshape(-1).long()))
         lab = idx.reshape(-1).clone()
         while True:
             old = lab
             lab = lab.clone()
             for p, q in ends:  # unjoined edges have p = q: no change
                 rp, rq = lab[p], lab[q]
-                lab.scatter_reduce_(0, torch.maximum(rp, rq), torch.minimum(rp, rq), reduce="amin")
+                lab.scatter_reduce_(0, torch.maximum(rp, rq).long(), torch.minimum(rp, rq), reduce="amin")
             while True:
-                nxt = lab[lab]
+                nxt = lab[lab.long()]
                 if torch.equal(nxt, lab):
                     break
                 lab = nxt
@@ -234,11 +237,11 @@ class Regions:
         start[:, 1:] = keys[:, 1:] != keys[:, :-1]
         self.end = torch.ones_like(start)
         self.end[:, :-1] = start[:, 1:]
-        idx = torch.arange(N, device=dev).expand(B, N)
+        idx = torch.arange(N, device=dev, dtype=torch.int32).expand(B, N)
         last = torch.flip(torch.cummin(torch.flip(torch.where(self.end, idx, N), [1]), 1).values, [1])
         first = torch.cummax(torch.where(start, idx, -1), 1).values
         self.size = torch.where(self.end, (last - first + 1), 0)  # region sizes at their last position
-        self.at = torch.gather(last, 1, torch.argsort(self.perm, dim=1))  # pixel -> its region's position
+        self.at = torch.gather(last.long(), 1, torch.argsort(self.perm, dim=1))  # pixel -> its region's position
         # Masks of the segmented scan, one per doubling step (log2 N bytes per pixel).
         self.same = []
         sh = 1
