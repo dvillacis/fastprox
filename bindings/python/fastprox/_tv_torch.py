@@ -57,6 +57,7 @@ class Problem:
         self.iso = iso
         self.B = x.shape[0]
         self.N = math.prod(x.shape[1:])
+        self.positive = False  # every radius > 0 (set by solve; projections in place)
 
     def d(self, z, a):
         dim = 1 + a
@@ -123,12 +124,21 @@ class Problem:
         return self.pnorm(g) if self.iso else g.abs()
 
     def proj(self, y, gamma):
-        """Onto |u_p| <= gamma (isotropic) or |u_e| <= gamma (anisotropic); may overwrite y."""
-        if gamma <= 0:
-            return torch.zeros_like(y)
+        """Onto |u_p| <= gamma (isotropic) or |u_e| <= gamma (anisotropic), for
+        one radius (a float) or one per image (a tensor (B,)); may overwrite y."""
+        if not isinstance(gamma, torch.Tensor):  # the common case, in place
+            if gamma <= 0:
+                return torch.zeros_like(y)
+            if self.iso:
+                return y.div_(self.pnorm(y).div_(gamma).clamp_(min=1.0))
+            return y.clamp_(-gamma, gamma)
+        g = _img(self, gamma)
         if self.iso:
-            return y.div_(self.pnorm(y).div_(gamma).clamp_(min=1.0))
-        return y.clamp_(-gamma, gamma)
+            n = self.pnorm(y)
+            if self.positive:  # in place, as for one radius
+                return y.div_(n.div_(g).clamp_(min=1.0))
+            return y.mul_(torch.where(n > g, g / torch.where(n > g, n, torch.ones_like(n)), torch.ones_like(n)))
+        return y.clamp_(min=-g, max=g)
 
     def isum(self, t):
         """Per-image sums of an image batch (B, ...)."""
@@ -161,14 +171,27 @@ def _img(prob, v):
     return v.reshape((prob.B,) + (1,) * (prob.k))
 
 
+def per_image(gamma, B, x):
+    """gamma (a number or a tensor of B values) as a tensor (B,) like x."""
+    if isinstance(gamma, torch.Tensor):
+        return gamma.to(dtype=x.dtype, device=x.device).expand(B)
+    return torch.full((B,), float(gamma), dtype=x.dtype, device=x.device)
+
+
 def solve(x, gamma, w, iso, tol, max_iter, u0):
-    """(z, u, gap per image, iterations, converged) for x of shape (B, *img)."""
+    """(z, u, gap per image, iterations, converged) for x of shape (B, *img)
+    and gamma a number or one value per image."""
     prob = Problem(x, w, iso)
+    gamma = per_image(gamma, prob.B, x)
+    # The projections take one float when every image has the same radius.
+    radius = float(gamma[0]) if bool((gamma == gamma[0]).all()) else gamma
+    prob.positive = bool((gamma > 0).all())
     L = 4.0 * sum(a * a for a in prob.w)
     u = torch.zeros((prob.k,) + tuple(x.shape), dtype=x.dtype, device=x.device) if u0 is None \
-        else prob.proj(u0.to(dtype=x.dtype, device=x.device).clone(), gamma)
-    if L == 0.0 or gamma == 0.0 or max_iter <= 0:
-        u = torch.zeros_like(u) if L == 0.0 or gamma == 0.0 else u
+        else prob.proj(u0.to(dtype=x.dtype, device=x.device).clone(), radius)
+    none = not bool((gamma > 0).any())
+    if L == 0.0 or none or max_iter <= 0:
+        u = torch.zeros_like(u) if L == 0.0 or none else u
         z, g, gap = prob.gap(x, u, gamma)
         return z, u, gap, 0, bool((gap <= tol * prob.isum(x * x) / 2).all())
     tau = 1.0 / L
@@ -180,7 +203,7 @@ def solve(x, gamma, w, iso, tol, max_iter, u0):
     it = 0
     all_live = True
     while it < max_iter:
-        up = prob.proj(prob.ascent(v, prob.primal(x, v), tau), gamma)
+        up = prob.proj(prob.ascent(v, prob.primal(x, v), tau), radius)
         it += 1
         tn = (1 + torch.sqrt(1 + 4 * t * t)) / 2
         coef = (t - 1) / tn
@@ -285,10 +308,12 @@ class Structure:
 
     def __init__(self, x, z, u, gap, gamma, w, iso):
         prob = Problem(z, w, iso)
-        self.prob, self.z, self.u, self.gamma = prob, z, u, float(gamma)
+        self.prob, self.z, self.u = prob, z, u
+        self.gamma = per_image(gamma, prob.B, z)
+        gimg = _img(prob, self.gamma)
         g = prob.G(z)
         eps = torch.finfo(z.dtype).eps
-        inside = self.gamma * (1 - dual_eta(z.dtype))
+        inside = gimg * (1 - dual_eta(z.dtype))
         live = [prob.w[a] != 0.0 for a in range(prob.k)]
         if iso:
             gn = prob.pnorm(g)
@@ -298,8 +323,8 @@ class Structure:
             safe = torch.where(flat, torch.ones_like(gn), gn)
             self.n = torch.where(flat.unsqueeze(0), torch.zeros_like(g), g / safe.unsqueeze(0))
             mu = _img(prob, CURV_RMS * max(prob.w) * torch.sqrt(2 * torch.clamp(gap, min=0) / prob.N))
-            self.h = torch.where(flat, torch.zeros_like(gn), self.gamma / torch.maximum(safe, mu)) \
-                if self.gamma > 0 else None
+            self.h = torch.where(flat, torch.zeros_like(gn), gimg / torch.maximum(safe, mu)) \
+                if bool((self.gamma > 0).any()) else None
         else:
             flat = u.abs() < inside
             join = [flat[a] & live[a] for a in range(prob.k)]
@@ -396,8 +421,8 @@ class Structure:
     def jvp(self, dx, dgamma, dw, tol, max_iter):
         prob, R = self.prob, self.R
         r = torch.zeros_like(self.z) if dx is None else dx.clone()
-        if dgamma:
-            r = r - dgamma * prob.Gt(self.n)
+        if dgamma is not None:
+            r = r - _img(prob, dgamma) * prob.Gt(self.n)
         if dw is not None:
             for a in range(prob.k):
                 if dw[a] != 0.0:
@@ -409,12 +434,13 @@ class Structure:
         return R.spread(c), (res, it)
 
     def vjp(self, gz, tol, max_iter):
-        """(gx, d/dgamma, d/dw_a) for the cotangent gz, summed over the batch."""
+        """(gx, d/dgamma per image, d/dw_a summed over the batch) for the
+        cotangent gz."""
         prob, R = self.prob, self.R
         c, it, res = self.solve(R.sum(gz), tol, max_iter)
         h = R.spread(c)
         Gh = prob.G(h)
-        ggamma = -float((Gh * self.n).sum())
+        ggamma = -prob.dsum(Gh * self.n)
         HGh = self.H(Gh) if self.h is not None else None
         gw = []
         for a in range(prob.k):

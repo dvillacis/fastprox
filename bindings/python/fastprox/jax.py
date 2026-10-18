@@ -108,7 +108,8 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_
            return_info=False, deriv_tol=None, deriv_max_iter=10000):
     """Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, in JAX operations on ``x``'s device; differentiable (reverse
-    mode) in ``x``, ``gamma`` and ``weights``. Each image stops when its
+    mode) in ``x``, ``gamma`` and ``weights``. ``gamma`` is a number or one
+    step per image, broadcasting to the batch shape ``x.shape[:-ndim]``. Each image stops when its
     duality gap is at most ``tol * |x|^2 / 2``; ``tol`` and ``max_iter`` are
     static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape)). With ``return_info=True`` returns
@@ -145,7 +146,18 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         w = jnp.broadcast_to(w, (ndim,))
     if w.shape[0] != ndim:
         raise ValueError("weights must be one or ndim values")
+    batch = x.shape[:-ndim]
     gamma = jnp.asarray(gamma, x.dtype)
+    if gamma.size == 1:
+        gamma = gamma.reshape(())
+    try:
+        ok = np.broadcast_shapes(gamma.shape, batch) == tuple(batch)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError(f"gamma must be a number or broadcast to the batch shape {tuple(batch)}, "
+                         f"got shape {gamma.shape}")
+    gamma = jnp.broadcast_to(gamma, batch).reshape(-1)  # one per image; its gradient sums back
     if warm_start is None:
         u0 = jnp.zeros((ndim,) + xb.shape, x.dtype)
     else:

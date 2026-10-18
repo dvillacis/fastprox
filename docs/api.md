@@ -753,11 +753,21 @@ z2 = fpt.tv_aniso(x, gamma, ndim=3, weights=w, warm_start=info.dual)
 zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
 ```
 
-- **Arguments**: `x`, `gamma` (tensor or float), `ndim` (2 or 3), `weights`
+- **Arguments**: `x`, `gamma`, `ndim` (2 or 3), `weights`
   (one per axis or one for all), `tol` and `max_iter` as for the C kernels,
   `warm_start` (a dual in the C kernels' form, so the duals of `TVIso` and
   `TVAniso` work too), `return_info`, `deriv_tol` and `deriv_max_iter`.
   `info` is an `IterInfo` whose `gap` and `dual` live on the device.
+- **Steps per image**: `gamma` is a number or a tensor (array) that
+  broadcasts to the batch shape `x.shape[:-ndim]`, one step per image, as
+  DeepInverse's denoisers take one σ per sample: for `x` of shape
+  (B, C, H, W), a `gamma` of shape (B, 1) gives each sample its own step
+  for all its channels. Each image is the one solved with its own scalar
+  step, and the gradient in `gamma` has `gamma`'s shape (summed over what
+  it broadcast over). PyTorch rejects negative or non-finite steps. When
+  every image has the same step the projections are those of one scalar;
+  distinct steps cost 6% (isotropic) to 24% (anisotropic) more per
+  iteration on MPS.
 - **Forward**: FISTA on the dual with the C kernels' step, restart test and
   stopping rule (each image stops when its gap is at most `tol`·‖x‖²/2), so
   isotropic TV takes the C kernel's iterations. The anisotropic C kernel's

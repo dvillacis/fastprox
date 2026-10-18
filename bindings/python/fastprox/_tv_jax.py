@@ -61,11 +61,13 @@ class Ops:
         return out
 
     def proj(self, y, gamma):
+        """Onto the balls or boxes of radius gamma (B,), one per image."""
+        g = _bimg(gamma, y.ndim - 2)
         if self.iso:
             nrm = self.pnorm(y)
-            big = nrm > gamma
-            return jnp.where(big[None], y * (gamma / jnp.where(big, nrm, 1.0))[None], y)
-        return jnp.clip(y, -gamma, gamma)
+            big = nrm > g
+            return jnp.where(big[None], y * (g / jnp.where(big, nrm, 1.0))[None], y)
+        return jnp.clip(y, -g, g)
 
     @staticmethod
     def isum(t):
@@ -89,7 +91,8 @@ def _bimg(v, nd):
 
 
 def solve(x, gamma, w, u0, iso, tol, max_iter):
-    """(z, u, gap per image, iterations) for x (B, *img); tol, max_iter static."""
+    """(z, u, gap per image, iterations) for x (B, *img) and gamma (B,); tol,
+    max_iter static."""
     k = w.shape[0]
     ops = Ops(k, w, iso)
     L = 4.0 * jnp.sum(w * w)
@@ -207,7 +210,7 @@ def _structure(x, z, u, gap, gamma, w, iso):
     B, nd = z.shape[0], z.ndim - 1
     g = ops.G(z)
     eps = jnp.finfo(z.dtype).eps
-    inside = gamma * (1 - max(1e-9, 64 * float(eps)))
+    inside = _bimg(gamma, nd) * (1 - max(1e-9, 64 * float(eps)))
     live = [w[a] != 0 for a in range(k)]
     if iso:
         gn = ops.pnorm(g)
@@ -217,7 +220,7 @@ def _structure(x, z, u, gap, gamma, w, iso):
         join = [flat & live[a] for a in range(k)]
         n = jnp.where(flat[None], 0.0, g / safe[None])
         mu = _bimg(0.1 * jnp.max(w) * jnp.sqrt(2 * jnp.maximum(gap, 0) / z[0].size), nd)  # _tv_torch.CURV_RMS
-        h = jnp.where(flat | (gamma <= 0), 0.0, gamma / jnp.maximum(safe, mu))
+        h = jnp.where(flat | _bimg(gamma <= 0, nd), 0.0, _bimg(gamma, nd) / jnp.maximum(safe, mu))
     else:
         flat = jnp.abs(u) < inside
         join = [flat[a] & live[a] for a in range(k)]
@@ -317,7 +320,7 @@ def _bwd(iso, tol, max_iter, dtol, dmax, res, cts):
     ops, n, h, R = _structure(x, z, u, gap, gamma, w, iso)
     hz = R.spread(_region_solve(ops, n, h, R, R.sum(cts[0]), dtol, dmax))
     Gh = ops.G(hz)
-    ggamma = -jnp.sum(Gh * n)
+    ggamma = -ops.dsum(Gh * n)
     HGh = _H(n, h, Gh) if h is not None else None
     gw = []
     for a in range(w.shape[0]):
