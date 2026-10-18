@@ -23,6 +23,34 @@
 // with the stage number and their distance, so other orphans stop their
 // walk there and choose the candidate parent closest to the terminal.
 //
+// Nodes of high degree (since 0.3). Rescanning every arc made a hub
+// quadratic: graph TV on a star with 6 * 10^4 leaves took 5.6 s (tree TV:
+// 6 ms), 80% of it in adoption, as the hub lost its parent once per leaf,
+// and the rest in growth, as the active hub rescanned from its first arc
+// after every augmentation. Two scan positions per node fix both:
+//  * growth at a hub, a node of degree above kHub, resumes at the arc where
+//    it stopped, and goes back to the first arc when the hub is activated:
+//    acquired, planted, or next to an edge or terminal changed between
+//    solves. Within a solve, the event that gives a tree node a new free
+//    neighbour is that neighbour's adoption failing, and the paper then
+//    activates its tree neighbours to grow back to it. A node freed next to
+//    a hub of its tree with residual towards it is instead attached, once
+//    the adoption stage is over, to its first neighbour in that same tree
+//    with residual towards it, and activated: the step that neighbour's
+//    growth would take, without the hub's rescan (the other neighbours are
+//    activated as before). Only that tree: attaching the node to the other
+//    one left the hub passive across a bridge to it, which was lost when the
+//    node was freed again before scanning it. If no such neighbour is left
+//    (a hub freed later in the stage), the node stays free, as in the
+//    paper. Arcs within a node's own tree are skipped by the scan in any
+//    case, and augmentation adds residual only to those, so nothing is
+//    missed;
+//  * adoption at a hub takes the first valid parent in cyclic order from
+//    the arc of its last one, rather than the closest to the terminal among
+//    all of them (any valid parent is correct; the closest is a tuning).
+// Graphs without hubs run the method above step for step: applying both to
+// every node changed the trees grown and cost 4-8-neighbour grids 25-47%.
+//
 // Reuse. The trees outlive a solve. After changing terminal or arc residuals
 // through add_terminal and set_edge, the next solve starts from the trees
 // left by the last one, repaired where the change broke them, the recycling
@@ -110,7 +138,7 @@ class MaxFlow {
     // Bytes of working memory for graph g, at the alignment of max_align_t.
     static size_t bytes(const Graph &g) noexcept {
         return round(sizeof(Node) * static_cast<size_t>(g.n)) + round(sizeof(T) * 2 * static_cast<size_t>(g.m)) +
-               round(sizeof(Index) * static_cast<size_t>(g.n));
+               4 * round(sizeof(Index) * static_cast<size_t>(g.n));
     }
 
     // mem: bytes(g) bytes aligned to alignof(std::max_align_t), kept by the
@@ -123,6 +151,12 @@ class MaxFlow {
         r_ = reinterpret_cast<T *>(c);
         c += round(sizeof(T) * 2 * static_cast<size_t>(g.m));
         oq_ = reinterpret_cast<Index *>(c);
+        c += round(sizeof(Index) * static_cast<size_t>(g.n));
+        fq_ = reinterpret_cast<Index *>(c);
+        c += round(sizeof(Index) * static_cast<size_t>(g.n));
+        gcur_ = reinterpret_cast<Index *>(c);
+        c += round(sizeof(Index) * static_cast<size_t>(g.n));
+        acur_ = reinterpret_cast<Index *>(c);
     }
 
     // A fresh problem: set every edge and terminal, then start().
@@ -138,6 +172,7 @@ class MaxFlow {
         time_ = 1;
         qhead_ = qtail_ = -1;
         ohead_ = ocount_ = 0;
+        fcount_ = 0;
         for (Index p = 0; p < g_.n; ++p) {
             Node &x = nd_[p];
             x.next = -1;
@@ -146,6 +181,8 @@ class MaxFlow {
             x.parent = kNone;
             x.tree = kFree;
             x.queued = 0;
+            x.hub = g_.first[p + 1] - g_.first[p] > kHub;
+            gcur_[p] = acur_[p] = g_.first[p];
             if (x.tr > 0 || x.tr < 0) plant(p, x.tr > 0 ? kSource : kSink);
         }
     }
@@ -207,6 +244,9 @@ class MaxFlow {
     static constexpr Index kTerminal = -2;  // a root, attached to its terminal
     static constexpr Index kOrphan = -3;    // waiting in the orphan queue
 
+    // Degree above which adoption takes the first valid parent (see above).
+    static constexpr Index kHub = 32;
+
     struct Node {
         T tr;          // terminal residual: > 0 from the source, < 0 to the sink
         Index parent;  // arc from this node to its parent, or kNone, kTerminal, kOrphan
@@ -215,6 +255,7 @@ class MaxFlow {
         Index dist;    // arcs to the terminal at that stage, the root counting 1
         uint8_t tree;
         uint8_t queued;  // in the orphan queue
+        uint8_t hub;     // degree above kHub (scan positions in gcur_ and acur_)
     };
 
     static size_t round(size_t b) noexcept {
@@ -228,6 +269,7 @@ class MaxFlow {
 
     void activate(Index p) noexcept {
         Node &x = nd_[p];
+        if (x.hub) gcur_[p] = g_.first[p];  // rescan from the start, queued or not
         if (x.next >= 0) return;
         x.next = p;
         if (qtail_ >= 0)
@@ -269,9 +311,11 @@ class MaxFlow {
     // Growth from active node p: returns an arc from S to T, or -1 once p has
     // no free neighbour left to acquire.
     Index grow(Index p) noexcept {
-        const Node &x = nd_[p];
+        Node &x = nd_[p];
         const uint8_t t = x.tree;
-        for (Index a = g_.first[p], e = g_.first[p + 1]; a < e; ++a) {
+        const Index e0 = g_.first[p + 1];
+        const bool hub = x.hub;
+        for (Index a = hub ? gcur_[p] : g_.first[p], e = e0; a < e; ++a) {
             if (!(tree_cap(t, a) > 0)) continue;
             const Index q = g_.head[a];
             Node &y = nd_[q];
@@ -282,9 +326,11 @@ class MaxFlow {
                 y.dist = x.dist + 1;
                 activate(q);
             } else if (y.tree != t) {
+                if (hub) gcur_[p] = a;  // resumed here: the arc may keep residual after the augmentation
                 return t == kSource ? a : g_.sister[a];
             }
         }
+        if (hub) gcur_[p] = e0;
         return -1;
     }
 
@@ -357,6 +403,27 @@ class MaxFlow {
             nd_[p].queued = 0;
             process(p);
         }
+        // The nodes freed next to a hub by this stage: each joins its first
+        // neighbour in the tree it left with residual towards it (every tree
+        // node now has a path to its terminal), as that neighbour's growth
+        // would make it.
+        for (Index i = 0; i < fcount_; ++i) {
+            const Index p = fq_[i] >= 0 ? fq_[i] : ~fq_[i];
+            const uint8_t t = fq_[i] >= 0 ? kSource : kSink;  // the tree it was freed from
+            Node &x = nd_[p];
+            if (x.tree != kFree) continue;
+            for (Index a = g_.first[p], e = g_.first[p + 1]; a < e; ++a) {
+                const Node &y = nd_[g_.head[a]];
+                if (y.tree != t || !(tree_cap(t, g_.sister[a]) > 0)) continue;
+                x.tree = y.tree;
+                x.parent = a;
+                x.ts = y.ts;
+                x.dist = y.dist + 1;
+                activate(p);
+                break;
+            }
+        }
+        fcount_ = 0;
     }
 
     // Distance to the terminal of tree node q, or -1 when its root is an
@@ -398,13 +465,28 @@ class MaxFlow {
             return;
         }
         Index best = -1, bestd = std::numeric_limits<Index>::max();
-        for (Index a = g_.first[p], e = g_.first[p + 1]; a < e; ++a) {
-            const Index q = g_.head[a];
-            if (nd_[q].tree != t || !(tree_cap(t, g_.sister[a]) > 0)) continue;
-            const Index d = origin(q);
-            if (d >= 0 && d < bestd) {
-                bestd = d;
-                best = a;
+        const Index f = g_.first[p], deg = g_.first[p + 1] - f;
+        if (x.hub) {
+            for (Index k = 0, a = acur_[p]; k < deg; ++k, a = a + 1 == f + deg ? f : a + 1) {
+                const Index q = g_.head[a];
+                if (nd_[q].tree != t || !(tree_cap(t, g_.sister[a]) > 0)) continue;
+                const Index d = origin(q);
+                if (d >= 0) {
+                    bestd = d;
+                    best = a;
+                    acur_[p] = a;
+                    break;
+                }
+            }
+        } else {
+            for (Index a = f, e = f + deg; a < e; ++a) {
+                const Index q = g_.head[a];
+                if (nd_[q].tree != t || !(tree_cap(t, g_.sister[a]) > 0)) continue;
+                const Index d = origin(q);
+                if (d >= 0 && d < bestd) {
+                    bestd = d;
+                    best = a;
+                }
             }
         }
         if (best >= 0) {
@@ -413,15 +495,20 @@ class MaxFlow {
             x.dist = bestd + 1;
             return;
         }
+        bool next_to_hub = false;
         for (Index a = g_.first[p], e = g_.first[p + 1]; a < e; ++a) {
             const Index q = g_.head[a];
             Node &y = nd_[q];
             if (y.tree != t) continue;
-            if (tree_cap(t, g_.sister[a]) > 0) activate(q);
+            if (tree_cap(t, g_.sister[a]) > 0) {
+                if (y.hub) next_to_hub = true;
+                else activate(q);
+            }
             if (y.parent >= 0 && g_.head[y.parent] == p) orphan(q);
         }
         x.tree = kFree;
         x.parent = kNone;
+        if (next_to_hub) fq_[fcount_++] = t == kSource ? p : ~p;  // reattached at the end of the stage (adopt)
     }
 
     // Repairs the trees at p after its terminal residual changed.
@@ -477,8 +564,8 @@ class MaxFlow {
     const Graph &g_;
     Node *nd_ = nullptr;
     T *r_ = nullptr;
-    Index *oq_ = nullptr;
-    Index qhead_ = -1, qtail_ = -1, ohead_ = 0, ocount_ = 0;
+    Index *oq_ = nullptr, *fq_ = nullptr, *gcur_ = nullptr, *acur_ = nullptr;
+    Index qhead_ = -1, qtail_ = -1, ohead_ = 0, ocount_ = 0, fcount_ = 0;
     uint32_t time_ = 1;
 };
 

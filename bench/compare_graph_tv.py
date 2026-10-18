@@ -7,7 +7,9 @@
   graph TV solution;
 * 8-neighbour grids (diagonals weighted 1/sqrt(2)), graph TV only;
 * k-nearest-neighbour graphs of random points in the unit square (k = 8,
-  each pair once, weights exp(-d^2 / h^2)), graph TV only.
+  each pair once, weights exp(-d^2 / h^2)), graph TV only;
+* graphs with hubs (since 0.3): stars, against tree TV, and a 4-neighbour
+  grid plus five hubs each joined to a tenth of the pixels.
 
 The images are the synthetic ones of bench/bench_maxflow.cpp (a ramp, disks
 and a square, Gaussian noise 0.1); the point signals are the same pattern
@@ -116,6 +118,28 @@ def main():
             t4, (_, i4) = timed(lambda: op.solve(x, gamma, tol=1e-4, threads=1), reps)
             print(f"  n {n} ({len(e)} edges) gamma {gamma:<4}: exact {t0:8.1f} ({i0.iters} solves)"
                   f" | tol 1e-4 {t4:8.1f} ({i4.iters})")
+    print("graphs with hubs: graph TV (ms)")
+    for n in (10_000, 100_000, 1_000_000):
+        e = np.stack([np.zeros(n - 1, int), np.arange(1, n)], 1)
+        w = rng.uniform(0.5, 1.5, n - 1)
+        x = rng.standard_normal(n)
+        op, tree = fp.GraphTV(n, e, w), fp.TreeTV(n, e, w)
+        t0, (z0, i0) = timed(lambda: op.solve(x, 0.3, threads=1), reps)
+        tt, zt = timed(lambda: tree.prox(x, 0.3), reps)
+        print(f"  star, {n - 1} leaves, gamma 0.3: exact {t0:8.1f} ({i0.iters} solves) | tree TV {tt:6.1f}"
+              f" (max diff {np.abs(z0 - zt).max():.0e})")
+    h = 256
+    eg, wg = grid(h, False)
+    hubs = rng.choice(h * h, 5, replace=False)
+    eh = [np.stack([np.full(h * h // 10, c), rng.choice(np.delete(np.arange(h * h), c), h * h // 10, replace=False)], 1)
+          for c in hubs]
+    e = np.concatenate([eg, *eh])
+    w = np.concatenate([wg, np.full(len(e) - len(eg), 0.05)])
+    x = image(h, rng).ravel()
+    op = fp.GraphTV(h * h, e, w)
+    for gamma in (0.02, 0.1, 0.5):
+        t0, (_, i0) = timed(lambda: op.solve(x, gamma, threads=1), reps)
+        print(f"  {h}^2 grid + 5 hubs of {h * h // 10} edges, gamma {gamma:<4}: exact {t0:8.1f} ({i0.iters} solves)")
 
 
 if __name__ == "__main__":
