@@ -1023,6 +1023,28 @@ iterations of restarted FISTA on the edge dual gave no gain: the dual is far
 from unique, and a flow close in value is not close in shape. The
 bookkeeping between solves touches only the active nodes and their edges.
 
+**Graphs with hubs** (2026-10-18). The engine rescanned every arc of a node
+when it grew and when it was adopted, so a node of high degree was
+quadratic: on a star with 10⁵ leaves graph TV took 24.6 s (tree TV: 10 ms),
+80% in adoption, as the hub lost its parent once per leaf, the rest in its
+growth after every augmentation. Nodes of degree above 32 now keep two scan
+positions (src/maxflow/maxflow.hpp): growth resumes where it stopped, and
+adoption takes the first valid parent from where it last found one; a node
+freed next to such a hub is attached back to its old tree after the
+adoption stage instead of activating the hub. Other nodes run the method as
+before: applying the same changes to every node changed the trees grown and
+cost the grids 25–47%. Single thread, ms (median of 3):
+
+| Graph, γ | before | after |
+| --- | --- | --- |
+| star, 10⁴ leaves, 0.3 | 124 | 2.7 (tree TV 0.6) |
+| star, 10⁵ leaves, 0.3 | 24 590 | 49–53 (tree TV 10) |
+| star, 10⁶ leaves, 0.3 | — | 423 (tree TV 316) |
+| 256² 4-neighbour grid + 5 hubs of 6553 edges, 0.02 / 0.1 / 0.5 | 264 / 451 / 1239 | 52 / 164 / 717 |
+
+The grids and kNN graphs above are unchanged (within ±2% run to run, one
+case 6%), with no node above degree 32.
+
 ## 2026-10-18, Apple M5 Pro: tree TV
 
 `bench/compare_tree_tv.py` (single thread, medians of 5; graph TV once).
@@ -1047,9 +1069,10 @@ compared.
 
 The 10⁶-node random trees vary between instances (ranges over two trees and
 five runs each). On trees the dynamic program is 4–8× faster than graph TV
-and 30–60× on stars; graph TV takes 30–60 s on a star with 10⁵ leaves
-(measured while writing the tests), because its max-flow rescans the hub's
-arcs each time the hub loses its parent in the search tree. On paths the
+and 30–60× on stars; graph TV took 30–60 s on a star with 10⁵ leaves
+(measured while writing the tests), because its max-flow rescanned the hub's
+arcs each time the hub lost its parent in the search tree (since fixed: 53 ms,
+see the graph TV section). On paths the
 deque version of Section 4.1 runs at 22–27 ns per node, 3.5–4× the time of
 Condat's algorithm in `TV1D`, which needs the signal in order; labels in
 random order cost 10–15% more.

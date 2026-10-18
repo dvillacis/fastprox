@@ -253,6 +253,25 @@ static Problem random_problem(Index n, Index m, int k, bool integer) {
     return pb;
 }
 
+// Hubs (since 0.3; MaxFlow scans nodes of degree above 32 differently): a
+// random problem plus `hubs` nodes joined to a share of all the others, or
+// with share 1 and no random edges, a star around node 0.
+static Problem hub_problem(Index n, Index m, int hubs, double share, int k, bool integer) {
+    Problem pb = random_problem(n, m, k, integer);
+    auto cap = [&] { return irand(0, 3) == 0 ? 0.0 : integer ? double(irand(1, k)) : unif(0, k); };
+    for (int h = 0; h < hubs && n > 1; ++h) {
+        const Index c = irand(0, n - 1);
+        for (Index q = 0; q < n; ++q) {
+            if (q == c || unif(0, 1) >= share) continue;
+            pb.u.push_back(irand(0, 1) ? c : q);
+            pb.v.push_back(pb.u.back() == c ? q : c);
+            pb.cuv.push_back(cap());
+            pb.cvu.push_back(irand(0, 2) == 0 ? 0.0 : cap());
+        }
+    }
+    return pb;
+}
+
 // Graph TV cut at level t on a grid of shape (h, w) or (d, h, w): terminal
 // x_p - t, edges of weight lam both ways (4, 8 or 6 neighbours).
 static Problem grid_problem(const std::vector<int> &shape, int nb, const std::vector<double> &x, double t,
@@ -422,6 +441,22 @@ static void test_reuse() {
     check_reuse<double>(grid_problem(sh, 4, blocky(2000, 6, true), 3.0, 1.0), 30, 4, true);
 }
 
+static void test_hubs() {
+    for (int rep = 0; rep < 6; ++rep) {
+        const int k = rep % 2 ? 3 : 1000;
+        check_fresh<double>(hub_problem(300, 0, 1, 1.0, k, true), 0.0);        // a star
+        check_fresh<double>(hub_problem(400, 800, 3, 0.4, k, true), 0.0);
+        check_fresh<double>(hub_problem(2000, 4000, 5, 0.1, k, true), 0.0);
+        check_fresh<float>(hub_problem(500, 1000, 2, 0.5, 50, true), 0.0);
+        check_fresh<double>(hub_problem(400, 800, 3, 0.4, 10, false), 1e-9 * 3000);
+    }
+    for (int rep = 0; rep < 6; ++rep) {
+        check_reuse<double>(hub_problem(200, 0, 1, 1.0, 5, true), 25, 5, true);
+        check_reuse<double>(hub_problem(400, 1000, 3, 0.3, 20, true), 20, 20, true);
+        check_reuse<double>(hub_problem(300, 600, 2, 0.5, 5, false), 15, 5, false);
+    }
+}
+
 // The graph TV pattern (Chambolle and Darbon; Hochbaum): after a cut at
 // level t, the edges across it are removed and each side moves to its next
 // level by shifting its terminal residuals, every side in the same solve.
@@ -522,6 +557,7 @@ static void test_build_errors() {
 int main() {
     test_build_errors();
     test_random();
+    test_hubs();
     test_grids();
     test_reuse();
     test_levels();
