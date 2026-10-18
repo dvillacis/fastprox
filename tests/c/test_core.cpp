@@ -576,6 +576,8 @@ static fp_op *make_aniso(int k, Vec w) {
     return op;
 }
 
+static fp_op *make_spatial(bool iso, int k, const std::vector<int64_t> &img, Vec w, const Vec &sw);
+
 static void test_tv_aniso() {
     struct Case {
         int k;
@@ -720,6 +722,30 @@ static void test_tv_aniso() {
         Arr x3({4, 5, 6}, randn(120)), z3({4, 5, 6});
         CHECK_OK(fp_prox(op, 1.0, &x3.a, &z3.a, nullptr, nullptr, nullptr));
         CHECK(z3.data == x3.data);
+        fp_op_free(op);
+    }
+
+    // A conjugate prox at a tiny sigma scales x by 1/sigma, so |x|^2 and the
+    // gap target overflow to inf (found by fuzzing): z is still computed, and
+    // the result, the projection of x onto the dual set, sums to 0 per image
+    // (the 2D method returned x, from a z it never wrote).
+    for (int wtd = 0; wtd < 2; ++wtd) {
+        Vec beta(50, 0.5);
+        fp_op *op = wtd ? make_spatial(false, 2, {5, 5}, {1.0, 0.7}, beta) : make_aniso(2, {1.0, 0.7});
+        Vec xv = image_signal(250);
+        for (double &v : xv) v += 7.0;
+        Arr x({10, 5, 5}, xv), z1({10, 5, 5}), z4({10, 5, 5});
+        fp_options o = opts(-1, 1);
+        o.max_iter = 30;
+        const fp_status s1 = fp_prox_conj(op, 1e-250, &x.a, &z1.a, &o, nullptr, nullptr);
+        o.threads = 4;
+        const fp_status s4 = fp_prox_conj(op, 1e-250, &x.a, &z4.a, &o, nullptr, nullptr);
+        CHECK((s1 == FP_OK || s1 == FP_ENOTCONV) && s1 == s4 && z1.data == z4.data);
+        for (int b = 0; b < 10; ++b) {
+            double sum = 0;
+            for (int i = 0; i < 25; ++i) sum += z1.data[b * 25 + i];
+            CHECK(std::fabs(sum) <= 1e-9 * 25 * 15);
+        }
         fp_op_free(op);
     }
 
