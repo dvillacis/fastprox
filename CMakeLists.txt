@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(fastprox VERSION 0.3.0 LANGUAGES C CXX)
 # PEP 440 pre-release tag (a1, rc1, ...) appended to the version; empty for a
 # final release. pyproject.toml reads both lines.
-set(FASTPROX_VERSION_SUFFIX "rc1")
+set(FASTPROX_VERSION_SUFFIX "")
 set(FASTPROX_VERSION_FULL "${PROJECT_VERSION}${FASTPROX_VERSION_SUFFIX}")
 
 option(FASTPROX_THREADS "Parallelise over rows on a thread pool" ON)
