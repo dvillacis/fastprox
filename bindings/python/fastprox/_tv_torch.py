@@ -12,12 +12,16 @@ the C kernels (src/ops/tv_iso.cpp, tv_aniso.cpp). The anisotropic C kernel's
 exact 1D steps and polish stay on the CPU, so this path is a plain dual
 method: slower to tight tolerances, certified by the same gap.
 
-Backward: the C kernels' derivative systems on the flat regions. An entry
-is flat where |g| = |G z| is at most the C threshold, w_max (8 rms + 64 eps
-max|x|) with rms = sqrt(2 gap / N); a flat pixel (isotropic) or flat edge
-(anisotropic) joins its pixels into a region, and dz is constant on each
-region. Anisotropic: dz is the region mean of
-    r = dx - dG^T u - dgamma G_A^T n     (n = sign g on the non-flat edges),
+Backward: the C kernels' derivative systems on the flat regions. As in
+the C kernels, an entry is flat where its dual is strictly inside its bound,
+|u| < gamma (1 - eta) (complementary slackness), with eta = max(1e-9,
+64 eps) above the projection's rounding; isotropic TV also counts pixels
+with |g| = |G z| at the rounding level of x, w_max 64 eps max|x|. A flat
+pixel (isotropic) or flat edge (anisotropic) joins its pixels into a region,
+and dz is constant on each region. The isotropic curvature gamma / |g_p| is
+capped at gamma / mu, mu = 0.1 w_max rms with rms = sqrt(2 gap / N), as in
+the C kernel. Anisotropic: dz is the region mean of
+    r = dx - dG^T u - dgamma G_A^T n     (n = sign u on the non-flat edges),
 exactly. Isotropic: with H_p = gamma / |g_p| (I - n_p n_p^T) on non-flat
 pixels and M the map from region values to pixels,
     (M^T M + M^T G_A^T H G_A M) c = M^T (r - G_A^T H (dG z)_A),   dz = M c,
@@ -142,6 +146,15 @@ class Problem:
         z = self.primal(x, u)
         g = self.G(z)
         return z, g, gamma * self.nsum(g) - self.dsum(g * u)
+
+
+CURV_RMS = 0.1  # the curvature cap, as kCurvRms in src/ops/tv_iso.cpp
+
+
+def dual_eta(dtype):
+    """Relative distance below the dual's bound that still counts as on it:
+    the C kernels' 1e-9, or 64 eps where rounding is coarser (float32)."""
+    return max(1e-9, 64 * torch.finfo(dtype).eps)
 
 
 def _img(prob, v):
@@ -274,22 +287,23 @@ class Structure:
         prob = Problem(z, w, iso)
         self.prob, self.z, self.u, self.gamma = prob, z, u, float(gamma)
         g = prob.G(z)
-        gn = prob.norm(g)
         eps = torch.finfo(z.dtype).eps
-        scale = x.reshape(prob.B, -1).abs().amax(1)
-        rms = torch.sqrt(2 * torch.clamp(gap, min=0) / prob.N)
-        thr = max(prob.w) * (8 * rms + 64 * eps * scale)
-        flat = gn <= _img(prob, thr)
+        inside = self.gamma * (1 - dual_eta(z.dtype))
         live = [prob.w[a] != 0.0 for a in range(prob.k)]
         if iso:
+            gn = prob.pnorm(g)
+            floor = max(prob.w) * 64 * eps * x.reshape(prob.B, -1).abs().amax(1)
+            flat = (gn <= _img(prob, floor)) | (prob.pnorm(u) < inside)
             join = [flat & live[a] for a in range(prob.k)]
             safe = torch.where(flat, torch.ones_like(gn), gn)
             self.n = torch.where(flat.unsqueeze(0), torch.zeros_like(g), g / safe.unsqueeze(0))
-            self.h = torch.where(flat, torch.zeros_like(gn), self.gamma / safe) if self.gamma > 0 else None
+            mu = _img(prob, CURV_RMS * max(prob.w) * torch.sqrt(2 * torch.clamp(gap, min=0) / prob.N))
+            self.h = torch.where(flat, torch.zeros_like(gn), self.gamma / torch.maximum(safe, mu)) \
+                if self.gamma > 0 else None
         else:
+            flat = u.abs() < inside
             join = [flat[a] & live[a] for a in range(prob.k)]
-            safe = torch.where(flat, torch.ones_like(gn), gn)
-            self.n = torch.where(flat, torch.zeros_like(g), g / safe)
+            self.n = torch.where(flat, torch.zeros_like(u), torch.sign(u))
             self.h = None
         self.R = Regions(join, prob.B, tuple(z.shape[1:]))
 
@@ -303,14 +317,53 @@ class Structure:
         v = R.spread(c)
         return R.sum(v + prob.Gt(self.H(prob.G(v))))
 
+    def jacobi(self, dtype):
+        """1 / diag(K) in region space, as in src/ops/tv_iso.cpp: |R| plus, for
+        every non-flat pixel p, h_p (|e|^2 - (n_p . e)^2) with e = (G 1_R)_p,
+        nonzero for the regions of p and of its forward neighbours. Each
+        neighbour's term is moved onto that neighbour's pixel, so that the
+        region sums take it."""
+        prob, R = self.prob, self.R
+        lab = R.at.reshape((prob.B,) + tuple(R.img))
+        nxt = []  # the label at p + e_a, or -1 where there is no such edge
+        for a in range(prob.k):
+            t = torch.full_like(lab, -1)
+            n = lab.shape[1 + a]
+            if prob.w[a] != 0.0 and n > 1:
+                t.narrow(1 + a, 0, n - 1).copy_(lab.narrow(1 + a, 1, n - 1))
+            nxt.append(t)
+
+        def term(e):  # h_p (|e|^2 - (n . e)^2) for e = (e_0, ..., e_{k-1})
+            ee = sum(t * t for t in e)
+            ne = sum(self.n[a] * e[a] for a in range(prob.k))
+            return self.h * (ee - ne * ne)
+
+        has = [t >= 0 for t in nxt]
+        own = term([-prob.w[a] * (has[a] & (nxt[a] != lab)).to(dtype) for a in range(prob.k)])
+        for a in range(prob.k):
+            # The region of p + e_a, unless it is p's or an earlier neighbour's.
+            C = nxt[a]
+            new = has[a] & (C != lab)
+            for b in range(a):
+                new = new & (nxt[b] != C)
+            t = torch.where(new, term([prob.w[b] * (nxt[b] == C).to(dtype) for b in range(prob.k)]),
+                            torch.zeros_like(own))
+            n = lab.shape[1 + a]
+            if n > 1:
+                own.narrow(1 + a, 1, n - 1).add_(t.narrow(1 + a, 0, n - 1))
+        d = R.size.to(dtype) + R.sum(own)
+        return torch.where(R.end, 1.0 / torch.where(R.end, d, torch.ones_like(d)), torch.zeros_like(d))
+
     def solve(self, b, tol, max_iter):
         """Region values c with K c = b (isotropic: conjugate gradients per
-        image, preconditioned by 1/|R|; anisotropic: b / |R|); (c, iterations,
+        image, preconditioned by the inverse diagonal of K; anisotropic:
+        b / |R|); (c, iterations,
         largest relative residual)."""
         R = self.R
-        inv = torch.where(R.end, 1.0 / torch.where(R.end, R.size, 1).to(b.dtype), torch.zeros_like(b))
         if self.h is None:
+            inv = torch.where(R.end, 1.0 / torch.where(R.end, R.size, 1).to(b.dtype), torch.zeros_like(b))
             return b * inv, 0, 0.0
+        inv = self.jacobi(b.dtype)
         c = torch.zeros_like(b)
         r = b.clone()
         zr = r * inv

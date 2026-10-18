@@ -1074,14 +1074,14 @@ on one thread and on 15. The backward is the VJP of a random cotangent
 
 | | gap tol | torch CPU | torch MPS | JAX CPU | C, 1 thread | C, 15 threads |
 | --- | --- | --- | --- | --- | --- | --- |
-| isotropic | 1e-4 | 223 (64) | 131 (64) | 186 | 584 (64) | 116 |
-| backward | | 343 | 245 | 1163 | | |
-| isotropic | 1e-6 | 1743 (492) | 1024 (492) | 1477 | 4397 (492) | 906–1322 |
-| backward | | 697 | 516 | 3430 | | |
-| anisotropic | 1e-4 | 244 (92) | 177 (92) | 194 | 293 (9) | 58 |
-| backward | | 103 | 58 | 222 | | |
-| anisotropic | 1e-6 | 1706 (624) | 1235 (624) | 1432 | 1558 (59) | 249 |
-| backward | | 115 | 67 | 138 | | |
+| isotropic | 1e-4 | 227 (64) | 130 (64) | 186 | 546 (64) | 114 |
+| backward | | 1227 | 948 | 5724 | | |
+| isotropic | 1e-6 | 1775 (492) | 1013 (492) | 1362 | 4113 (492) | 906–1322 |
+| backward | | 3282 | 2494 | 20285 | | |
+| anisotropic | 1e-4 | 234 (92) | 180 (92) | 185 | 289 (9) | 59 |
+| backward | | 97 | 37 | 182 | | |
+| anisotropic | 1e-6 | 1675 (624) | 1197 (624) | 1290 | 1550 (59) | 251 |
+| backward | | 43 | 39 | 197 | | |
 
 Isotropic TV on the device is the C kernel's method and takes its
 iterations; on this integrated GPU, which shares the memory bandwidth of the
@@ -1097,10 +1097,22 @@ The backward first solved the linearised dual problem by conjugate gradients
 without region labels (stencils only): 1500–2900 iterations on a 256² image,
 3–21 s on these batches. Regions found on the device bring it to the C
 kernels' systems: exact averages for anisotropic TV (no iterations) and
-16–104 region-space iterations for isotropic TV (the C kernel: 26–197).
+16–104 region-space iterations for isotropic TV (the C kernel: 26–197) with
+the earlier flat test.
 Finding them by min-label propagation took 225 rounds (670 ms on MPS);
 hooking with a scatter of minima and pointer jumping takes a few rounds
 (45–160 ms). JAX on the CPU runs the region sums more slowly than PyTorch.
+
+The backward was rerun (2026-10-18) after the flat pixels and edges came to
+be read off the dual and the isotropic curvature was capped (ROADMAP.md,
+CHANGELOG). Before, with a threshold on |G z|, the isotropic backward took
+245 ms (1e-4) and 516 ms (1e-6) on MPS and 343–697 ms on the CPU, with
+gradient errors of 0.89 and 0.66 on the DeepInverse comparison's images
+(below). Its system is now stiffer (pixels on the sphere with small
+gradients), so it takes 3.6–4.8× longer on the GPU even with the C kernel's
+Jacobi preconditioner (uncapped: 6–7×), and JAX on the CPU 5–6×. The
+anisotropic backward is unchanged in cost (exact region averages); its
+gradient is now exact at a gap tolerance of 1e-8 on 128² images.
 
 ## 2026-10-18, Apple M5 Pro: isotropic TV against DeepInverse
 
@@ -1135,24 +1147,32 @@ option here, and moving the CUDA kernels of 1.x forward is not called for by
 these numbers (a discrete GPU over PCIe was not measured).
 
 **Backward** (gradient of ⟨z, c⟩ for a random c; memory on MPS is the
-allocation alive after the forward):
+allocation alive after the forward; rerun after the flat pixels came to be
+read off the dual, see below):
 
 | Method | backward, MPS | memory kept | gradient error |
 | --- | --- | --- | --- |
-| DeepInverse, 50 iterations | 191 ms | 492 MiB | 2.4 |
-| DeepInverse, 100 iterations | 180 ms | 992 MiB | 1.1 |
-| DeepInverse, 200 iterations | 354 ms | 1992 MiB | 0.32 |
-| DeepInverse, 400 iterations | 708 ms | 3992 MiB | 0.065 |
-| fastprox, tol 1e-4 | 195 ms | 6 MiB | 0.89 |
-| fastprox, tol 1e-6 | 131 ms | 6 MiB | 0.66 |
+| DeepInverse, 50 iterations | 96 ms | 492 MiB | 2.4 |
+| DeepInverse, 100 iterations | 182 ms | 992 MiB | 1.1 |
+| DeepInverse, 200 iterations | 366 ms | 1992 MiB | 0.32 |
+| DeepInverse, 400 iterations | 729 ms | 3992 MiB | 0.062 |
+| fastprox, tol 1e-4 | 237 ms | 6 MiB | 0.47 |
+| fastprox, tol 1e-6 | 612 ms | 6 MiB | 0.065 |
+| fastprox, tol 1e-7 | 816 ms | 6 MiB | 0.066 |
 
 The unrolled backward keeps 10 MiB per iteration of this batch, so its
 memory grows with the iterations (4 GiB at 400; 1600 would not fit); the
 implicit one keeps the solution and the dual. The gradient errors are
-against the exact gradient at the reference solution. fastprox's are those
-of the C kernel's derivative at the same tolerance (0.89, 0.66, 0.29 and 0.10
-at 1e-4 to 1e-10): its test for flat pixels, |g_p| ≤ 8·rms(gap), groups
-pixels that are nearly flat at a loose tolerance. Reading flat pixels off the
-dual (|u_p| < γ(1 − δ)) cut the error to 0.04 at a tolerance of 1e-6 and
-0.004 at 1e-8 on 2 × 128² images; that change, for the C kernel and the
-device path, is the next item in ROADMAP.md.
+against the exact gradient at the reference solution, the C kernel's VJP
+solved to a residual of 1e-10 (18 548 conjugate gradient iterations; the
+default cap of 10 000 stops at 3e-5). At a gap tolerance of 1e-6 fastprox
+matches DeepInverse's 400 iterations in gradient error (its forward is 3×
+faster to that point, 235 against 763 ms) with 1/650 of the memory; in
+float32 its error levels off near 0.065 (1e-7 is no better).
+
+Before, fastprox's errors were 0.89 at 1e-4 and 0.66 at 1e-6 (backward 195
+and 131 ms): its test for flat pixels, |g_p| ≤ 8·rms(gap), grouped pixels
+that are nearly flat at a loose tolerance. Flat pixels are now read off the
+dual (‖u_p‖ < γ(1 − δ)), with the curvature capped at the level of the
+certified error (CHANGELOG): 1.9–10× more accurate, at 1.2–4.7× the
+backward time.

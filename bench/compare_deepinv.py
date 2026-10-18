@@ -100,7 +100,7 @@ def main():
     c64 = rng.normal(size=x64.shape)
     op = fp.TVIso(2)
     ref, ctx = op.prox(x64, GAMMA, keep=True, tol=1e-13, max_iter=10 ** 6)
-    gref, _ = op.vjp(ctx, c64)
+    gref, _ = op.vjp(ctx, c64, max_iter=10 ** 5)  # 18 548 iterations here; the default stops at 10 000
     devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else []) + \
         (["cuda"] if torch.cuda.is_available() else [])
     print(f"isotropic TV, {batch} x {size}^2 float32, gamma {GAMMA}; reference: C kernel, float64, gap 1e-13",
@@ -139,7 +139,7 @@ def main():
         print("  backward (gradient of <z, c>):", flush=True)
         runs = [(f"deepinv {n} it", (lambda n=n: lambda xx: deepinv_tv(xx, n))()) for n in (50, 100, 200, 400)]
         runs += [(f"fastprox tol {tol:g}", (lambda tol=tol: lambda xx: fpt.tv_iso(xx, GAMMA, tol=tol, max_iter=100000))())
-                 for tol in (1e-4, 1e-6)]
+                 for tol in (1e-4, 1e-6, 1e-7)]
         for name, f in runs:
             xg = x.clone().requires_grad_()
             z, mem = mem_after(dev, lambda: f(xg))

@@ -143,6 +143,29 @@ def test_loose_tolerances(gamma):
     assert iters[0] < 4 and iters == sorted(iters)
 
 
+def disk_and_band(n, seed):
+    """A disk and a band plus noise 0.1, the images of bench/compare_deepinv.py."""
+    rng = np.random.default_rng(seed)
+    a, b = np.mgrid[0:n, 0:n] / n
+    return (((a - 0.5) ** 2 + (b - 0.45) ** 2 < 0.08) + 0.5 * (b > 0.7)) + 0.1 * rng.normal(size=(n, n))
+
+
+@pytest.mark.parametrize("n,gamma", [(40, 0.05), (32, 0.1)])
+def test_derivatives_at_loose_tolerances(n, gamma):
+    """The regions of the derivative are those of the polish, read off the
+    dual (edges strictly inside their bound), so once the polish has found
+    them a loose solve has the exact derivative."""
+    x = disk_and_band(n, 0)
+    c = np.random.default_rng(9).normal(size=x.shape)
+    op = fp.TVAniso(2)
+    _, ctx = op.prox(x, gamma, keep=True, tol=1e-15, max_iter=10 ** 7)
+    gref, rref = op.vjp(ctx, c)
+    for tol in (1e-6, 1e-8):
+        _, cx = op.prox(x, gamma, keep=True, tol=tol, max_iter=10 ** 6)
+        g, r = op.vjp(cx, c)
+        np.testing.assert_allclose(g, gref, rtol=0, atol=1e-12)
+        assert r.gamma == pytest.approx(rref.gamma, rel=1e-12)
+
 def _fd_case(shape, k, conj, seed):
     rng = np.random.default_rng(seed)
     x = image(shape, seed)

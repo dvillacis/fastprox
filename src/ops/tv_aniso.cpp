@@ -204,7 +204,7 @@ struct TVAniso final : ImageOp<TVAniso> {
             std::fill(q, q + k * N, std::numeric_limits<double>::quiet_NaN());
             if (c.save) {  // singleton components, so that jvp/vjp stay defined
                 const double none[3] = {0.0, 0.0, 0.0};
-                structure(g, c, none, -1, d, d, u);
+                structure(g, c, none, d, u);
             }
             return kRowOk;
         }
@@ -226,7 +226,7 @@ struct TVAniso final : ImageOp<TVAniso> {
 
         if (na == 0) {
             for (int64_t i = 0; i < N; ++i) z[i] = x[i];
-            if (c.save) structure(g, c, lam, -1, d, d, u);
+            if (c.save) structure(g, c, lam, d, u);
             return kRowOk;
         }
         if (na == 1) {  // exact
@@ -234,7 +234,7 @@ struct TVAniso final : ImageOp<TVAniso> {
             double *qa = q + a * N;
             pass(g, a, lam[a], c, [&](int64_t o) { return d[o]; },
                  [&](int64_t o, double zo, double v) { zz[o] = zo; qa[o] = v - zo; });
-            if (c.save) structure(g, c, lam, a, d, zz, u);
+            if (c.save) structure(g, c, lam, zz, u);
             for (int64_t i = 0; i < N; ++i) z[i] = static_cast<T>(zz[i]);
             return kRowOk;
         }
@@ -246,16 +246,9 @@ struct TVAniso final : ImageOp<TVAniso> {
             return s;
         });
         const double target = c.tol * 0.5 * dn2;
-        // The iterate z is a block step along exact_axis, piecewise constant
-        // there (exactly in 3D, up to rounding in 2D); a polished z is not.
-        int exact_axis;
-        if (na == 2) {
-            exact_axis = adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target);
-        } else {
-            exact_axis = 2;
-            if (fdpg3(g, c, lam, d, zz, u, y, wv, pb, part, target)) exact_axis = -1;
-        }
-        if (c.save) structure(g, c, lam, exact_axis, d, zz, u);
+        if (na == 2) adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target);
+        else fdpg3(g, c, lam, d, zz, u, y, wv, pb, part, target);
+        if (c.save) structure(g, c, lam, zz, u);
         for (int64_t i = 0; i < N; ++i) z[i] = static_cast<T>(zz[i]);
         return kRowOk;
     }
@@ -318,9 +311,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         }
     };
 
-    // Two active axes a1 (the one with the smaller stride) and a2. Returns
-    // the axis along which the returned z is a block step (piecewise constant
-    // up to rounding), or -1.
+    // Two active axes a1 (the one with the smaller stride) and a2.
     //
     // The iterate checked is the second block step of an iteration,
     // r = prox_{g2}(u - w) with u = prox_{g1}(d + w), not z(y+) =
@@ -334,7 +325,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     // The z returned unpolished is d - q1 - q2 for the dual returned, which
     // is r up to rounding, so that a warm start from that dual rebuilds it
     // bit for bit; the polish depends on (d, q) alone as well.
-    int adbpg(const Geom &g, ImageCall &c, const int *act, const double *lam, const double *d, double *z,
+    void adbpg(const Geom &g, ImageCall &c, const int *act, const double *lam, const double *d, double *z,
               double *u, double *y, double *wv, const PolishBuf &pb, double *part, double target) const {
         const int64_t N = g.N;
         const int a1 = g.S[act[0]] < g.S[act[1]] ? act[0] : act[1];
@@ -418,7 +409,6 @@ struct TVAniso final : ImageOp<TVAniso> {
                 checks.done(it, gp, target);
             }
         }
-        int exact = polished || it == 0 ? -1 : a2;
         if (!polished && it > 0) {
             // d - q1 - q2 in place of r, unless rounding alone takes its gap
             // over the target.
@@ -432,12 +422,11 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.gap = std::max(gp, 0.0);
         c.iters = it;
         c.converged = gp <= target;
-        return exact;
     }
 
     // Three active axes (k == 3). y holds y_0..2 (y_i = -q_i), wv the
     // extrapolated w_0..2.
-    bool fdpg3(const Geom &g, ImageCall &c, const double *lam, const double *d, double *z, double *u,
+    void fdpg3(const Geom &g, ImageCall &c, const double *lam, const double *d, double *z, double *u,
                double *y, double *wv, const PolishBuf &pb, double *part, double target) const {
         const int64_t N = g.N;
         constexpr double p = 3.0;
@@ -518,7 +507,6 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.gap = std::max(gp, 0.0);
         c.iters = it;
         c.converged = gp <= target;
-        return polished;
     }
 
     // ---- warm starts -----------------------------------------------------------
@@ -814,18 +802,38 @@ struct TVAniso final : ImageOp<TVAniso> {
 
     // ---- structure ----------------------------------------------------------
 
-    // Saved for jvp/vjp: the components of the graph of flat edges of z
-    // (|z_j - z_i| <= tau along an active axis; equal up to rounding along
-    // exact_axis, where z is a block step and so piecewise constant by
-    // construction, or d - q1 - q2 for the q of one) and the boundary sign
-    // sums S_{C,a} on every axis. Uses u as scratch.
-    void structure(const Geom &g, ImageCall &c, const double *lam, int exact_axis, const double *d,
-                   const double *z, double *u) const {
+    // Saved for jvp/vjp: the components of the graph of flat edges and the
+    // boundary sign sums S_{C,a} on every axis. Along an active axis an edge
+    // is flat when its 1D dual is strictly inside its bound, |p_e| <
+    // lam_a (1 - kPolishEta), as in the polish, and a boundary edge takes the
+    // sign of its jump at the solution, sign(z_i - z_j) = -sign(p_e) for
+    // p_e = lam_a sign(z_j - z_i); the derivatives are
+    // those of the polish's closed form on these components. A threshold on
+    // the jumps of z instead (8 times the rms error that the gap certifies)
+    // gave errors of 0.07-0.19 against the exact derivative on 128^2 images
+    // at a gap tolerance of 1e-8. Along other axes the components do not
+    // join and the signs are those of z's jumps. Uses u as scratch.
+    void structure(const Geom &g, ImageCall &c, const double *lam, const double *z, double *u) const {
         const int64_t N = g.N;
         const View v = view(c.save, N);
         int32_t *label = v.label;
         double *inv = v.inv, *S = v.S;
         int32_t *parent = reinterpret_cast<int32_t *>(u);
+        // f(i, s, p_e) for every edge (i, i + s) along active axis a, in
+        // fiber order, with p_e = -(sum of q_a along the fiber up to i).
+        auto edges = [&](int a, auto &&f) {
+            const int64_t s = g.S[a], L = g.L[a];
+            const double *qa = c.dual + a * N;
+            for (int64_t st = 0; st < N; ++st) {
+                if ((st / s) % L != 0) continue;
+                double acc = 0.0;
+                for (int64_t l = 0; l + 1 < L; ++l) {
+                    const int64_t i = st + l * s;
+                    acc += qa[i];
+                    f(i, s, -acc);
+                }
+            }
+        };
 
         // Union-find, roots at the smallest index (deterministic labels).
         for (int64_t i = 0; i < N; ++i) parent[i] = static_cast<int32_t>(i);
@@ -836,24 +844,16 @@ struct TVAniso final : ImageOp<TVAniso> {
             }
             return i;
         };
-        double scale = 0.0;
-        for (int64_t i = 0; i < N; ++i) scale = std::max(scale, std::fabs(d[i]));
-        const double rms = std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N));
-        // The entries of d - q1 - q2 are within a few ulps of
-        // max(|d|, |q1|, |q2|), and |q_a| <= 2 lam_a.
-        const double ulps = 64.0 * 2.2e-16 * (scale + 2.0 * (lam[0] + lam[1] + lam[2]));
         for (int a = 0; a < g.k; ++a) {
-            if (lam[a] == 0.0) continue;
-            const double tau = a == exact_axis ? ulps : 8.0 * rms + 64.0 * 2.2e-16 * scale;
-            const int64_t s = g.S[a], L = g.L[a];
-            for (int64_t i = 0; i < N; ++i) {
-                if ((i / s) % L == L - 1) continue;
-                if (!(std::fabs(z[i + s] - z[i]) <= tau)) continue;
+            if (lam[a] == 0.0 || g.L[a] == 1) continue;
+            const double in = lam[a] * (1.0 - kPolishEta);
+            edges(a, [&](int64_t i, int64_t s, double pe) {
+                if (!(std::fabs(pe) < in)) return;
                 int64_t ri = find(i), rj = find(i + s);
-                if (ri == rj) continue;
+                if (ri == rj) return;
                 if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
                 else parent[ri] = static_cast<int32_t>(rj);
-            }
+            });
         }
         int64_t nc = 0;
         for (int64_t i = 0; i < N; ++i) {
@@ -867,14 +867,20 @@ struct TVAniso final : ImageOp<TVAniso> {
             const int64_t s = g.S[a], L = g.L[a];
             if (L == 1) continue;
             double *Sa = S + a * N;
-            for (int64_t i = 0; i < N; ++i) {
-                if ((i / s) % L == L - 1) continue;
+            auto add = [&](int64_t i, double sg) {
                 const int32_t ci = label[i], cj = label[i + s];
-                if (ci == cj) continue;
-                const double diff = z[i] - z[i + s];
-                const double sg = diff > 0.0 ? 1.0 : (diff < 0.0 ? -1.0 : 0.0);
+                if (ci == cj) return;
                 Sa[ci] += sg;
                 Sa[cj] -= sg;
+            };
+            if (lam[a] > 0.0) {
+                edges(a, [&](int64_t i, int64_t, double pe) { add(i, pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : 0.0)); });
+                continue;
+            }
+            for (int64_t i = 0; i < N; ++i) {
+                if ((i / s) % L == L - 1) continue;
+                const double diff = z[i] - z[i + s];
+                add(i, diff > 0.0 ? 1.0 : (diff < 0.0 ? -1.0 : 0.0));
             }
         }
         for (int64_t C = 0; C < nc; ++C) inv[C] = 1.0 / inv[C];
