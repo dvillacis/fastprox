@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Kink masks for 1D, anisotropic and isotropic TV (`fp_workspace_kinks`, `ctx.kinks(tol)`): the edges (1D TV: code 1 at the tail; anisotropic TV: bit a for an edge along axis a) and pixels (isotropic TV) where the dual is within `tol` of its bound and the jump or gradient within `tol` of 0, the biactive points where the derivative is set-valued; weights included. Read from the saved solution and dual, the same for any thread count, and checked against the definition recomputed from the returned z and dual. Branch overrides for TV come later (`fp_workspace_set_branch` returns `FP_EINVAL` for them).
+- The ties of ℓ0, ℓq and the log penalty are kinks (code 1): masks and branch overrides, with the zero piece on one side and the nonzero branch on the other, as for SCAD and MCP; for the log penalty with γλ ≤ ε², whose map is continuous, the kink where its branch starts. Each side matches its one-sided difference.
+
 - Spatial weights in the device-native image TV: `pixel_weights` in `fastprox.torch.tv_iso` and `fastprox.jax.tv_iso`, `edge_weights` in `tv_aniso`, the problems of `TVIso(pixel_weights=)` and `TVAniso(edge_weights=)` on the input's device. One map for every image or one per image (the weights broadcast to `x.shape`, edge weights with a leading axis of ndim), differentiable in reverse mode and, in PyTorch, forward mode, with gradients summed back to the weights' shapes. Each image matches the C kernel with its own map, gradients included (to 1e-11, exactly for anisotropic TV); tested by gradcheck, check_grads, `vmap` and on the GPU. 7–12% more time per forward on MPS.
 
 ### Fixed

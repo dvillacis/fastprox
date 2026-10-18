@@ -503,6 +503,28 @@ struct TV1D final : RowOp<TV1D> {
         return kRowOk;
     }
 
+    // Kinks (since 0.3): code 1 at entry e when the edge (e, e + 1) is
+    // biactive, its jump within tol of 0 and its dual u_e = sum_{i <= e}
+    // (x_i - z_i) within tol of its bound gamma w_e (edges of zero weight are
+    // free, never kinks); 0 elsewhere, and at the last entry.
+    bool has_kinks() const noexcept override { return true; }
+    int64_t kink_row(const double *x, const double *z, int64_t n, double gamma, double tol, int8_t *mask,
+                     int64_t ms) const noexcept override {
+        int64_t count = 0;
+        double u = 0.0;
+        for (int64_t e = 0; e < n; ++e) {
+            int8_t code = 0;
+            if (e + 1 < n) {
+                u += x[e] - z[e];
+                const double r = gamma * we(e);
+                code = r > 0.0 && std::fabs(z[e + 1] - z[e]) <= tol && std::fabs(u) >= r - tol;
+            }
+            if (mask) mask[e * ms] = code;
+            count += code;
+        }
+        return count;
+    }
+
     // The prox of gamma sum_e we[e] |z_{e+1} - z_e| for weights given per call
     // (we[n - 1] = 0 ends the row), as for this operator's own weights.
     int prox_edges(const double *x, double *z, int64_t n, double gamma, const double *we,

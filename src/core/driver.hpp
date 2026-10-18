@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <vector>
 
 namespace fp {
 
@@ -165,6 +166,31 @@ int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const 
                 for (int64_t i = 0; i < m; ++i) md[off[0] + (i0 + i) * ms] = buf[i];
         }
     });
+    return count;
+}
+
+// Kink codes of row operators with has_kinks() (since 0.3): row by row from
+// the saved input and solution, into mask (may be null) through its strides.
+template <class T>
+int64_t row_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const Arr *mask) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[1] = {mask ? mask->strides : cstr};
+    const RowPlan p = make_row_plan(ws.ndim, ws.shape, ws.axis, 1, st);
+    const int64_t n = p.n;
+    const double t = ws.conj ? tol / ws.sigma : tol;
+    int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
+    std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
+    int64_t count = 0;
+    for (int64_t r = 0; r < p.rows; ++r) {
+        const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
+        for (int64_t i = 0; i < n; ++i) {
+            xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
+            zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
+        }
+        int64_t off[1];
+        p.offsets(r, off);
+        count += op.kink_row(xb.data(), zb.data(), n, ws.gamma, t, md ? md + off[0] : nullptr, p.astride[0]);
+    }
     return count;
 }
 
@@ -411,6 +437,47 @@ inline ImagePlan make_image_plan(int ndim, const int64_t *shape, int k, int narr
 // of T (input, output, and a third for the conjugate jvp), then the kernel's
 // own working set.
 inline size_t image_staging_bytes(int64_t numel) noexcept { return round64(3 * static_cast<size_t>(numel) * 8); }
+
+// Kink codes of image operators with has_kinks() (since 0.3): image by image
+// from the saved input, solution and dual.
+template <class T>
+int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const Arr *mask) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[1] = {mask ? mask->strides : cstr};
+    const ImagePlan p = make_image_plan(ws.ndim, ws.shape, op.image_ndim(), 1, st);
+    const int64_t N = p.numel;
+    const int k = p.k;
+    const double t = ws.conj ? tol / ws.sigma : tol;
+    int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
+    int64_t ms[3];
+    for (int a = 0; a < k; ++a) ms[a] = p.istride[0][3 - k + a];
+    // Without a mask, one image's codes in scratch (C order): the kernels
+    // count flagged entries from them.
+    std::vector<int8_t> scratch;
+    if (!md) {
+        scratch.resize(static_cast<size_t>(N));
+        int64_t s = 1;
+        for (int a = k - 1; a >= 0; --a) {
+            ms[a] = s;
+            s *= p.ishape[3 - k + a];
+        }
+    }
+    std::vector<double> xb(static_cast<size_t>(N)), zb(static_cast<size_t>(N));
+    int64_t count = 0;
+    for (int64_t r = 0; r < p.images; ++r) {
+        const T *xs = ws.xs<T>() + r * N, *zs = ws.zs<T>() + r * N;
+        for (int64_t i = 0; i < N; ++i) {
+            xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
+            zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
+        }
+        int64_t off[1];
+        p.offsets(r, off);
+        const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
+        count += op.kink_image(xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.gamma, t,
+                               md ? md + off[0] : scratch.data(), ms);
+    }
+    return count;
+}
 
 template <class T>
 fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, double gamma, bool conj,

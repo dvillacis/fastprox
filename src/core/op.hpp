@@ -147,6 +147,15 @@ struct fp_op {
                              int8_t *) const noexcept { return 0; }
     virtual int64_t kink_run(const double *, int64_t, double, int64_t, int64_t, double,
                              int8_t *) const noexcept { return 0; }
+    // Kinks of row and image operators with has_kinks() (since 0.3), from the
+    // saved input x and solution z (in double) and, for images, the dual of
+    // the call: codes into mask (one per entry, at the given strides, the
+    // image's axes for kink_image; never null for kink_image); returns the
+    // number of flagged entries.
+    virtual int64_t kink_row(const double *, const double *, int64_t, double, double, int8_t *,
+                             int64_t) const noexcept { return 0; }
+    virtual int64_t kink_image(const double *, const double *, const double *, const int64_t *, double,
+                               double, int8_t *, const int64_t *) const noexcept { return 0; }
 
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.

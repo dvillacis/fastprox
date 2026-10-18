@@ -67,6 +67,23 @@ fp_status emit(fp_op **out, A &&...a) {
 
 inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 
+// of 0; 0 if none.
+inline int nearest_kink(double x, const double *t, int m, double tol, Kink &k) noexcept {
+    const double ax = std::fabs(x);
+    int code = 0;
+    double best = tol;
+    for (int j = 0; j < m; ++j) {
+        const double dist = std::fabs(ax - t[j]);
+        if (dist <= best && (code == 0 || dist < best)) {
+            code = j + 1;
+            best = dist;
+            k.b = std::copysign(t[j], x);
+            k.scale = t[j];
+        }
+    }
+    return code;
+}
+
 // ---- l0 -------------------------------------------------------------------------------
 
 struct L0 final : ElemOp<L0> {
@@ -95,6 +112,20 @@ struct L0 final : ElemOp<L0> {
         const double a = std::fabs(x), t = thr(gamma, i);
         e.j = (a > t || (a == t && t > 0.0 && tie == FP_TIE_NONZERO)) ? 1.0 : 0.0;
         return e;  // piecewise constant in gamma and w
+    }
+    // Pieces: 0 zero, 1 the identity; the kink (since 0.3) is the tie |x| = t.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        return {std::fabs(x) > thr(gamma, i) ? 1 : 0, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double, double, int64_t, Piece pc) const noexcept {
+        ElemDeriv e;
+        e.j = pc.id;
+        return e;
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double t[1] = {thr(gamma, i)};
+        return t[0] > 0.0 ? nearest_kink(x, t, 1, tol, k) : 0;
     }
 };
 
@@ -225,7 +256,12 @@ struct Lq final : ElemOp<Lq> {
             return e;
         }
         if (!on || m == 0.0) return e;
-        const double s = sgn(x), mq = pw(m);
+        return branch_deriv(m, sgn(x), gamma, i);
+    }
+    // The derivative on the nonzero branch at |z| = m, sign s.
+    ElemDeriv branch_deriv(double m, double s, double gamma, int64_t i) const noexcept {
+        ElemDeriv e;
+        const double lw = lambda * w[wi(i)], lam = gamma * lw, mq = pw(m);
         const double den = 1.0 + lam * q * (q - 1.0) * mq / m;
         e.j = 1.0 / den;
         e.dg = -lw * q * mq * s / den;
@@ -233,6 +269,37 @@ struct Lq final : ElemOp<Lq> {
         e.pi[0] = wi(i);
         e.pv[0] = -gamma * lambda * q * mq * s / den;
         return e;
+    }
+    // Pieces: 0 zero, 1 the nonzero branch, taken at max(|x|, tau) (at tau
+    // its root is beta); the kink (since 0.3) is the tie |x| = tau.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t i) const noexcept {
+        const double lam = gamma * lambda * w[wi(i)];
+        if (lam == 0.0) return {1, sgn(x)};
+        double beta, tau;
+        thresholds(lam, beta, tau);
+        return {std::fabs(x) > tau ? 1 : 0, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double x, double gamma, int64_t i, Piece pc) const noexcept {
+        ElemDeriv e;
+        const double lam = gamma * lambda * w[wi(i)];
+        if (pc.id == 0) return e;
+        if (lam == 0.0) {
+            e.j = 1.0;
+            return e;
+        }
+        double beta, tau;
+        thresholds(lam, beta, tau);
+        const double a = std::fabs(x);
+        return branch_deriv(a > tau ? root(a, lam, beta) : beta, pc.s, gamma, i);
+    }
+    int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
+        const double lam = gamma * lambda * w[wi(i)];
+        if (!(lam > 0.0)) return 0;
+        double beta, tau;
+        thresholds(lam, beta, tau);
+        const double t[1] = {tau};
+        return nearest_kink(x, t, 1, tol, k);
     }
 };
 
@@ -248,22 +315,6 @@ struct Lq final : ElemOp<Lq> {
 // (lambda, a or b, w...) with them.
 
 // The breakpoint +-t[j] (j + 1 the code) nearest to x within tol, on x's side
-// of 0; 0 if none.
-inline int nearest_kink(double x, const double *t, int m, double tol, Kink &k) noexcept {
-    const double ax = std::fabs(x);
-    int code = 0;
-    double best = tol;
-    for (int j = 0; j < m; ++j) {
-        const double dist = std::fabs(ax - t[j]);
-        if (dist <= best && (code == 0 || dist < best)) {
-            code = j + 1;
-            best = dist;
-            k.b = std::copysign(t[j], x);
-            k.scale = t[j];
-        }
-    }
-    return code;
-}
 
 // Shared by both: lambda, the concavity, the weights and their maximum.
 // Weighted is a template parameter, so the unweighted maps load no weight per
@@ -501,13 +552,81 @@ struct LogPen final : ElemOp<LogPen> {
         bool tied, on;
         const double r = mag(std::fabs(x), lam, tie, tied, on);
         if (!on || r == 0.0) return e;
-        const double s = sgn(x), u = eps + r;
+        return branch_deriv(r, sgn(x), gamma);
+    }
+    // The derivative on the nonzero branch at z = s r.
+    ElemDeriv branch_deriv(double r, double s, double gamma) const noexcept {
+        ElemDeriv e;
+        e.np = 2;
+        e.pi[0] = 0;
+        e.pi[1] = 1;
+        const double lam = gamma * lambda, u = eps + r;
         const double den = 1.0 - lam / (u * u);
         e.j = 1.0 / den;
         e.dg = -lambda * s / u / den;
         e.pv[0] = -gamma * s / u / den;
         e.pv[1] = lam * s / (u * u) / den;
         return e;
+    }
+    // The root r(a) of the stationarity condition on the nonzero branch, a >=
+    // 2 sqrt(lam) - eps (0 below that).
+    double branch(double a, double lam) const noexcept {
+        const double disc = (a + eps) * (a + eps) - 4.0 * lam;
+        return disc >= 0.0 ? std::fmax(0.0, 0.5 * ((a - eps) + std::sqrt(disc))) : 0.0;
+    }
+    // The breakpoint in |x| (since 0.3): lam / eps where the map is
+    // continuous (lam <= eps^2, the branch starts at 0), else the tie, where
+    // F(r(a)) - F(0) = r (r / 2 - a) + lam log(1 + r / eps), decreasing in a
+    // (its derivative is -r), crosses 0; by bisection, cached per thread.
+    double breakpoint(double lam) const noexcept {
+        if (lam <= eps * eps) return lam / eps;
+        thread_local double c_lam = -1.0, c_eps = -1.0, c_t = 0.0;
+        if (c_lam == lam && c_eps == eps) return c_t;
+        auto df = [&](double a) {
+            const double r = branch(a, lam);
+            return r * (0.5 * r - a) + lam * std::log1p(r / eps);
+        };
+        double lo = 2.0 * std::sqrt(lam) - eps, hi = std::fmax(2.0 * lo, lo + eps);
+        for (int it = 0; it < 200 && df(hi) > 0.0; ++it) hi *= 2.0;
+        for (int it = 0; it < 200 && hi - lo > 2.220446049250313e-16 * hi; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            (df(mid) > 0.0 ? lo : hi) = mid;
+        }
+        c_lam = lam;
+        c_eps = eps;
+        c_t = hi;
+        return hi;
+    }
+    // Pieces: 0 zero, 1 the nonzero branch at |x| (at max(|x|, the
+    // breakpoint) for a tie); the kink is the breakpoint.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double gamma, int64_t) const noexcept {
+        const double lam = gamma * lambda;
+        if (lam == 0.0) return {1, sgn(x)};
+        return {std::fabs(x) > breakpoint(lam) ? 1 : 0, sgn(x)};
+    }
+    ElemDeriv deriv_piece(double x, double gamma, int64_t, Piece pc) const noexcept {
+        const double lam = gamma * lambda;
+        if (pc.id == 0) {
+            ElemDeriv e;
+            e.np = 2;
+            e.pi[0] = 0;
+            e.pi[1] = 1;
+            return e;
+        }
+        if (lam == 0.0) {
+            ElemDeriv e;
+            e.j = 1.0;
+            return e;
+        }
+        const double a = std::fmax(std::fabs(x), lam > eps * eps ? breakpoint(lam) : 0.0);
+        return branch_deriv(branch(a, lam), pc.s, gamma);
+    }
+    int kink1(double x, double gamma, int64_t, double tol, Kink &k) const noexcept {
+        const double lam = gamma * lambda;
+        if (!(lam > 0.0)) return 0;
+        const double t[1] = {breakpoint(lam)};
+        return nearest_kink(x, t, 1, tol, k);
     }
 };
 

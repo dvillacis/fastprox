@@ -1,5 +1,7 @@
 """Kink masks and branch overrides of the elementwise maps with kinks (soft
-thresholding, l1 over a box, SCAD, MCP): codes at exact and near kinks,
+thresholding, l1 over a box, SCAD, MCP; since 0.3 the ties of l0, lq and the
+log penalty), and the kink masks of 1D, anisotropic and isotropic TV (since
+0.3): codes at exact and near kinks,
 the tolerance, and the gate in ROADMAP.md: with each side's override the
 derivative matches the one-sided finite difference from that side, in x and
 in the parameters, and the mask does not depend on the thread count."""
@@ -171,7 +173,7 @@ def test_threads_float32_and_errors():
     d0 = op.jvp(ctx, np.ones_like(x))
     op.jvp(ctx, np.ones_like(x), branch=1)
     np.testing.assert_array_equal(op.jvp(ctx, np.ones_like(x)), d0)
-    for other in (fp.Huber(0.5, 0.3), fp.L0(0.3)):
+    for other in (fp.Huber(0.5, 0.3), fp.ElasticNet(0.3, 0.2)):
         _, c2 = other.prox(x, 0.5, keep=True)
         with pytest.raises(ValueError):
             c2.kinks()
@@ -194,3 +196,173 @@ def test_jacobian_diag_reads_the_scd_subspaces():
     np.testing.assert_array_equal(d[3], 0.0)  # the default rule at |x| = gamma w lambda
     np.testing.assert_allclose(ctx.jacobian_diag(branch=1)[3], slope, rtol=1e-15)
     np.testing.assert_array_equal(ctx.jacobian_diag(branch=-1)[3], 0.0)
+
+
+# ---- ties of the nonconvex maps (since 0.3) ---------------------------------
+
+
+def _lq_tau(lam, q):
+    beta = (2 * lam * (1 - q)) ** (1 / (2 - q))
+    return beta + lam * q * beta ** (q - 1)
+
+
+def _log_breakpoint(lam, eps):
+    if lam <= eps * eps:
+        return lam / eps
+
+    def df(a):
+        r = 0.5 * ((a - eps) + np.sqrt((a + eps) ** 2 - 4 * lam))
+        return r * (0.5 * r - a) + lam * np.log1p(r / eps)
+    lo, hi = 2 * np.sqrt(lam) - eps, 10.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if df(mid) > 0 else (lo, mid)
+    return hi
+
+
+def tie_cases():
+    """name: (operator class and arguments, breakpoints |x| at gamma (six), continuous)."""
+    return {
+        "l0": (lambda **kw: fp.L0(0.5, W, **kw), np.sqrt(2 * GAMMA * 0.5 * W), False),
+        "lq": (lambda **kw: fp.Lq(0.5, 0.5, W, **kw), np.array([_lq_tau(GAMMA * 0.5 * w, 0.5) for w in W]), False),
+        "log": (lambda **kw: fp.LogPenalty(0.5, 0.2, **kw), np.full(6, _log_breakpoint(GAMMA * 0.5, 0.2)), False),
+        "log_continuous": (lambda **kw: fp.LogPenalty(0.1, 0.5, **kw),
+                           np.full(6, _log_breakpoint(GAMMA * 0.1, 0.5)), True),
+    }
+
+
+TIES = sorted(tie_cases())
+
+
+@pytest.mark.parametrize("name", TIES)
+def test_tie_kinks(name):
+    """The breakpoint of each nonconvex map (the tie, or for the log penalty
+    with gamma lam <= eps^2 the start of its continuous branch) is a kink:
+    code 1 within the tolerance, and each side's override is the derivative
+    of the one-sided difference from that side. The points sit a relative
+    1e-10 on either side (the breakpoints here are computed independently of
+    the library's, so not to the last bit), with entries of both signs."""
+    make, b, _ = tie_cases()[name]
+    op = make()
+    _, ctx = op.prox(np.stack([b, -b]), GAMMA, keep=True)
+    assert np.all(ctx.kinks(1e-9 * (1 + b.max())) == 1)
+    _, far = op.prox(0.5 * b, GAMMA, keep=True)
+    assert not far.kinks(1e-3).any()
+    h, tol = 1e-7, 1e-8 * (1 + b.max())
+    g = np.random.default_rng(5).normal(size=(2, 6))
+    for side in (1, -1):
+        x = np.stack([b * (1 + side * 1e-10), -b * (1 - side * 1e-10)])  # on the x + side eps piece
+        _, c = op.prox(x, GAMMA, keep=True)
+        assert np.all(c.kinks(tol) == 1)
+        fd = (op.prox(x + side * h, GAMMA) - op.prox(x, GAMMA)) / (side * h)
+        jv = op.jvp(c, np.ones_like(x), branch=side, kink_tol=tol)
+        np.testing.assert_allclose(jv, fd, rtol=1e-5, atol=1e-6)
+        gx, _ = op.vjp(c, g, branch=side, kink_tol=tol)
+        assert abs(float((g * jv).sum()) - float(gx.sum())) <= 1e-12 * (1 + abs(float((g * jv).sum())))
+
+
+# ---- 1D, anisotropic and isotropic TV (since 0.3) ----------------------------
+
+
+def _tv1d_definition(x, z, gamma, w, tol):
+    """Code 1 at entry e when the edge (e, e + 1) has a jump within tol of 0
+    and its dual u_e = sum_{i <= e} (x_i - z_i) within tol of gamma w_e."""
+    u = np.cumsum(x - z, axis=-1)[..., :-1]
+    r = gamma * np.broadcast_to(w, u.shape)
+    m = np.zeros(x.shape, np.int8)
+    m[..., :-1] = (r > 0) & (np.abs(np.diff(z, axis=-1)) <= tol) & (np.abs(u) >= r - tol)
+    return m
+
+
+def _image_definition(iso, z, q, gamma, w, sw, tol):
+    k = q.shape[0]
+    img = z.shape[-k:]
+    if iso:
+        g = np.zeros_like(q)
+        for a in range(k):
+            sl = [slice(None)] * z.ndim
+            sl[z.ndim - k + a] = slice(0, -1)
+            g[a][tuple(sl)] = w[a] * np.diff(z, axis=z.ndim - k + a)
+        r = gamma * (1.0 if sw is None else sw)
+        return ((r > 0) & (np.sqrt((g ** 2).sum(0)) <= tol) & (np.sqrt((q ** 2).sum(0)) >= r - tol)).astype(np.int8)
+    m = np.zeros(z.shape, np.int8)
+    for a in range(k):
+        ax = z.ndim - k + a
+        p = -np.cumsum(q[a], axis=ax)
+        n = img[a]
+        pe = np.take(p, range(n - 1), axis=ax)
+        b = 1.0 if sw is None else np.take(sw[a], range(n - 1), axis=a)
+        r = gamma * w[a] * b
+        bit = (r > 0) & (np.abs(np.diff(z, axis=ax)) <= tol) & (np.abs(pe) >= r - tol)
+        pad = [(0, 0)] * z.ndim
+        pad[ax] = (0, 1)
+        m |= (np.pad(bit, pad) << a).astype(np.int8)
+    return m
+
+
+def test_tv1d_kinks():
+    # Two entries 1 apart at gamma = 1/2: the mean, with the dual exactly on its bound.
+    _, ctx = fp.TV1D().prox(np.array([[0.0, 1.0], [0.0, 3.0]]), 0.5, keep=True)
+    assert ctx.kinks().tolist() == [[1, 0], [0, 0]]
+    rng = np.random.default_rng(6)
+    x = np.repeat(rng.normal(size=(4, 7)), 5, axis=1) + 0.05 * rng.normal(size=(4, 35))
+    for w in (None, rng.uniform(0.5, 1.5, 34) * (rng.random(34) > 0.1)):
+        op = fp.TV1D(w) if w is not None else fp.TV1D()
+        z, ctx = op.prox(x, 0.3, keep=True)
+        ww = 1.0 if w is None else w
+        counts = []
+        for tol in (0.0, 1e-12, 1e-6, 1e-2):
+            m = ctx.kinks(tol)
+            np.testing.assert_array_equal(m, _tv1d_definition(x, z, 0.3, ww, tol))
+            counts.append(int(m.sum()))
+        assert counts == sorted(counts) and counts[-1] > 0
+    # Along another axis, in the conjugate's units (tol in units of y), and in float32.
+    y = np.ascontiguousarray(x.T)
+    _, ca = fp.TV1D().prox(y, 0.3, axis=0, keep=True)
+    _, cr = fp.TV1D().prox(x, 0.3, keep=True)
+    np.testing.assert_array_equal(ca.kinks(1e-2), cr.kinks(1e-2).T)
+    sigma = 2.0  # the kernel solves at the step 1 / sigma on y / sigma
+    _, cc = fp.TV1D().prox_conj(x * sigma, sigma, keep=True)
+    _, cs = fp.TV1D().prox(x, 1 / sigma, keep=True)
+    np.testing.assert_array_equal(cc.kinks(sigma * 1e-2), cs.kinks(1e-2))
+    _, c32 = fp.TV1D().prox(x.astype(np.float32), 0.3, keep=True)
+    assert c32.kinks(1e-2).dtype == np.int8
+
+
+@pytest.mark.parametrize("iso", [True, False])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_image_tv_kinks(iso, weighted):
+    """Pixels (isotropic) or edges (anisotropic, bit a for the edge along axis
+    a) whose dual is on its bound with no jump; the mask is the definition
+    recomputed from the returned z and dual, for any thread count."""
+    rng = np.random.default_rng(7)
+    shape = (2, 12, 14)
+    x = rng.normal(size=shape) + (np.indices(shape[1:]).sum(0) // 4 % 2)
+    w = np.array([1.0, 0.7])
+    sw = None
+    if weighted:
+        sw = rng.uniform(0.3, 1.5, shape[1:] if iso else (2, *shape[1:]))
+        sw[rng.random(sw.shape) < 0.1] = 0.0
+    kw = {} if sw is None else ({"pixel_weights": sw} if iso else {"edge_weights": sw})
+    op = (fp.TVIso if iso else fp.TVAniso)(2, w, **kw)
+    z, ctx = op.prox(x, 0.4, keep=True, tol=1e-12, max_iter=10 ** 6)
+    for tol in (0.0, 1e-8, 1e-3, 3e-2):
+        m = ctx.kinks(tol)
+        np.testing.assert_array_equal(m, _image_definition(iso, z, ctx.info.dual, 0.4, w, sw, tol))
+    m = ctx.kinks(3e-2)
+    assert m.any()
+    for t in (1, 4):
+        _, c2 = op.prox(x, 0.4, keep=True, tol=1e-12, max_iter=10 ** 6, threads=t)
+        np.testing.assert_array_equal(c2.kinks(3e-2), m)
+    with pytest.raises(ValueError):  # branch overrides are elementwise only for now
+        op.jvp(ctx, x, branch=1)
+
+
+def test_image_tv_exact_kinks():
+    # One active axis: each row is the 1D TV of (0, 1) at gamma = 1/2, the
+    # mean, with its dual exactly on the bound.
+    x = np.array([[0.0, 1.0], [0.0, 1.0]])
+    _, ca = fp.TVAniso(2, [0.0, 1.0]).prox(x, 0.5, keep=True)
+    assert ca.kinks().tolist() == [[2, 0], [2, 0]]  # bit 1: the edge along axis 1
+    _, ci = fp.TVIso(2, [0.0, 1.0]).prox(x, 0.5, keep=True)
+    assert ci.kinks().tolist() == [[1, 0], [1, 0]]
