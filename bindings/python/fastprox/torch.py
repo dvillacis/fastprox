@@ -18,16 +18,23 @@ gradient of the parameter of that name (``Grads`` fields, see
 cannot be read as NumPy arrays. The
 computation runs on the CPU in float32 or float64; tensors on another device
 are copied to the CPU and the result back.
+
+:func:`tv_iso` and :func:`tv_aniso` instead solve isotropic and anisotropic
+TV in tensor operations on the input's device, GPU included, with a backward
+on the flat regions of the solution (see ``fastprox._tv_torch``).
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
+from . import _tv_torch as _tvt
 from ._interop import Spec, check_dtype
 
-__all__ = ["prox", "prox_conj"]
+__all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
@@ -111,3 +118,142 @@ class _Prox(torch.autograd.Function):
                     0.0 if dstep is None else _scalar(dstep), dparams)
         dtype, device = ctx.x_like
         return torch.from_numpy(dz).to(device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Device-native image TV
+# ---------------------------------------------------------------------------
+
+
+def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_start=None,
+           return_info=False, deriv_tol=None, deriv_max_iter=10000):
+    """Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
+    ``x``, computed in tensor operations on ``x``'s device and differentiable
+    in ``x``, ``gamma`` and ``weights`` (tensors that require grad), forward
+    and reverse. Each image stops when its duality gap is at most
+    ``tol * |x|^2 / 2``. ``warm_start`` takes the ``dual`` of an earlier
+    call (shape (ndim, *x.shape), the C kernel's form). With
+    ``return_info=True`` returns ``(z, info)``, an :class:`IterInfo` whose
+    ``dual`` is a tensor. The derivatives are the C kernel's: one unknown per
+    flat region, solved by conjugate gradients to ``deriv_tol`` (default
+    1e-10 in float64, 100 eps in float32)."""
+    return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter)
+
+
+def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_start=None,
+             return_info=False, deriv_tol=None, deriv_max_iter=10000):
+    """Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`. A plain
+    dual method on the device (the C kernel's exact 1D steps and polish stay
+    on the CPU), so tight tolerances take more iterations than ``TVAniso``;
+    the dual is in the C kernel's form (q_a with x - z = sum_a q_a). Its
+    derivatives are exact region averages."""
+    return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter)
+
+
+class _TVConfig:
+    def __init__(self, iso, ndim, w, tol, max_iter, warm, deriv_tol, deriv_max_iter):
+        self.iso, self.k, self.w = iso, ndim, w
+        self.tol, self.max_iter, self.warm = float(tol), int(max_iter), warm
+        self.deriv_tol, self.deriv_max_iter = deriv_tol, int(deriv_max_iter)
+        self.info = None
+        self.deriv = None
+
+
+def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
+               deriv_max_iter):
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch.Tensor")
+    check_dtype(_np_dtype(x.dtype))
+    if ndim not in (2, 3):
+        raise ValueError("ndim must be 2 or 3")
+    if x.dim() < ndim:
+        raise ValueError(f"needs a tensor with at least {ndim} dimensions")
+    if not tol >= 0 or max_iter < 0:
+        raise ValueError("tol must be >= 0 and max_iter >= 0")
+    wt = None
+    if weights is None:
+        w = [1.0] * ndim
+    elif isinstance(weights, torch.Tensor) and weights.is_floating_point():
+        wt = weights
+        w = [float(a) for a in weights.detach().cpu().reshape(-1)]
+    else:
+        w = [float(a) for a in np.atleast_1d(np.asarray(weights, np.float64))]
+    if len(w) == 1:
+        w = w * ndim
+    if len(w) != ndim or min(w) < 0 or not all(math.isfinite(a) for a in w):
+        raise ValueError("weights must be one or ndim finite values >= 0")
+    if _scalar(gamma) < 0:
+        raise ValueError("gamma must be >= 0")
+    warm = None
+    if warm_start is not None:
+        warm = torch.as_tensor(warm_start).to(dtype=x.dtype, device=x.device)
+        if tuple(warm.shape) != (ndim, *x.shape):
+            raise ValueError(f"warm_start must have shape {(ndim, *x.shape)}")
+    if deriv_tol is None:
+        deriv_tol = max(1e-10, 100 * torch.finfo(x.dtype).eps)
+    cfg = _TVConfig(iso, ndim, w, tol, max_iter, warm, float(deriv_tol), deriv_max_iter)
+    z = _DeviceTV.apply(cfg, x, gamma, wt)
+    return (z, cfg.info) if return_info else z
+
+
+class _DeviceTV(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, cfg, x, gamma, wt):
+        k = cfg.k
+        img = tuple(x.shape[-k:])
+        xb = x.detach().reshape((-1,) + img)
+        gam = _scalar(gamma)
+        u0 = None
+        if cfg.warm is not None:
+            u0 = _tvt.dual_in(cfg.warm.reshape((k, -1) + img), cfg.w, cfg.iso, k, gam)
+        with torch.no_grad():
+            z, u, gap, it, conv = _tvt.solve(xb, gam, cfg.w, cfg.iso, cfg.tol, cfg.max_iter, u0)
+            dual = _tvt.dual_out(cfg.w, u, cfg.iso, k).reshape((k,) + tuple(x.shape))
+        cfg.info = _tvt.info(gap, it, conv, dual)
+        ctx.cfg, ctx.xb, ctx.z, ctx.u, ctx.gap, ctx.gam = cfg, xb, z, u, gap, gam
+        ctx.shape = tuple(x.shape)
+        ctx.gamma_like = gamma if isinstance(gamma, torch.Tensor) else None
+        ctx.wt = wt
+        ctx.S = None
+        return z.reshape(x.shape)
+
+    @staticmethod
+    def _structure(ctx):
+        if ctx.S is None:
+            cfg = ctx.cfg
+            with torch.no_grad():
+                ctx.S = _tvt.Structure(ctx.xb, ctx.z, ctx.u, ctx.gap, ctx.gam, cfg.w, cfg.iso)
+        return ctx.S
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, c):
+        cfg = ctx.cfg
+        S = _DeviceTV._structure(ctx)
+        with torch.no_grad():
+            r, ggamma, gw, cfg.deriv = S.vjp(c.reshape(ctx.z.shape), cfg.deriv_tol, cfg.deriv_max_iter)
+        out_g = None
+        if ctx.gamma_like is not None and ctx.needs_input_grad[2]:
+            out_g = torch.full_like(ctx.gamma_like, ggamma)
+        out_w = None
+        if ctx.wt is not None and ctx.needs_input_grad[3]:
+            v = torch.tensor(gw, dtype=ctx.wt.dtype, device=ctx.wt.device)
+            out_w = v.sum().reshape(ctx.wt.shape) if ctx.wt.numel() == 1 else v.reshape(ctx.wt.shape)
+        out_x = r.reshape(ctx.shape) if ctx.needs_input_grad[1] else None
+        return None, out_x, out_g, out_w
+
+    @staticmethod
+    def jvp(ctx, _cfg, dx, dgamma, dwt):
+        cfg = ctx.cfg
+        S = _DeviceTV._structure(ctx)
+        dw = None
+        if dwt is not None:
+            vals = [float(a) for a in dwt.detach().cpu().reshape(-1)]
+            dw = vals * cfg.k if len(vals) == 1 else vals
+        with torch.no_grad():
+            dz, cfg.deriv = S.jvp(None if dx is None else dx.reshape(ctx.z.shape),
+                                  0.0 if dgamma is None else _scalar(dgamma), dw,
+                                  cfg.deriv_tol, cfg.deriv_max_iter)
+        return dz.reshape(ctx.shape)

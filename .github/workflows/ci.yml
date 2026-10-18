@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --group interop
-      - run: uv run --group interop pytest -q tests/python/test_torch.py tests/python/test_jax.py
+      - run: uv run --group interop pytest -q tests/python/test_torch.py tests/python/test_jax.py tests/python/test_device_tv.py
 
   wheels:
     name: Wheels ${{ matrix.os }}
