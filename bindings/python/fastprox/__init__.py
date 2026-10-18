@@ -211,6 +211,15 @@ def _vec(v):
     return np.ascontiguousarray(v, dtype=np.float64).reshape(-1)
 
 
+def _deriv_tol(tol):
+    """A derivative solve's tolerance for the C API: None is 0, the default."""
+    if tol is None:
+        return 0.0
+    if not float(tol) > 0:
+        raise ValueError("tol must be > 0 or None")
+    return float(tol)
+
+
 class Operator:
     """Base class: a compiled operator with fixed parameters.
 
@@ -822,24 +831,26 @@ class TVIso(_ImageOperator):
     :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has |u_p| <= gamma and
     z = x - sum_a w_a D_a^T u_a. ``jvp`` and ``vjp`` solve a linear system by
     conjugate gradients to relative residual ``tol`` and record the residual
-    and iterations reached in ``ctx.deriv``. Parameters: weights."""
+    and iterations reached in ``ctx.deriv``; by default (``tol=None``) they
+    stop at the relative error of z that the prox's gap certifies,
+    sqrt(2 gap) / |x|, and at 1e-10 at the tightest. Parameters: weights."""
 
     def __init__(self, ndim=2, weights=None):
         if ndim not in (2, 3):
             raise ValueError("ndim must be 2 or 3")
         super().__init__(_C.tv_iso(int(ndim), _vec(weights)), ndim)
 
-    def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=1e-10,
+    def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
             max_iter=10000):
         self._check_ctx(ctx)
-        _C.set_deriv_tol(ctx.ws, float(tol), int(max_iter))
+        _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
         dz = super().jvp(ctx, dx, dgamma, dparams, out=out)
         ctx.deriv = _C.deriv_info(ctx.ws)
         return dz
 
-    def vjp(self, ctx, g, *, out=None, tol=1e-10, max_iter=10000):
+    def vjp(self, ctx, g, *, out=None, tol=None, max_iter=10000):
         self._check_ctx(ctx)
-        _C.set_deriv_tol(ctx.ws, float(tol), int(max_iter))
+        _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
         res = super().vjp(ctx, g, out=out)
         ctx.deriv = _C.deriv_info(ctx.ws)
         return res

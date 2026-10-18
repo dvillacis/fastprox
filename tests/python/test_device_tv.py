@@ -119,19 +119,20 @@ def test_derivatives_match_c(fw, iso, shape, w, gamma):
     c = rng.normal(size=x.shape)
     op = C[iso](k, w)
     _, ctx = op.prox(x, gamma, keep=True, tol=1e-14, max_iter=10 ** 6)
-    gxc, gr = op.vjp(ctx, c)
+    gxc, gr = op.vjp(ctx, c, tol=1e-10) if iso else op.vjp(ctx, c)
     tv = fw.tv(iso)
+    tight = dict(tol=1e-14, max_iter=10 ** 6, deriv_tol=1e-10)
     if fw.name == "torch":
         torch = fw.mod
         xt = torch.tensor(x, requires_grad=True)
         gt = torch.tensor(gamma, dtype=torch.float64, requires_grad=True)
         wt = torch.tensor(w, dtype=torch.float64, requires_grad=True)
-        tv(xt, gt, ndim=k, weights=wt, tol=1e-14, max_iter=10 ** 6).backward(torch.tensor(c))
+        tv(xt, gt, ndim=k, weights=wt, **tight).backward(torch.tensor(c))
         gx, gg, gw = xt.grad.numpy(), gt.grad.item(), wt.grad.numpy()
     else:
         import jax
         import jax.numpy as jnp
-        loss = lambda x, g, w: jnp.vdot(tv(x, g, ndim=k, weights=w, tol=1e-14, max_iter=10 ** 6), c)
+        loss = lambda x, g, w: jnp.vdot(tv(x, g, ndim=k, weights=w, **tight), c)
         gx, gg, gw = (np.asarray(v) for v in jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(
             jnp.asarray(x), gamma, jnp.asarray(w)))
     scale = 1 + np.abs(gxc).max()
@@ -175,7 +176,7 @@ def test_derivatives_at_loose_tolerances(fw, iso):
     c = np.random.default_rng(9).normal(size=x.shape)
     op = C[iso](2)
     _, ctx = op.prox(x, 0.1, keep=True, tol=1e-15, max_iter=10 ** 7)
-    gref, _ = op.vjp(ctx, c, max_iter=10 ** 5) if iso else op.vjp(ctx, c)
+    gref, _ = op.vjp(ctx, c, tol=1e-10, max_iter=10 ** 5) if iso else op.vjp(ctx, c)
     tv = fw.tv(iso)
     for tol, bound in ((1e-6, 0.08), (1e-8, 1e-2)):
         if fw.name == "torch":
@@ -189,6 +190,32 @@ def test_derivatives_at_loose_tolerances(fw, iso):
             g = np.asarray(jax.grad(lambda x: jnp.vdot(tv(x, 0.1, tol=tol, max_iter=10 ** 6), c))(jnp.asarray(x)))
         err = np.linalg.norm(g - gref) / np.linalg.norm(gref)
         assert err <= (bound if iso else 1e-12)
+
+
+@pytest.mark.parametrize("tol", [1e-4, 1e-6, 1e-8])
+def test_default_derivative_tolerance(fw, tol):
+    """By default the isotropic solve stops at the relative error of z that
+    each image's gap certifies, sqrt(2 gap) / |x|, which leaves the gradient
+    within a few times sqrt(tol) of a solve to 1e-10."""
+    x = np.stack([disk_and_band(40, 1), disk_and_band(40, 2)])
+    c = np.random.default_rng(3).normal(size=x.shape)
+    tv = fw.f.tv_iso
+    opts = dict(tol=tol, max_iter=10 ** 6)
+    grads = []
+    for dtol in (None, 1e-10):
+        if fw.name == "torch":
+            torch = fw.mod
+            xt = torch.tensor(x, requires_grad=True)
+            (g,) = torch.autograd.grad(tv(xt, 0.1, deriv_tol=dtol, **opts), xt, torch.tensor(c))
+            grads.append(g.numpy())
+        else:
+            import jax
+            import jax.numpy as jnp
+            grads.append(np.asarray(jax.grad(lambda x: jnp.vdot(tv(x, 0.1, deriv_tol=dtol, **opts), c))(
+                jnp.asarray(x))))
+    g, g10 = grads
+    for b in range(2):
+        assert np.linalg.norm(g[b] - g10[b]) <= 3 * np.sqrt(tol) * np.linalg.norm(g10[b])
 
 
 @pytest.mark.parametrize("shape,w", [((2, 9, 11), [1.0, 0.7]), ((1, 5, 6, 4), [1.0, 0.0, 2.0])])
@@ -306,6 +333,8 @@ def test_errors(fw):
         tv(fw.arr(np.zeros((4, 4))), 0.5, warm_start=np.zeros((2, 4, 5)))
     with pytest.raises(TypeError):
         tv(fw.arr(np.zeros((4, 4)), np.int32), 0.5)
+    with pytest.raises(ValueError):
+        tv(fw.arr(np.zeros((4, 4))), 0.5, deriv_tol=0.0)
     with pytest.raises(ValueError):  # gamma must broadcast to the batch shape (3,)
         tv(fw.arr(np.zeros((3, 4, 4))), fw.arr([0.1, 0.2]))
     if fw.name == "torch":  # values are checked where they are concrete

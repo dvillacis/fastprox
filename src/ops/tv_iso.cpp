@@ -66,6 +66,13 @@
 // 3560, 12832 uncapped; a cap at mu = rms, or flat entries below it, lost
 // accuracy (up to 0.04 and 0.29).
 //
+// Conjugate gradients stop, by default (a tolerance of 0), at the relative
+// accuracy that the gap certifies for z, sqrt(2 gap) / |d|, and no tighter
+// than kDerivFloor: the derivative's error from a solve to a gap tolerance tol
+// is 50-100 sqrt(tol) on these images, and residuals below sqrt(tol) did not
+// change it (2 x 128^2 at gamma = 0.1, tol 1e-4 to 1e-10: 34, 172, 545 and
+// about 1900 iterations against 182, 502, 1346 and 3369 to 1e-10).
+//
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "core/parallel.hpp"
@@ -92,6 +99,8 @@ constexpr double kDualEta = 1e-9;
 // gamma / mu with mu = kCurvRms w_max rms, rms = sqrt(2 gap / N) the error of z
 // that the gap certifies (a Huber smoothing at the level of that error).
 constexpr double kCurvRms = 0.1;
+// The tightest default tolerance of the derivative's conjugate gradients.
+constexpr double kDerivFloor = 1e-10;
 
 struct TVIso final : ImageOp<TVIso> {
     int k;
@@ -122,17 +131,17 @@ struct TVIso final : ImageOp<TVIso> {
     size_t image_thread_bytes(const int64_t *shape) const noexcept override {
         return fiber_thread_bytes(*tv, Geom(k, shape));
     }
-    // Saved: number of regions, the curvature floor mu, labels, flat flags,
-    // z, u (k blocks), 1/|C|.
+    // Saved: number of regions, the curvature floor mu, the certified relative
+    // error of z, labels, flat flags, z, u (k blocks), 1/|C|.
     static size_t r8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N);
-        return 16 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
+        return 24 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
     }
     struct View {
         int64_t *ncomp;
-        double *mu;
+        double *mu, *rel;
         int32_t *label;
         uint8_t *flat;
         double *z, *u, *inv;
@@ -142,9 +151,10 @@ struct TVIso final : ImageOp<TVIso> {
         const size_t n = static_cast<size_t>(N);
         v.ncomp = reinterpret_cast<int64_t *>(s);
         v.mu = reinterpret_cast<double *>(s + 8);
-        v.label = reinterpret_cast<int32_t *>(s + 16);
-        v.flat = reinterpret_cast<uint8_t *>(s + 16 + r8(4 * n));
-        v.z = reinterpret_cast<double *>(s + 16 + r8(4 * n) + r8(n));
+        v.rel = reinterpret_cast<double *>(s + 16);
+        v.label = reinterpret_cast<int32_t *>(s + 24);
+        v.flat = reinterpret_cast<uint8_t *>(s + 24 + r8(4 * n));
+        v.z = reinterpret_cast<double *>(s + 24 + r8(4 * n) + r8(n));
         v.u = v.z + N;
         v.inv = v.u + k * N;
         return v;
@@ -413,11 +423,15 @@ struct TVIso final : ImageOp<TVIso> {
         std::memcpy(s.z, z, static_cast<size_t>(N) * sizeof(double));
         if (dual) std::memcpy(s.u, dual, static_cast<size_t>(k * N) * sizeof(double));
         else std::fill(s.u, s.u + k * N, 0.0);
-        double scale = 0.0, wmax = 0.0;
-        for (int64_t i = 0; i < N; ++i) scale = std::max(scale, std::fabs(d[i]));
+        double scale = 0.0, wmax = 0.0, dd = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            scale = std::max(scale, std::fabs(d[i]));
+            dd += d[i] * d[i];
+        }
         for (int a = 0; a < k; ++a) wmax = std::max(wmax, wa[a]);
         const double thr = from_dual ? wmax * 64.0 * 2.2e-16 * scale : 0.0;
         const double in = c.gamma * (1.0 - kDualEta);
+        *s.rel = dd > 0.0 ? std::sqrt(2.0 * std::max(c.gap, 0.0) / dd) : 0.0;
         *s.mu = from_dual ? kCurvRms * wmax * std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N)) : 0.0;
         // Union-find over the edges of flat entries, roots at the smallest index.
         int32_t *parent = s.label;  // relabelled below, after a copy of the roots
@@ -569,7 +583,8 @@ struct TVIso final : ImageOp<TVIso> {
 
     // Solves S c = b by CG with the Jacobi preconditioner (dinv, the inverse
     // diagonal of S); the residual is reported relative to b in the norm
-    // weighted by 1/|C|, the pixel-space norm of a region residual.
+    // weighted by 1/|C|, the pixel-space norm of a region residual. A
+    // tolerance of 0 stops at the certified relative error of z.
     static void cg(const Sys &S, const double *b, double *x, double *r, double *pv, double *qv, double *dinv,
                    DerivCtl &dc) {
         const int64_t nc = S.nc;
@@ -588,9 +603,10 @@ struct TVIso final : ImageOp<TVIso> {
             pv[C] = r[C] * dinv[C];
             rz += r[C] * pv[C];
         }
+        const double tol = dc.tol > 0.0 ? dc.tol : std::max(kDerivFloor, *S.s.rel);
         int it = 0;
         double res = 1.0;
-        while (res > dc.tol && it < dc.max_iter) {
+        while (res > tol && it < dc.max_iter) {
             S.apply(pv, qv);
             double pq = 0.0;
             for (int64_t C = 0; C < nc; ++C) pq += pv[C] * qv[C];

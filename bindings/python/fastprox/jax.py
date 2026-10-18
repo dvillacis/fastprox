@@ -115,7 +115,9 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_
     call (shape (ndim, *x.shape)). With ``return_info=True`` returns
     ``(z, info)``, an :class:`IterInfo` of JAX arrays. The backward is the C
     kernel's: one unknown per flat region, solved by conjugate gradients to
-    ``deriv_tol`` (default 1e-10 in float64, 100 eps in float32)."""
+    relative residual ``deriv_tol``; by default each image's solve stops at
+    the relative error of z that its gap certifies, sqrt(2 gap) / |x|, and
+    at max(1e-10, 100 eps) at the tightest."""
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter)
 
@@ -165,9 +167,11 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         if q.shape != (ndim,) + x.shape:
             raise ValueError(f"warm_start must have shape {(ndim,) + x.shape}")
         u0 = _tvj.dual_in(q.reshape((ndim,) + xb.shape), w, iso)
-    if deriv_tol is None:
-        deriv_tol = max(1e-10, 100 * float(jnp.finfo(x.dtype).eps))
-    z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, iso, float(tol), int(max_iter), float(deriv_tol),
+    if deriv_tol is not None:
+        if not deriv_tol > 0:
+            raise ValueError("deriv_tol must be > 0 or None")
+        deriv_tol = float(deriv_tol)
+    z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, iso, float(tol), int(max_iter), deriv_tol,
                                     int(deriv_max_iter))
     z = z.reshape(x.shape)
     if not return_info:

@@ -277,8 +277,14 @@ TV_I.
   reaches pixels that sit on the sphere with a gradient near zero even at
   a gap of 5e-16, where the derivative is set-valued (two valid choices
   differ by 0.8% at γ = 0.1). The resulting symmetric positive definite system
-  is solved by conjugate gradients, to a relative residual of 1e-10 by
-  default: `fp_workspace_set_deriv_tol(ws, tol, max_iter)` changes it and
+  is solved by conjugate gradients. By default each image's solve stops at
+  the relative error of z that its gap certifies, √(2 gap)/‖x‖ (at most
+  √tol for a solve to `tol`, and no tighter than 1e-10): the derivative's
+  own error after a solve to `tol` is 50–100 √tol on 128² images, and
+  residuals below √tol did not change it, so this takes 2–5× fewer
+  iterations than a fixed 1e-10 at the same accuracy.
+  `fp_workspace_set_deriv_tol(ws, tol, max_iter)` sets a fixed tolerance
+  (0 restores the default) and
   `fp_workspace_deriv_info(ws, &residual, &iters)` reports the last solve
   (in Python, `jvp`/`vjp` take `tol` and `max_iter`, and `ctx.deriv` holds
   the residual and iterations). No polish: isotropic regions have no
@@ -780,16 +786,18 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   dual and the isotropic curvature capped as there (the bound's margin is
   max(10⁻⁹, 64 ε)). Anisotropic TV
   averages over the regions exactly; isotropic TV solves one unknown per
-  region by conjugate gradients with the C kernel's Jacobi preconditioner
-  (`deriv_tol`, default 1e-10 in float64 and 100 ε in float32). The regions
-  are found by label propagation and summed by a sort and a segmented scan,
-  so memory is a few images and does not grow with the iterations.
+  region by conjugate gradients with the C kernel's Jacobi preconditioner,
+  stopped as there at the relative error of z that each image's gap
+  certifies (`deriv_tol` sets a fixed residual instead; the floor is
+  max(1e-10, 100 ε)). The regions are found by label propagation and summed
+  by a sort and a two-level segmented scan, so memory is a few images and
+  does not grow with the iterations.
 - **Reproducible** run to run on one device: every step is a stencil, a
   gather, a sort or a fixed-order reduction (no atomic scatter-adds). Not
   bit-identical to the C kernels or across devices.
 - **Cost** (docs/benchmarks.md): on an Apple M5 Pro GPU (MPS), isotropic TV
   of eight 512² images is about 4× faster than the C kernel on one thread
-  and level with it on 15, with a backward of 0.25–0.5 s. Anisotropic TV is
+  and level with it on 15, with a backward of 0.14–0.55 s. Anisotropic TV is
   slower than the C kernel, whose exact 1D steps need about 10× fewer
   iterations; its backward is 60 ms.
 

@@ -25,13 +25,15 @@ the C kernel. Anisotropic: dz is the region mean of
 exactly. Isotropic: with H_p = gamma / |g_p| (I - n_p n_p^T) on non-flat
 pixels and M the map from region values to pixels,
     (M^T M + M^T G_A^T H G_A M) c = M^T (r - G_A^T H (dG z)_A),   dz = M c,
-by conjugate gradients in region space preconditioned with the region sizes,
-as in src/ops/tv_iso.cpp. The VJPs are the transposes.
+by conjugate gradients in region space with the C kernel's Jacobi
+preconditioner, by default to the relative error of z that the image's gap
+certifies, sqrt(2 gap) / |x| (no tighter than max(1e-10, 100 eps)), as in
+src/ops/tv_iso.cpp. The VJPs are the transposes.
 
 Regions: hooking and pointer jumping over the joins (the only scatter is a
 minimum, the same in any order), a stable sort of the labels within each
-image, and region sums by a segmented scan by doubling (log2 N shifted adds
-within segments). Every step is deterministic, so results repeat run to run
+image, and region sums by a segmented scan by doubling in two levels (within
+blocks of SCAN_BLOCK sorted entries, then over the blocks). Every step is deterministic, so results repeat run to run
 on one device; atomic scatter-adds would not (index_add_ on MPS does not).
 Region vectors are kept at fixed size (B, N) in sorted order, the value of a
 region at its last position.
@@ -46,6 +48,15 @@ import torch
 from . import IterInfo
 
 CHECK = 4  # iterations between gap and restart tests
+SCAN_BLOCK = 32  # entries per block of the region sums' segmented scan
+
+
+def _doubling(n):
+    """The shifts 1, 2, 4, ... below n of a scan by doubling."""
+    sh = 1
+    while sh < n:
+        yield sh
+        sh *= 2
 
 
 class Problem:
@@ -278,22 +289,53 @@ class Regions:
         first = torch.cummax(torch.where(start, idx, -1), 1).values
         self.size = torch.where(self.end, (last - first + 1), 0)  # region sizes at their last position
         self.at = torch.gather(last.long(), 1, torch.argsort(self.perm, dim=1))  # pixel -> its region's position
-        # Masks of the segmented scan, one per doubling step (log2 N bytes per pixel).
-        self.same = []
-        sh = 1
-        while sh < N:
-            self.same.append(keys[:, sh:] == keys[:, :-sh])
-            sh *= 2
+        # Masks of the two-level segmented scan (see sum): within blocks of
+        # SCAN_BLOCK sorted entries, and over the blocks' last entries.
+        nb = -(-N // SCAN_BLOCK)
+        kp = torch.full((B, nb * SCAN_BLOCK), -1, dtype=keys.dtype, device=dev)
+        kp[:, :N] = keys
+        kp = kp.reshape(B, nb, SCAN_BLOCK)
+        kend = kp[..., -1]
+        self.nb = nb
+        self._same = [kp[..., sh:] == kp[..., :-sh] for sh in _doubling(SCAN_BLOCK)]
+        self._bsame = [kend[:, sh:] == kend[:, :-sh] for sh in _doubling(nb)]
+        self._cont = torch.zeros_like(kp, dtype=torch.bool)  # in the region at the previous block's end
+        self._cont[:, 1:] = kp[:, 1:] == kend[:, :-1, None]
+        self._masks = {}
+
+    def masks(self, dtype):
+        """The scan's masks as numbers of dtype (multiplied in), made once."""
+        if dtype not in self._masks:
+            self._masks[dtype] = ([m.to(dtype) for m in self._same], [m.to(dtype) for m in self._bsame],
+                                  self._cont.to(dtype), self.end.to(dtype))
+        return self._masks[dtype]
 
     def sum(self, v):
-        """Region sums of an image batch: (B, N), at each region's last position."""
-        vs = torch.gather(v.reshape(self.B, self.N), 1, self.perm)
-        for i, same in enumerate(self.same):
-            sh = 1 << i
+        """Region sums of an image batch: (B, N), at each region's last position.
+        A segmented scan by doubling within blocks of SCAN_BLOCK entries
+        (log2 SCAN_BLOCK passes), then over the blocks' carries (the partial
+        sum of the region at each block's end), added to the entries of the
+        region that continues into the next block: 6x faster than doubling
+        over the whole image on MPS (8 x 512^2), with the same
+        summation-tree accuracy."""
+        same, bsame, cont, end = self.masks(v.dtype)
+        B, N, nb = self.B, self.N, self.nb
+        vs = torch.gather(v.reshape(B, N), 1, self.perm)
+        if nb * SCAN_BLOCK > N:
+            vs = torch.nn.functional.pad(vs, (0, nb * SCAN_BLOCK - N))
+        vs = vs.reshape(B, nb, SCAN_BLOCK)
+        for sh, m in zip(_doubling(SCAN_BLOCK), same):
             nxt = vs.clone()
-            nxt[:, sh:].add_(vs[:, :-sh] * same)
+            nxt[..., sh:].addcmul_(vs[..., :-sh], m)
             vs = nxt
-        return vs * self.end
+        carry = vs[..., -1]
+        for sh, m in zip(_doubling(nb), bsame):
+            nxt = carry.clone()
+            nxt[:, sh:].addcmul_(carry[:, :-sh], m)
+            carry = nxt
+        cin = torch.nn.functional.pad(carry[:, :-1], (1, 0))
+        vs = torch.addcmul(vs, cont, cin[..., None])
+        return vs.reshape(B, -1)[:, :N] * end
 
     def spread(self, c):
         """Region values (B, N) to the pixels (B, *img)."""
@@ -330,11 +372,24 @@ class Structure:
             join = [flat[a] & live[a] for a in range(prob.k)]
             self.n = torch.where(flat, torch.zeros_like(u), torch.sign(u))
             self.h = None
+        self.hn = None
         self.R = Regions(join, prob.B, tuple(z.shape[1:]))
+        # The relative error of z that the gap certifies: the default
+        # tolerance of the derivative solves.
+        xx = (x.reshape(prob.B, -1) ** 2).sum(1)
+        floor = max(1e-10, 100 * eps)
+        self.rel = torch.clamp(torch.sqrt(2 * torch.clamp(gap, min=0) / torch.where(xx > 0, xx, 1)),
+                               min=floor)
 
     def H(self, v):
-        """H_p v_p on the non-flat pixels (isotropic), for a field v (k, B, ...)."""
-        return self.h.unsqueeze(0) * (v - self.n * (self.n * v).sum(0, keepdim=True))
+        """H_p v_p on the non-flat pixels (isotropic), for a field v (k, B, ...):
+        h v - (h n) (n . v)."""
+        if self.hn is None:
+            self.hn = self.h.unsqueeze(0) * self.n
+        dot = self.n[0] * v[0]
+        for a in range(1, v.shape[0]):
+            dot.addcmul_(self.n[a], v[a])
+        return torch.addcmul(self.h.unsqueeze(0) * v, self.hn, dot.unsqueeze(0), value=-1)
 
     def K(self, c):
         """M^T (I + G_A^T H G_A) M c in region space."""
@@ -381,20 +436,23 @@ class Structure:
 
     def solve(self, b, tol, max_iter):
         """Region values c with K c = b (isotropic: conjugate gradients per
-        image, preconditioned by the inverse diagonal of K; anisotropic:
-        b / |R|); (c, iterations,
+        image to relative residual tol, or self.rel for None, preconditioned
+        by the inverse diagonal of K; anisotropic: b / |R|); (c, iterations,
         largest relative residual)."""
         R = self.R
+        if tol is None:
+            tol = self.rel.to(b.dtype)
         if self.h is None:
             inv = torch.where(R.end, 1.0 / torch.where(R.end, R.size, 1).to(b.dtype), torch.zeros_like(b))
             return b * inv, 0, 0.0
         inv = self.jacobi(b.dtype)
+        dot = torch.linalg.vecdot
         c = torch.zeros_like(b)
         r = b.clone()
         zr = r * inv
         p = zr.clone()
-        rz = (r * zr).sum(1)
-        bb = (b * b).sum(1)
+        rz = dot(r, zr)
+        bb = dot(b, b)
         rr = bb.clone()
         done = rr <= (tol * tol) * bb
         it = 0
@@ -402,17 +460,17 @@ class Structure:
             if it % 8 == 0 and bool(done.all()):
                 break
             Kp = self.K(p)
-            pKp = (p * Kp).sum(1)
+            pKp = dot(p, Kp)
             ok = ~done & (pKp > 0)
             alpha = torch.where(ok, rz / torch.where(pKp > 0, pKp, torch.ones_like(pKp)), torch.zeros_like(rz))
-            c = c + alpha[:, None] * p
-            r = r - alpha[:, None] * Kp
+            c.addcmul_(alpha[:, None], p)
+            r.addcmul_(alpha[:, None], Kp, value=-1)
             zr = r * inv
-            rzn = (r * zr).sum(1)
+            rzn = dot(r, zr)
             beta = torch.where(ok, rzn / torch.where(rz > 0, rz, torch.ones_like(rz)), torch.zeros_like(rz))
-            p = zr + beta[:, None] * p
+            p = torch.addcmul(zr, beta[:, None], p)
             rz = torch.where(ok, rzn, rz)
-            rr = torch.where(ok, (r * r).sum(1), rr)
+            rr = torch.where(ok, dot(r, r), rr)
             done = done | (rr <= (tol * tol) * bb) | ~(pKp > 0)
             it += 1
         rel = torch.sqrt(rr / torch.where(bb > 0, bb, torch.ones_like(bb)))

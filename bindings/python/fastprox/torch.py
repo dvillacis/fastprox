@@ -136,8 +136,10 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_
     call (shape (ndim, *x.shape), the C kernel's form). With
     ``return_info=True`` returns ``(z, info)``, an :class:`IterInfo` whose
     ``dual`` is a tensor. The derivatives are the C kernel's: one unknown per
-    flat region, solved by conjugate gradients to ``deriv_tol`` (default
-    1e-10 in float64, 100 eps in float32)."""
+    flat region, solved by conjugate gradients to relative residual
+    ``deriv_tol``; by default each image's solve stops at the relative error
+    of z that its gap certifies, sqrt(2 gap) / |x|, and at max(1e-10,
+    100 eps) at the tightest."""
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter)
 
@@ -191,9 +193,11 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         warm = torch.as_tensor(warm_start).to(dtype=x.dtype, device=x.device)
         if tuple(warm.shape) != (ndim, *x.shape):
             raise ValueError(f"warm_start must have shape {(ndim, *x.shape)}")
-    if deriv_tol is None:
-        deriv_tol = max(1e-10, 100 * torch.finfo(x.dtype).eps)
-    cfg = _TVConfig(iso, ndim, w, tol, max_iter, warm, float(deriv_tol), deriv_max_iter)
+    if deriv_tol is not None:
+        if not deriv_tol > 0:
+            raise ValueError("deriv_tol must be > 0 or None")
+        deriv_tol = float(deriv_tol)
+    cfg = _TVConfig(iso, ndim, w, tol, max_iter, warm, deriv_tol, deriv_max_iter)
     z = _DeviceTV.apply(cfg, x, gb, wt)
     return (z, cfg.info) if return_info else z
 

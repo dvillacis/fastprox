@@ -1074,14 +1074,14 @@ on one thread and on 15. The backward is the VJP of a random cotangent
 
 | | gap tol | torch CPU | torch MPS | JAX CPU | C, 1 thread | C, 15 threads |
 | --- | --- | --- | --- | --- | --- | --- |
-| isotropic | 1e-4 | 227 (64) | 130 (64) | 186 | 546 (64) | 114 |
-| backward | | 1227 | 948 | 5724 | | |
-| isotropic | 1e-6 | 1775 (492) | 1013 (492) | 1362 | 4113 (492) | 906–1322 |
-| backward | | 3282 | 2494 | 20285 | | |
-| anisotropic | 1e-4 | 234 (92) | 180 (92) | 185 | 289 (9) | 59 |
-| backward | | 97 | 37 | 182 | | |
-| anisotropic | 1e-6 | 1675 (624) | 1197 (624) | 1290 | 1550 (59) | 251 |
-| backward | | 43 | 39 | 197 | | |
+| isotropic | 1e-4 | 208 (64) | 127 (64) | 173 | 544 (64) | 98–114 |
+| backward | | 269 | 137 | 635 | | |
+| isotropic | 1e-6 | 1607 (492) | 960 (492) | 1351 | 4119 (492) | 794–1322 |
+| backward | | 1062 | 546 | 3111 | | |
+| anisotropic | 1e-4 | 230 (92) | 171 (92) | 184 | 288 (9) | 58 |
+| backward | | 96 | 37 | 106 | | |
+| anisotropic | 1e-6 | 1573 (624) | 1140 (624) | 1279 | 1545 (59) | 257 |
+| backward | | 74 | 31 | 93 | | |
 
 Isotropic TV on the device is the C kernel's method and takes its
 iterations; on this integrated GPU, which shares the memory bandwidth of the
@@ -1113,6 +1113,39 @@ gradients), so it takes 3.6–4.8× longer on the GPU even with the C kernel's
 Jacobi preconditioner (uncapped: 6–7×), and JAX on the CPU 5–6×. The
 anisotropic backward is unchanged in cost (exact region averages); its
 gradient is now exact at a gap tolerance of 1e-8 on 128² images.
+
+The table above is from a third run (2026-10-18), after two changes to the
+isotropic backward (ROADMAP.md, "Cheaper isotropic TV backward"); before
+them it took 948 and 2494 ms on MPS, 1227 and 3282 ms with PyTorch on the
+CPU and 5724 and 20 285 ms with JAX:
+
+- **Stopping.** Conjugate gradients stop at the relative error of z that the
+  gap certifies, √(2 gap)/‖x‖, instead of 100 ε (float32) or 1e-10
+  (float64). On the DeepInverse comparison's images (float32, MPS) the
+  gradient error after a solve to 1e-6 was 0.0648 with a residual of 1.2e-5
+  (312 iterations), 0.0650 at 3e-3 (144) and 0.066 at 1e-2 (104); in
+  float64 on 2 × 128² the error stopped changing once the residual reached
+  √tol at every gap tolerance from 1e-4 to 1e-12, where it is 50–100 √tol.
+  The C kernel's solves took 2–5× fewer iterations at the same error (34,
+  172, 545 and about 1900 at tolerances of 1e-4 to 1e-10, against 182, 502,
+  1346 and 3369).
+- **Region sums.** The segmented scan by doubling took 18 passes over the
+  batch on 512² images, 5.0 of the 6.8 ms of one product with the system on
+  MPS. It now scans within blocks of 32 sorted entries (5 passes) and then
+  over the blocks' carries, with masks stored as numbers and `addcmul`:
+  0.83 ms on MPS, 1.5–1.8 ms against 5.4 on the CPU, with the same
+  summation-tree accuracy. With the Hessian product and the vector updates
+  fused, an iteration takes 2.9 ms on MPS against 8.
+
+Better preconditioners were measured on the explicit region-space system of
+one 128² image (SciPy and PyAMG; iterations to a relative residual of 1e-3
+at gap tolerances of 1e-6 and 1e-8): Jacobi 154 and 398; two-level
+aggregation over strong couplings with an exact coarse solve, symmetric
+multiplicative, 49 and 71; smoothed-aggregation multigrid 26 and 45; ILU with
+a drop tolerance of 1e-3 and fill, 3 and 7. A cycle costs about 3–4 products
+with the system, so multigrid would save at most about 2×, and the
+triangular solves of ILU are sequential; IC(0) broke down (the system is not
+an M-matrix). Neither is used.
 
 ## 2026-10-18, Apple M5 Pro: isotropic TV against DeepInverse
 
@@ -1156,9 +1189,9 @@ read off the dual, see below):
 | DeepInverse, 100 iterations | 182 ms | 992 MiB | 1.1 |
 | DeepInverse, 200 iterations | 366 ms | 1992 MiB | 0.32 |
 | DeepInverse, 400 iterations | 729 ms | 3992 MiB | 0.062 |
-| fastprox, tol 1e-4 | 237 ms | 6 MiB | 0.47 |
-| fastprox, tol 1e-6 | 612 ms | 6 MiB | 0.065 |
-| fastprox, tol 1e-7 | 816 ms | 6 MiB | 0.066 |
+| fastprox, tol 1e-4 | 95 ms | 6 MiB | 0.47 |
+| fastprox, tol 1e-6 | 166 ms | 6 MiB | 0.065 |
+| fastprox, tol 1e-7 | 237 ms | 6 MiB | 0.066 |
 
 The unrolled backward keeps 10 MiB per iteration of this batch, so its
 memory grows with the iterations (4 GiB at 400; 1600 would not fit); the
@@ -1166,9 +1199,12 @@ implicit one keeps the solution and the dual. The gradient errors are
 against the exact gradient at the reference solution, the C kernel's VJP
 solved to a residual of 1e-10 (18 548 conjugate gradient iterations; the
 default cap of 10 000 stops at 3e-5). At a gap tolerance of 1e-6 fastprox
-matches DeepInverse's 400 iterations in gradient error (its forward is 3×
-faster to that point, 235 against 763 ms) with 1/650 of the memory; in
-float32 its error levels off near 0.065 (1e-7 is no better).
+matches DeepInverse's 400 iterations in gradient error with 1/650 of the
+memory, in 397 ms for the forward and the backward against 1473 ms (231 + 166
+against 761 + 712); in float32 its error levels off near 0.065 (1e-7 is no
+better). The backward took 237, 612 and 816 ms at the three tolerances
+before its solves stopped at the certified error and its region sums were
+split into two levels (above), with the same gradient errors.
 
 Before, fastprox's errors were 0.89 at 1e-4 and 0.66 at 1e-6 (backward 195
 and 131 ms): its test for flat pixels, |g_p| ≤ 8·rms(gap), grouped pixels

@@ -1058,6 +1058,7 @@ static void test_tv_iso() {
             Arr z(c.dshape);
             CHECK_OK(conj ? fp_prox_conj(op, step, &xd.a, &z.a, &o, ws, nullptr)
                           : fp_prox(op, step, &xd.a, &z.a, &o, ws, nullptr));
+            CHECK_OK(fp_workspace_set_deriv_tol(ws, 1e-10, 10000));  // the default stops at sqrt(2 gap) / |x|
             Arr dx(c.dshape, randn(Nd)), jv(c.dshape), g(c.dshape, randn(Nd)), gx(c.dshape);
             Vec wv(static_cast<size_t>(c.k));
             for (int a = 0; a < c.k; ++a) wv[a] = c.w[c.w.size() == 1 ? 0 : a];
@@ -1129,7 +1130,7 @@ static void test_tv_iso() {
     CHECK_OK(fp_prox(op, 0.3, &x.a, &z.a, &o, ws, &warm));
     CHECK_OK(fp_workspace_get_dual(ws, &q.a));
     iso_certificate(2, {30, 40}, 0.3, {1.0}, x.data, z.data, q.data, o.tol, warm.iters);
-    CHECK(fp_workspace_set_deriv_tol(ws, 0.0, 10) == FP_EPARAM);
+    CHECK(fp_workspace_set_deriv_tol(ws, -1.0, 10) == FP_EPARAM);
     CHECK(fp_workspace_set_deriv_tol(ws, 1e-3, 0) == FP_EPARAM);
     CHECK_OK(fp_workspace_set_deriv_tol(ws, 1e-3, 5));
     Arr g({30, 40}, randn(1200)), gx({30, 40});
@@ -1138,6 +1139,13 @@ static void test_tv_iso() {
     int its;
     CHECK_OK(fp_workspace_deriv_info(ws, &res, &its));
     CHECK(its <= 5);
+    // The default (0) stops at the relative error of z that the gap certifies.
+    CHECK_OK(fp_workspace_set_deriv_tol(ws, 0.0, 10000));
+    CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, nullptr, nullptr));
+    CHECK_OK(fp_workspace_deriv_info(ws, &res, &its));
+    double xx = 0;
+    for (double v : x.data) xx += v * v;
+    CHECK(res <= std::sqrt(2 * warm.gap / xx) && res > 1e-10 && its > 0);
     fp_workspace_free(ws);
     fp_op *tv;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));

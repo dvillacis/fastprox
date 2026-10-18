@@ -83,7 +83,7 @@ struct fp_workspace {
     fp::Buffer<double> image_gaps, image_iters;  // per image results of the last call
     // Derivative solves (conjugate gradients) of image operators: settings,
     // per image results, and the worst of the last jvp/vjp.
-    double deriv_tol = 1e-10;
+    double deriv_tol = 0.0;
     int deriv_max_iter = 10000;
     fp::Buffer<double> deriv_res, deriv_its;
     mutable double deriv_residual = 0.0;

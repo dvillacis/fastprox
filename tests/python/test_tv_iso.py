@@ -114,10 +114,10 @@ def test_derivatives(shape, k, conj):
     z, ctx = run(op, x, step, keep=True, **tight)
     dx, dw, dg = rng.normal(size=shape), rng.normal(size=k), 0.2
     g = rng.normal(size=shape)
-    jv = op.jvp(ctx, dx, dg, dw)
+    jv = op.jvp(ctx, dx, dg, dw, tol=1e-10)
     res, its = ctx.deriv
     assert res <= 1e-10 and its > 0
-    gx, grads = op.vjp(ctx, g)
+    gx, grads = op.vjp(ctx, g, tol=1e-10)
     lhs = float((g * jv).sum())
     rhs = float((gx * dx).sum() + grads.gamma * dg + grads.weights @ dw)
     assert abs(lhs - rhs) <= 1e-8 * (1 + abs(lhs))
@@ -145,7 +145,7 @@ def test_derivatives_at_loose_tolerances(n, gamma, bounds):
     c = np.random.default_rng(9).normal(size=x.shape)
     op = fp.TVIso(2)
     _, ctx = op.prox(x, gamma, keep=True, tol=1e-15, max_iter=10 ** 7)
-    gref, _ = op.vjp(ctx, c, max_iter=10 ** 5)
+    gref, _ = op.vjp(ctx, c, tol=1e-10, max_iter=10 ** 5)
     for tol, bound in zip((1e-6, 1e-8), bounds):
         _, cx = op.prox(x, gamma, keep=True, tol=tol, max_iter=10 ** 6)
         g, _ = op.vjp(cx, c, max_iter=10 ** 5)
@@ -158,6 +158,18 @@ def test_derivative_tolerance_controls():
     assert ctx.deriv[1] <= 3
     with pytest.raises(ValueError):
         op.vjp(ctx, np.ones_like(z), tol=0.0)
+    # By default the solve stops at the relative error of z that the gap
+    # certifies, which is below the derivative's own error at that gap.
+    x = disk_and_band(48, 1)
+    c = np.random.default_rng(2).normal(size=x.shape)
+    for tol in (1e-4, 1e-6, 1e-8):
+        _, ctx = op.prox(x, 0.1, keep=True, tol=tol, max_iter=10 ** 6)
+        g, _ = op.vjp(ctx, c)
+        res, its = ctx.deriv
+        assert 1e-10 < res <= np.sqrt(2 * ctx.info.gap) / np.linalg.norm(x)
+        g10, _ = op.vjp(ctx, c, tol=1e-10)
+        assert ctx.deriv[1] > its
+        assert np.linalg.norm(g - g10) <= 3 * np.sqrt(tol) * np.linalg.norm(g10)
 
 
 def test_warm_starts():

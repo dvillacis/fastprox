@@ -13,6 +13,15 @@ import jax.numpy as jnp
 from jax import lax
 
 CHECK = 4
+SCAN_BLOCK = 32  # _tv_torch.SCAN_BLOCK
+
+
+def _doubling(n):
+    """The shifts 1, 2, 4, ... below n of a scan by doubling."""
+    sh = 1
+    while sh < n:
+        yield sh
+        sh *= 2
 
 
 def _d(z, dim):
@@ -185,19 +194,29 @@ class Regions:
         self.perm, self.keys, self.end = perm, keys, end
         self.size = jnp.where(end, last - first + 1, 0)
         self.at = jnp.take_along_axis(last, jnp.argsort(perm, axis=1), axis=1)
-        self.same = []
-        sh = 1
-        while sh < N:
-            self.same.append(keys[:, sh:] == keys[:, :-sh])
-            sh *= 2
+        # The two-level scan of _tv_torch.Regions.sum.
+        nb = -(-N // SCAN_BLOCK)
+        kp = jnp.pad(keys, ((0, 0), (0, nb * SCAN_BLOCK - N)), constant_values=-1).reshape(B, nb, SCAN_BLOCK)
+        kend = kp[..., -1]
+        self.nb = nb
+        self.same = [kp[..., sh:] == kp[..., :-sh] for sh in _doubling(SCAN_BLOCK)]
+        self.bsame = [kend[:, sh:] == kend[:, :-sh] for sh in _doubling(nb)]
+        self.cont = jnp.concatenate([jnp.zeros((B, 1, SCAN_BLOCK), bool), kp[:, 1:] == kend[:, :-1, None]], axis=1)
 
     def sum(self, v):
-        """Region sums, at each region's last position (segmented scan by doubling)."""
-        vs = jnp.take_along_axis(v.reshape(self.B, self.N), self.perm, axis=1)
-        for i, same in enumerate(self.same):
-            sh = 1 << i
-            vs = vs + jnp.pad(jnp.where(same, vs[:, :-sh], 0.0), ((0, 0), (sh, 0)))
-        return jnp.where(self.end, vs, 0.0)
+        """Region sums, at each region's last position (the two-level
+        segmented scan of _tv_torch.Regions.sum)."""
+        B, N, nb = self.B, self.N, self.nb
+        vs = jnp.take_along_axis(v.reshape(B, N), self.perm, axis=1)
+        vs = jnp.pad(vs, ((0, 0), (0, nb * SCAN_BLOCK - N))).reshape(B, nb, SCAN_BLOCK)
+        for sh, same in zip(_doubling(SCAN_BLOCK), self.same):
+            vs = vs + jnp.pad(jnp.where(same, vs[..., :-sh], 0.0), ((0, 0), (0, 0), (sh, 0)))
+        carry = vs[..., -1]
+        for sh, same in zip(_doubling(nb), self.bsame):
+            carry = carry + jnp.pad(jnp.where(same, carry[:, :-sh], 0.0), ((0, 0), (sh, 0)))
+        cin = jnp.pad(carry[:, :-1], ((0, 0), (1, 0)))
+        vs = vs + jnp.where(self.cont, cin[..., None], 0.0)
+        return jnp.where(self.end, vs.reshape(B, -1)[:, :N], 0.0)
 
     def spread(self, c):
         return jnp.take_along_axis(c, self.at, axis=1).reshape((self.B,) + tuple(self.img))
@@ -318,6 +337,10 @@ def _fwd(x, gamma, w, u0, iso, tol, max_iter, dtol, dmax):
 def _bwd(iso, tol, max_iter, dtol, dmax, res, cts):
     x, z, u, gap, gamma, w, u0 = res
     ops, n, h, R = _structure(x, z, u, gap, gamma, w, iso)
+    if dtol is None:  # the relative error of z that each image's gap certifies
+        xx = (x.reshape(x.shape[0], -1) ** 2).sum(1)
+        dtol = jnp.maximum(jnp.sqrt(2 * jnp.maximum(gap, 0) / jnp.where(xx > 0, xx, 1)),
+                           max(1e-10, 100 * float(jnp.finfo(x.dtype).eps))).astype(x.dtype)
     hz = R.spread(_region_solve(ops, n, h, R, R.sum(cts[0]), dtol, dmax))
     Gh = ops.G(hz)
     ggamma = -ops.dsum(Gh * n)
