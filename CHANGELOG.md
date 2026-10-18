@@ -5,19 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed
-
-- `bench/compare_deepinv.py` caches its float64 reference in `deepinv_ref_<mode>_<size>_<batch>.npz` (read when present, written otherwise), so that a machine with few cores, such as Colab, can use one computed elsewhere. docs/benchmarks.md has the comparison on an NVIDIA T4.
-
-## [0.3.0rc1] — 2026-10-18
+## [0.3.0] — 2026-10-19
 
 Graph and tree TV, PyTorch and JAX wrappers, and image TV on the GPU, with
 more accurate and cheaper image TV derivatives, spatially varying weights
 for image TV, and kink masks and branch overrides for TV and the nonconvex
-maps. A release candidate: 0.3.0 follows after some use; the larger open
-items moved to 0.4 in ROADMAP.md. The C ABI only grows: every 0.2
-declaration and struct is unchanged (`fp_workspace_set_deriv_tol` now also
-accepts 0, its new default).
+maps. The larger open items moved to 0.4 in ROADMAP.md. The C ABI only
+grows: every 0.2 declaration and struct is unchanged
+(`fp_workspace_set_deriv_tol` now also accepts 0, its new default). The
+release candidate 0.3.0rc1 (2026-10-18) had everything below except the
+cached reference of `bench/compare_deepinv.py`.
 
 ### Added
 
@@ -46,6 +43,7 @@ accepts 0, its new default).
 - Graph TV on graphs with nodes of high degree: the max-flow engine rescanned all of a node's arcs whenever it grew or was adopted, which made a hub quadratic (a star with 10⁵ leaves took 24.6 s). Nodes of degree above 32 now resume their growth scan and take the first valid parent in cyclic order, and a node freed next to such a hub rejoins its tree after the adoption stage rather than reactivating the hub: 53 ms on that star, 1.7–5× faster on a grid with five hubs, and the same steps as before on graphs without hubs (grids and kNN graphs unchanged). Tested against Dinic's algorithm on stars and random graphs with hubs, fresh and reused (`tests/c/test_maxflow.cpp`).
 - Isotropic TV's derivatives stop their conjugate gradients, by default, at the relative error of z that the prox's gap certifies, √(2 gap)/‖x‖ (at most √tol after a solve to `tol`, and no tighter than 1e-10, or 100 ε on the device), instead of a fixed 1e-10 (100 ε in float32 on the device). Residuals below √tol did not change the gradient, whose error after a solve to `tol` is 50–100 √tol, and the C kernel takes 2–5× fewer iterations. A fixed tolerance is still available: `tol` in `TVIso.jvp`/`vjp` (default now `None`), `deriv_tol` in `fastprox.torch.tv_iso` and `fastprox.jax.tv_iso`, and `fp_workspace_set_deriv_tol`, which now takes 0 for the default (its new initial value).
 - The device-native image TV sums over regions with a segmented scan in two levels (within blocks of 32 sorted entries, then over the blocks) rather than by doubling over the whole image: 6× faster on MPS for 8 × 512² images, with the same accuracy. With the new stopping rule the isotropic backward on those images takes 137 and 546 ms on MPS at gap tolerances of 1e-4 and 1e-6 (before: 948 and 2494 ms), 269 and 1062 ms with PyTorch on the CPU (1227 and 3282) and 635 and 3111 ms with JAX (5724 and 20 285); on the DeepInverse comparison (8 × 256²) it takes 166 ms at 1e-6 against 612, with the same gradient error (docs/benchmarks.md).
+- `bench/compare_deepinv.py` caches its float64 reference in `deepinv_ref_<mode>_<size>_<batch>.npz` (read when present, written otherwise), so that a machine with few cores, such as Colab, can use one computed elsewhere. docs/benchmarks.md has the comparison on an NVIDIA T4.
 
 ## [0.2.0] — 2026-10-17
 
