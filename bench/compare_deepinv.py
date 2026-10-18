@@ -121,9 +121,14 @@ def main():
     # written there otherwise.
     cache = Path(f"deepinv_ref_{mode}_{size}_{batch}.npz")
     if cache.exists():
+        # The images and cotangent are taken from the file, so that they match
+        # the reference exactly: regenerated elsewhere they can differ in the
+        # last bit (NumPy's normal sampler calls the platform's exp and log).
         with np.load(cache) as f:
             ref, gref = f["ref"], f["gref"]
-            assert np.array_equal(f["x"], x64) and np.array_equal(f["c"], c64), f"{cache} is for other data"
+            assert np.allclose(f["x"], x64, rtol=0, atol=1e-12) and np.allclose(f["c"], c64, rtol=0, atol=1e-12), \
+                f"{cache} is for other data"
+            x64, c64 = f["x"], f["c"]
         print(f"reference read from {cache}", flush=True)
     else:
         op = Op(2)
