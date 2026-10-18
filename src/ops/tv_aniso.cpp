@@ -929,8 +929,10 @@ struct TVAniso final : ImageOp<TVAniso> {
                 Sa[cj] -= sg;
             };
             if (lam[a] > 0.0) {
+                // An edge without weight has p_e = 0 up to rounding, so its sign
+                // comes from z (as the one-sided derivative in beta_e needs).
                 edges(a, [&](int64_t i, int64_t, double pe) {
-                    add(i, pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : (ba && ba[i] == 0.0 ? zsign(i) : 0.0)));
+                    add(i, ba && ba[i] == 0.0 ? zsign(i) : (pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : 0.0)));
                 });
                 continue;
             }

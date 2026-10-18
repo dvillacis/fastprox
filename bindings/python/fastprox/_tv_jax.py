@@ -48,10 +48,17 @@ def _dt(p, dim):
 
 
 class Ops:
-    """Operators for images (B, *img), weights w (k,), traced or not."""
+    """Operators for images (B, *img), weights w (k,), traced or not, and
+    spatial weights sw: pixel weights (B, *img) or edge weights (k, B, *img),
+    or None (see _tv_torch.Problem.field)."""
 
-    def __init__(self, k, w, iso):
-        self.k, self.w, self.iso = k, w, iso
+    def __init__(self, k, w, iso, sw=None):
+        self.k, self.w, self.iso, self.sw = k, w, iso, sw
+
+    def field(self, gamma):
+        """The radius of every pixel or edge, gamma (B,) times the spatial weights."""
+        g = _bimg(gamma, self.sw.ndim - (1 if self.iso else 2))
+        return g * self.sw if self.iso else g[None] * self.sw
 
     def G(self, z):
         return jnp.stack([self.w[a] * _d(z, 1 + a) for a in range(self.k)])
@@ -70,8 +77,9 @@ class Ops:
         return out
 
     def proj(self, y, gamma):
-        """Onto the balls or boxes of radius gamma (B,), one per image."""
-        g = _bimg(gamma, y.ndim - 2)
+        """Onto the balls or boxes of radius gamma (B,), one per image, times
+        the spatial weights."""
+        g = _bimg(gamma, y.ndim - 2) if self.sw is None else self.field(gamma)
         if self.iso:
             nrm = self.pnorm(y)
             big = nrm > g
@@ -92,18 +100,22 @@ class Ops:
     def gap(self, x, u, gamma):
         z = x - self.Gt(u)
         g = self.G(z)
-        return z, gamma * self.nsum(g) - self.dsum(g * u)
+        if self.sw is None:
+            return z, gamma * self.nsum(g) - self.dsum(g * u)
+        r = self.field(gamma)
+        tv = self.isum(r * self.pnorm(g)) if self.iso else self.dsum(r * jnp.abs(g))
+        return z, tv - self.dsum(g * u)
 
 
 def _bimg(v, nd):
     return v.reshape(v.shape + (1,) * nd)
 
 
-def solve(x, gamma, w, u0, iso, tol, max_iter):
-    """(z, u, gap per image, iterations) for x (B, *img) and gamma (B,); tol,
-    max_iter static."""
+def solve(x, gamma, w, u0, iso, tol, max_iter, sw=None):
+    """(z, u, gap per image, iterations) for x (B, *img), gamma (B,) and
+    spatial weights sw or None; tol, max_iter static."""
     k = w.shape[0]
-    ops = Ops(k, w, iso)
+    ops = Ops(k, w, iso, sw)
     L = 4.0 * jnp.sum(w * w)
     tau = jnp.where(L > 0, 1.0 / jnp.where(L > 0, L, 1.0), 0.0)
     target = tol * ops.isum(x * x) / 2
@@ -222,14 +234,15 @@ class Regions:
         return jnp.take_along_axis(c, self.at, axis=1).reshape((self.B,) + tuple(self.img))
 
 
-def _structure(x, z, u, gap, gamma, w, iso):
+def _structure(x, z, u, gap, gamma, w, iso, sw=None):
     """Flat entries from the dual, as in _tv_torch.Structure."""
     k = w.shape[0]
-    ops = Ops(k, w, iso)
+    ops = Ops(k, w, iso, sw)
     B, nd = z.shape[0], z.ndim - 1
     g = ops.G(z)
     eps = jnp.finfo(z.dtype).eps
-    inside = _bimg(gamma, nd) * (1 - max(1e-9, 64 * float(eps)))
+    rad = _bimg(gamma, nd) if sw is None else ops.field(gamma)  # per image, or per pixel or edge
+    inside = rad * (1 - max(1e-9, 64 * float(eps)))
     live = [w[a] != 0 for a in range(k)]
     if iso:
         gn = ops.pnorm(g)
@@ -239,11 +252,12 @@ def _structure(x, z, u, gap, gamma, w, iso):
         join = [flat & live[a] for a in range(k)]
         n = jnp.where(flat[None], 0.0, g / safe[None])
         mu = _bimg(0.1 * jnp.max(w) * jnp.sqrt(2 * jnp.maximum(gap, 0) / z[0].size), nd)  # _tv_torch.CURV_RMS
-        h = jnp.where(flat | _bimg(gamma <= 0, nd), 0.0, _bimg(gamma, nd) / jnp.maximum(safe, mu))
+        h = jnp.where(flat | (rad <= 0), 0.0, rad / jnp.maximum(safe, mu))
     else:
         flat = jnp.abs(u) < inside
         join = [flat[a] & live[a] for a in range(k)]
-        n = jnp.where(flat, 0.0, jnp.sign(u))
+        sg = jnp.sign(u) if sw is None else jnp.where(sw == 0, jnp.sign(g), jnp.sign(u))
+        n = jnp.where(flat, 0.0, sg)
         h = None
     return ops, n, h, Regions(join, B, z.shape[1:])
 
@@ -323,27 +337,34 @@ def _region_solve(ops, n, h, R, b, tol, max_iter):
     return st[1]
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
-def tv(x, gamma, w, u0, iso, tol, max_iter, dtol, dmax):
-    z, u, gap, it, conv = solve(x, gamma, w, u0, iso, tol, max_iter)
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
+def tv(x, gamma, w, u0, sw, iso, tol, max_iter, dtol, dmax):
+    z, u, gap, it, conv = solve(x, gamma, w, u0, iso, tol, max_iter, sw)
     return z, (u, gap, it, conv)
 
 
-def _fwd(x, gamma, w, u0, iso, tol, max_iter, dtol, dmax):
-    z, u, gap, it, conv = solve(x, gamma, w, u0, iso, tol, max_iter)
-    return (z, (u, gap, it, conv)), (x, z, u, gap, gamma, w, u0)
+def _fwd(x, gamma, w, u0, sw, iso, tol, max_iter, dtol, dmax):
+    z, u, gap, it, conv = solve(x, gamma, w, u0, iso, tol, max_iter, sw)
+    return (z, (u, gap, it, conv)), (x, z, u, gap, gamma, w, u0, sw)
 
 
 def _bwd(iso, tol, max_iter, dtol, dmax, res, cts):
-    x, z, u, gap, gamma, w, u0 = res
-    ops, n, h, R = _structure(x, z, u, gap, gamma, w, iso)
+    x, z, u, gap, gamma, w, u0, sw = res
+    ops, n, h, R = _structure(x, z, u, gap, gamma, w, iso, sw)
     if dtol is None:  # the relative error of z that each image's gap certifies
         xx = (x.reshape(x.shape[0], -1) ** 2).sum(1)
         dtol = jnp.maximum(jnp.sqrt(2 * jnp.maximum(gap, 0) / jnp.where(xx > 0, xx, 1)),
                            max(1e-10, 100 * float(jnp.finfo(x.dtype).eps))).astype(x.dtype)
     hz = R.spread(_region_solve(ops, n, h, R, R.sum(cts[0]), dtol, dmax))
     Gh = ops.G(hz)
-    ggamma = -ops.dsum(Gh * n)
+    gsw = None
+    if sw is None:
+        ggamma = -ops.dsum(Gh * n)
+    else:  # as _tv_torch.Structure.vjp
+        t = (Gh * n).sum(0) if iso else Gh * n
+        ggamma = -(ops.isum(sw * t) if iso else ops.dsum(sw * t))
+        gi = _bimg(gamma, z.ndim - 1)
+        gsw = (-(gi * t) if iso else -(gi[None] * t)).astype(sw.dtype)
     HGh = _H(n, h, Gh) if h is not None else None
     gw = []
     for a in range(w.shape[0]):
@@ -351,7 +372,7 @@ def _bwd(iso, tol, max_iter, dtol, dmax, res, cts):
         if HGh is not None:
             v = v - jnp.sum(HGh[a] * _d(z, 1 + a))
         gw.append(v)
-    return hz, ggamma.astype(jnp.result_type(gamma)), jnp.stack(gw).astype(w.dtype), jnp.zeros_like(u0)
+    return hz, ggamma.astype(jnp.result_type(gamma)), jnp.stack(gw).astype(w.dtype), jnp.zeros_like(u0), gsw
 
 
 tv.defvjp(_fwd, _bwd)

@@ -104,8 +104,8 @@ def _function(spec):
 # ---------------------------------------------------------------------------
 
 
-def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_start=None,
-           return_info=False, deriv_tol=None, deriv_max_iter=10000):
+def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, max_iter=1000,
+           warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
     """Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, in JAX operations on ``x``'s device; differentiable (reverse
     mode) in ``x``, ``gamma`` and ``weights``. ``gamma`` is a number or one
@@ -117,22 +117,26 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_
     kernel's: one unknown per flat region, solved by conjugate gradients to
     relative residual ``deriv_tol``; by default each image's solve stops at
     the relative error of z that its gap certifies, sqrt(2 gap) / |x|, and
-    at max(1e-10, 100 eps) at the tightest."""
+    at max(1e-10, 100 eps) at the tightest. ``pixel_weights`` (since 0.3), as
+    in :func:`fastprox.torch.tv_iso`: alpha >= 0 broadcasting to x.shape,
+    differentiable."""
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
-                      deriv_tol, deriv_max_iter)
+                      deriv_tol, deriv_max_iter, pixel_weights)
 
 
-def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, tol=1e-6, max_iter=1000, warm_start=None,
-             return_info=False, deriv_tol=None, deriv_max_iter=10000):
+def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=1e-6, max_iter=1000,
+             warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
     """Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`: a
     plain dual method, with the dual in the C kernel's form; its derivatives
-    are exact region averages."""
+    are exact region averages. ``edge_weights`` (since 0.3), as in
+    :func:`fastprox.torch.tv_aniso`: beta >= 0 of shape (ndim, ...)
+    broadcasting to (ndim, *x.shape), differentiable."""
     return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
-                      deriv_tol, deriv_max_iter)
+                      deriv_tol, deriv_max_iter, edge_weights)
 
 
 def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
-               deriv_max_iter):
+               deriv_max_iter, spatial=None):
     x = jnp.asarray(x)
     check_dtype(x.dtype)
     if ndim not in (2, 3):
@@ -171,10 +175,35 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         if not deriv_tol > 0:
             raise ValueError("deriv_tol must be > 0 or None")
         deriv_tol = float(deriv_tol)
-    z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, iso, float(tol), int(max_iter), deriv_tol,
+    sw = None if spatial is None else _spatial(spatial, x, ndim, iso)
+    z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, sw, iso, float(tol), int(max_iter), deriv_tol,
                                     int(deriv_max_iter))
     z = z.reshape(x.shape)
     if not return_info:
         return z
     dual = _tvj.dual_out(u, w, iso).reshape((ndim,) + x.shape)
     return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual)
+
+
+def _spatial(sw, x, ndim, iso):
+    """Pixel weights broadcasting to x.shape, as (B, *img), or edge weights
+    (ndim, ...) whose other axes broadcast to x.shape, as (ndim, B, *img), as
+    in fastprox.torch; the gradient sums back to sw's own shape. Values are
+    not checked here (they may be traced): they must be finite and >= 0."""
+    name = "pixel_weights" if iso else "edge_weights"
+    t = jnp.asarray(sw, x.dtype)
+    full = tuple(x.shape) if iso else (ndim,) + tuple(x.shape)
+    ok = True
+    if not iso:
+        ok = t.ndim >= 1 and t.shape[0] == ndim and t.ndim - 1 <= x.ndim
+        if ok:
+            t = t.reshape((ndim,) + (1,) * (x.ndim + 1 - t.ndim) + t.shape[1:])
+    try:
+        ok = ok and np.broadcast_shapes(t.shape, full) == full
+    except ValueError:
+        ok = False
+    if not ok:
+        what = "broadcast to" if iso else f"have shape ({ndim}, ...) broadcasting to"
+        raise ValueError(f"{name} must {what} {full}, got shape {jnp.shape(sw)}")
+    img = tuple(x.shape[-ndim:])
+    return jnp.broadcast_to(t, full).reshape((-1,) + img if iso else (ndim, -1) + img)

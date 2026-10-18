@@ -69,6 +69,15 @@ class Problem:
         self.B = x.shape[0]
         self.N = math.prod(x.shape[1:])
         self.positive = False  # every radius > 0 (set by solve; projections in place)
+        # Spatial weights (since 0.3): pixel weights (B, *img) or edge weights
+        # (k, B, *img), multiplying the radius; None for none.
+        self.sw = None
+
+    def field(self, gamma):
+        """The radius of every pixel (isotropic) or edge (anisotropic) for one
+        gamma per image (B,), with the spatial weights."""
+        g = _img(self, gamma)
+        return g * self.sw if self.iso else g.unsqueeze(0) * self.sw
 
     def d(self, z, a):
         dim = 1 + a
@@ -136,14 +145,15 @@ class Problem:
 
     def proj(self, y, gamma):
         """Onto |u_p| <= gamma (isotropic) or |u_e| <= gamma (anisotropic), for
-        one radius (a float) or one per image (a tensor (B,)); may overwrite y."""
+        one radius (a float), one per image (a tensor (B,)) or a field of
+        radii (from field); may overwrite y."""
         if not isinstance(gamma, torch.Tensor):  # the common case, in place
             if gamma <= 0:
                 return torch.zeros_like(y)
             if self.iso:
                 return y.div_(self.pnorm(y).div_(gamma).clamp_(min=1.0))
             return y.clamp_(-gamma, gamma)
-        g = _img(self, gamma)
+        g = gamma if gamma.dim() > 1 else _img(self, gamma)
         if self.iso:
             n = self.pnorm(y)
             if self.positive:  # in place, as for one radius
@@ -166,7 +176,11 @@ class Problem:
     def gap(self, x, u, gamma):
         z = self.primal(x, u)
         g = self.G(z)
-        return z, g, gamma * self.nsum(g) - self.dsum(g * u)
+        if self.sw is None:
+            return z, g, gamma * self.nsum(g) - self.dsum(g * u)
+        r = self.field(gamma)
+        tv = self.isum(r * self.pnorm(g)) if self.iso else self.dsum(r * g.abs())
+        return z, g, tv - self.dsum(g * u)
 
 
 CURV_RMS = 0.1  # the curvature cap, as kCurvRms in src/ops/tv_iso.cpp
@@ -189,18 +203,24 @@ def per_image(gamma, B, x):
     return torch.full((B,), float(gamma), dtype=x.dtype, device=x.device)
 
 
-def solve(x, gamma, w, iso, tol, max_iter, u0):
-    """(z, u, gap per image, iterations, converged) for x of shape (B, *img)
-    and gamma a number or one value per image."""
+def solve(x, gamma, w, iso, tol, max_iter, u0, sw=None):
+    """(z, u, gap per image, iterations, converged) for x of shape (B, *img),
+    gamma a number or one value per image, and spatial weights sw (pixel
+    weights (B, *img) or edge weights (k, B, *img)) or None."""
     prob = Problem(x, w, iso)
     gamma = per_image(gamma, prob.B, x)
-    # The projections take one float when every image has the same radius.
-    radius = float(gamma[0]) if bool((gamma == gamma[0]).all()) else gamma
-    prob.positive = bool((gamma > 0).all())
+    if sw is None:
+        # The projections take one float when every image has the same radius.
+        radius = float(gamma[0]) if bool((gamma == gamma[0]).all()) else gamma
+        prob.positive = bool((gamma > 0).all())
+    else:
+        prob.sw = sw.to(dtype=x.dtype, device=x.device)
+        radius = prob.field(gamma)
+        prob.positive = bool((radius > 0).all())
     L = 4.0 * sum(a * a for a in prob.w)
     u = torch.zeros((prob.k,) + tuple(x.shape), dtype=x.dtype, device=x.device) if u0 is None \
         else prob.proj(u0.to(dtype=x.dtype, device=x.device).clone(), radius)
-    none = not bool((gamma > 0).any())
+    none = not bool((gamma > 0).any()) or (sw is not None and not bool((radius > 0).any()))
     if L == 0.0 or none or max_iter <= 0:
         u = torch.zeros_like(u) if L == 0.0 or none else u
         z, g, gap = prob.gap(x, u, gamma)
@@ -348,11 +368,15 @@ class Regions:
 class Structure:
     """What the derivatives need at a solution (z, u) of shape (B, *img)."""
 
-    def __init__(self, x, z, u, gap, gamma, w, iso):
+    def __init__(self, x, z, u, gap, gamma, w, iso, sw=None):
         prob = Problem(z, w, iso)
         self.prob, self.z, self.u = prob, z, u
         self.gamma = per_image(gamma, prob.B, z)
         gimg = _img(prob, self.gamma)
+        if sw is not None:  # the radius of each pixel or edge
+            prob.sw = sw.to(dtype=z.dtype, device=z.device)
+            gimg = prob.field(self.gamma)
+        self.sw = prob.sw
         g = prob.G(z)
         eps = torch.finfo(z.dtype).eps
         inside = gimg * (1 - dual_eta(z.dtype))
@@ -370,7 +394,10 @@ class Structure:
         else:
             flat = u.abs() < inside
             join = [flat[a] & live[a] for a in range(prob.k)]
-            self.n = torch.where(flat, torch.zeros_like(u), torch.sign(u))
+            sg = torch.sign(u)
+            if self.sw is not None:  # an edge without weight takes the sign of its jump
+                sg = torch.where(self.sw == 0, torch.sign(g), sg)
+            self.n = torch.where(flat, torch.zeros_like(u), sg)
             self.h = None
         self.hn = None
         self.R = Regions(join, prob.B, tuple(z.shape[1:]))
@@ -476,10 +503,25 @@ class Structure:
         rel = torch.sqrt(rr / torch.where(bb > 0, bb, torch.ones_like(bb)))
         return c, it, float(rel.max()) if rel.numel() else 0.0
 
-    def jvp(self, dx, dgamma, dw, tol, max_iter):
+    def _wfield(self, v):
+        """A spatial field (pixel weights (B, *img), edge weights (k, B,
+        *img)) shaped to multiply n (k, B, *img)."""
+        return v.unsqueeze(0) if self.prob.iso else v
+
+    def jvp(self, dx, dgamma, dw, tol, max_iter, dsw=None):
         prob, R = self.prob, self.R
         r = torch.zeros_like(self.z) if dx is None else dx.clone()
-        if dgamma is not None:
+        if self.sw is not None:
+            # dr = dgamma sw + gamma dsw, the change of each radius.
+            dr = 0.0
+            if dgamma is not None:
+                dr = _img(prob, dgamma) * self.sw if prob.iso else _img(prob, dgamma).unsqueeze(0) * self.sw
+            if dsw is not None:
+                gi = _img(prob, self.gamma)
+                dr = dr + (gi * dsw if prob.iso else gi.unsqueeze(0) * dsw)
+            if dgamma is not None or dsw is not None:
+                r = r - prob.Gt(self.n * self._wfield(dr))
+        elif dgamma is not None:
             r = r - _img(prob, dgamma) * prob.Gt(self.n)
         if dw is not None:
             for a in range(prob.k):
@@ -493,12 +535,19 @@ class Structure:
 
     def vjp(self, gz, tol, max_iter):
         """(gx, d/dgamma per image, d/dw_a summed over the batch) for the
-        cotangent gz."""
+        cotangent gz; with spatial weights also self.gsw, their gradient."""
         prob, R = self.prob, self.R
         c, it, res = self.solve(R.sum(gz), tol, max_iter)
         h = R.spread(c)
         Gh = prob.G(h)
-        ggamma = -prob.dsum(Gh * self.n)
+        self.gsw = None
+        if self.sw is None:
+            ggamma = -prob.dsum(Gh * self.n)
+        else:  # d/dgamma = -sum sw <Gh, n>, d/dsw = -gamma <Gh, n> (per pixel or edge)
+            t = (Gh * self.n).sum(0) if prob.iso else Gh * self.n
+            ggamma = -(prob.isum(self.sw * t) if prob.iso else prob.dsum(self.sw * t))
+            gi = _img(prob, self.gamma)
+            self.gsw = -(gi * t if prob.iso else gi.unsqueeze(0) * t)
         HGh = self.H(Gh) if self.h is not None else None
         gw = []
         for a in range(prob.k):
