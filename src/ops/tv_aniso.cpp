@@ -860,7 +860,12 @@ struct TVAniso final : ImageOp<TVAniso> {
     // gave errors of 0.07-0.19 against the exact derivative on 128^2 images
     // at a gap tolerance of 1e-8. Along other axes the components do not
     // join and the signs are those of z's jumps. Uses u as scratch.
-    void structure(const Geom &g, ImageCall &c, const double *lam, const double *z, double *u) const {
+    // With side (since 0.3; C order, from fp_workspace_set_branch), an edge
+    // (i, j) at a kink within stol, its jump within stol of 0 and its 1D dual
+    // within stol of its bound, is joined for side[i] = -1 and kept apart
+    // (with the sign of its dual) for +1, whatever the rule above says.
+    void structure(const Geom &g, ImageCall &c, const double *lam, const double *z, double *u,
+                   const int8_t *side = nullptr, double stol = 0.0) const {
         const int64_t N = g.N;
         const View v = view(c.save, N);
         int32_t *label = v.label;
@@ -891,10 +896,17 @@ struct TVAniso final : ImageOp<TVAniso> {
             }
             return i;
         };
+        auto forced = [&](int a, int64_t i, int64_t s, double pe) {  // the side at a kink, else 0
+            if (!side || side[i] == 0) return 0;
+            const double r = le(lam, a, i, N);
+            const bool kink = r > 0.0 && std::fabs(z[i + s] - z[i]) <= stol && std::fabs(pe) >= r - stol;
+            return kink ? static_cast<int>(side[i]) : 0;
+        };
         for (int a = 0; a < g.k; ++a) {
             if (lam[a] == 0.0 || g.L[a] == 1) continue;
             edges(a, [&](int64_t i, int64_t s, double pe) {
-                if (!(std::fabs(pe) < le(lam, a, i, N) * (1.0 - kPolishEta))) return;
+                const int f = forced(a, i, s, pe);
+                if (f > 0 || (f == 0 && !(std::fabs(pe) < le(lam, a, i, N) * (1.0 - kPolishEta)))) return;
                 int64_t ri = find(i), rj = find(i + s);
                 if (ri == rj) return;
                 if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
@@ -986,6 +998,23 @@ struct TVAniso final : ImageOp<TVAniso> {
             }
         }
         return count;
+    }
+
+    // Branch overrides (since 0.3): the saved structure rebuilt from the
+    // call's z and dual with side applied (null: the default rule).
+    bool has_branches() const noexcept override { return true; }
+    void branch_image(char *save, const double *, const double *z, const double *dual, const int64_t *shape,
+                      double gamma, double tol, const int8_t *side, char *work) const noexcept override {
+        const Geom g(k, shape);
+        double lam[3] = {0.0, 0.0, 0.0};
+        for (int a = 0; a < k; ++a) lam[a] = (g.L[a] > 1 && gamma * w[a] > 0.0) ? gamma * w[a] : 0.0;
+        ImageCall c;
+        c.shape = shape;
+        c.numel = g.N;
+        c.gamma = gamma;
+        c.save = save;
+        c.dual = const_cast<double *>(dual);
+        structure(g, c, lam, z, reinterpret_cast<double *>(work), side, tol);
     }
 
     // ---- derivatives (structure saved by prox_img) --------------------------

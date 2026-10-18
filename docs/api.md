@@ -482,8 +482,8 @@ directions that leave the chosen piece. Finite-difference tests therefore
 avoid kinks.
 
 **Kink masks and branch overrides (*since 0.2*).** For soft thresholding,
-ℓ1 over a box, SCAD and MCP (since 0.3 also ℓ0, ℓq and the log penalty, and
-masks for 1D, anisotropic and isotropic TV), the kinks of a kept prox call can be read and
+ℓ1 over a box, SCAD and MCP (since 0.3 also ℓ0, ℓq and the log penalty, 1D
+and anisotropic TV, and masks for isotropic TV), the kinks of a kept prox call can be read and
 the piece differentiated there chosen, which gives the other elements of the
 B-subdifferential, for example both elements at a biactive entry, or the
 SCD subspaces of each entry:
@@ -509,7 +509,20 @@ SCD subspaces of each entry:
   with ‖(W D z)_p‖ ≤ `tol` whose dual is within `tol` of its sphere,
   ‖u_p‖ ≥ γα_p − `tol`. These are the biactive edges and pixels of the table
   above, where the derivative is set-valued (joined or apart). Zero bounds
-  (free edges, zero weights) are never kinks. Branch overrides for TV are not available yet
+  (free edges, zero weights) are never kinks.
+- **TV branch overrides** (*since 0.3*, 1D and anisotropic TV):
+  `fp_workspace_set_branch(ws, side, tol)` (`branch=` and `kink_tol=` in
+  Python) chooses at each kink within `tol` whether the derivative treats
+  the edge as joined (side −1 at its tail: its two sides averaged together)
+  or apart (+1: averaged separately, the jump taking the sign of the edge's
+  dual). These are the two pieces of the piecewise-affine prox that meet
+  there, so each is the derivative of the one-sided difference in a
+  direction that keeps it: closing the gap keeps the edge joined, opening it
+  or lowering γ keeps it apart. 1D TV rewrites its saved segment codes;
+  anisotropic TV rebuilds its saved regions from the kept z and dual (one
+  pass over the image, as in the prox call). Isotropic TV has none yet:
+  apart, a pixel with zero gradient is the limit of curvatures γ/‖g_p‖ → ∞,
+  a constraint the conjugate gradient system holds only through its cap
   (`fp_workspace_set_branch` returns `FP_EINVAL`).
 - `fp_workspace_set_branch(ws, side, tol)` sets the piece that `fp_jvp` and
   `fp_vjp` differentiate at the entries within `tol` of a breakpoint: side

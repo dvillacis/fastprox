@@ -156,6 +156,18 @@ struct fp_op {
                              int64_t) const noexcept { return 0; }
     virtual int64_t kink_image(const double *, const double *, const double *, const int64_t *, double,
                                double, int8_t *, const int64_t *) const noexcept { return 0; }
+    // Branch overrides (fp_workspace_set_branch): elementwise operators with
+    // kinks, and since 0.3 the row and image operators that implement them.
+    virtual bool has_branches() const noexcept { return elementwise() && has_kinks(); }
+    // Rows: rewrite the saved codes of one row at its kinks within tol by side
+    // (one per entry, -1 / 0 / +1), from the saved x and z (in double).
+    virtual void branch_row(const double *, const double *, uint8_t *, int64_t, double, double,
+                            const int8_t *) const noexcept {}
+    // Images: rebuild the saved structure of one image from x, z (double) and
+    // the dual, with side (C order, or null for the default rule) applied at
+    // its kinks within tol; work: image_bytes(shape) of scratch.
+    virtual void branch_image(char *, const double *, const double *, const double *, const int64_t *,
+                              double, double, const int8_t *, char *) const noexcept {}
 
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.

@@ -354,8 +354,9 @@ def test_image_tv_kinks(iso, weighted):
     for t in (1, 4):
         _, c2 = op.prox(x, 0.4, keep=True, tol=1e-12, max_iter=10 ** 6, threads=t)
         np.testing.assert_array_equal(c2.kinks(3e-2), m)
-    with pytest.raises(ValueError):  # branch overrides are elementwise only for now
-        op.jvp(ctx, x, branch=1)
+    if iso:  # isotropic TV has no branch overrides yet
+        with pytest.raises(ValueError):
+            op.jvp(ctx, x, branch=1)
 
 
 def test_image_tv_exact_kinks():
@@ -366,3 +367,57 @@ def test_image_tv_exact_kinks():
     assert ca.kinks().tolist() == [[2, 0], [2, 0]]  # bit 1: the edge along axis 1
     _, ci = fp.TVIso(2, [0.0, 1.0]).prox(x, 0.5, keep=True)
     assert ci.kinks().tolist() == [[1, 0], [1, 0]]
+
+
+# ---- branch overrides of 1D and anisotropic TV (since 0.3) ------------------
+
+
+def _tv_ops():
+    """(name, operator, input with exactly biactive edges at gamma = 1/2): rows
+    (0, 1) solve to their mean with the dual on its bound; an anisotropic TV
+    of identical rows has the same solution in 2D."""
+    rows = np.array([[0.0, 1.0, 1.0, 3.0], [2.0, 1.0, 5.0, 4.0]])  # pairs (0,1), (2,1), (5,4)
+    return [("tv1d", fp.TV1D(), rows),
+            ("aniso_1axis", fp.TVAniso(2, [0.0, 1.0]), rows),
+            ("aniso_2d", fp.TVAniso(2), np.array([[0.0, 1.0], [0.0, 1.0]]))]
+
+
+@pytest.mark.parametrize("name", ["tv1d", "aniso_1axis", "aniso_2d"])
+def test_tv_branch_matches_one_sided_differences(name):
+    """At a biactive edge side -1 joins its two sides and +1 keeps them
+    apart: the derivative along a direction that closes the gap (the edge
+    stays joined) or opens it (the edge comes apart), in x and in gamma, is
+    that of the one-sided difference."""
+    _, op, x = next(c for c in _tv_ops() if c[0] == name)  # built here: nanobind objects held by
+    g, tol = 0.5, 1e-9                                     # pytest's parameters outlive the module
+    z, ctx = op.prox(x, g, keep=True, tol=1e-14, max_iter=10 ** 5) if name != "tv1d" else op.prox(x, g, keep=True)
+    m = ctx.kinks(tol)
+    assert m.any()
+    kink = m != 0
+    # Directions: move each flagged edge's two values towards (close) or away
+    # from (open) each other; x's step at an edge (i, i + 1) is the sign of
+    # x_{i+1} - x_i.
+    step = np.zeros_like(x)
+    ax = -1
+    d = np.sign(np.diff(x, axis=ax))
+    t = np.zeros_like(x)
+    t[..., :-1] -= d * (np.take(m, range(x.shape[ax] - 1), axis=ax) != 0)
+    t[..., 1:] += d * (np.take(m, range(x.shape[ax] - 1), axis=ax) != 0)
+    opening, closing = t, -t
+    h = 1e-7
+    run = (lambda xx, gg: op.prox(xx, gg, tol=1e-14, max_iter=10 ** 5)) if name != "tv1d" else op.prox
+    side = np.where(kink, 1, 0).astype(np.int8)
+    for s, dx, dg in ((1, opening, 0.0), (-1, closing, 0.0), (1, 0 * x, -1.0), (-1, 0 * x, 1.0)):
+        fd = (run(x + h * dx, g + h * dg) - z) / h
+        jv = op.jvp(ctx, dx, dg, branch=s * side, kink_tol=tol)
+        np.testing.assert_allclose(jv, fd, rtol=1e-6, atol=1e-6)
+        r = np.random.default_rng(8).normal(size=x.shape)
+        gx, grads = op.vjp(ctx, r, branch=s * side, kink_tol=tol)
+        lhs, rhs = float((r * jv).sum()), float((gx * dx).sum() + grads.gamma * dg)
+        assert abs(lhs - rhs) <= 1e-12 * (1 + abs(lhs))
+    # The two sides differ, and the override holds for one call only.
+    dx = np.random.default_rng(9).normal(size=x.shape)
+    jp, jm, j0 = (op.jvp(ctx, dx, branch=b, kink_tol=tol) for b in (side, -side, None))
+    assert not np.allclose(jp, jm)
+    np.testing.assert_array_equal(op.jvp(ctx, dx), j0)
+    assert np.allclose(j0, jp) or np.allclose(j0, jm)
