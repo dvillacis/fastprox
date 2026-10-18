@@ -158,6 +158,30 @@ def _aniso_term(cp, z, g, p, shape):
                    for a in range(k) if shape[a] > 1)
 
 
+def _iso_pixel_term(cp, z, g, p, shape):
+    parts = [p["weights"][a] * (_grad_full(shape, a) @ z) for a in range(len(shape))]
+    return g * cp.sum(cp.multiply(p["pixel_weights"].ravel(), cp.norm(cp.vstack(parts), 2, axis=0)))
+
+
+def _aniso_edge_term(cp, z, g, p, shape):
+    k = len(shape)
+    t = 0
+    for a in range(k):
+        if shape[a] > 1:
+            b = np.take(p["edge_weights"][a], range(shape[a] - 1), axis=a).ravel()
+            t = t + p["weights"][a] * cp.sum(cp.multiply(b, cp.abs(_diff(shape, a) @ z)))
+    return g * t
+
+
+def _spatial(rng, shape, key, k):
+    """Axis weights and spatial weights in [0, 2] of shape (k, *shape) (one
+    axis dropped for pixel weights), about a tenth of them zero."""
+    size = shape if key == "pixel_weights" else (k, *shape)
+    v = _pos(rng, size, 0.0, 2.0)
+    v[rng.random(size) < 0.1] = 0.0
+    return {"weights": _pos(rng, k, 0.3, 2.0), key: v}
+
+
 def _graph(rng, shape):
     """A ring over the nodes plus random chords and one repeated edge, with
     weights in [0, 2] (some zero)."""
@@ -218,6 +242,27 @@ IMAGE_CASES = {
         lambda p: fp.TreeTV(int(p["n"][0]), p["edges"].astype(int), p["weights"]),
         _graph_term,
     ),
+    # Spatial weights (since 0.3); last, so the earlier draws are unchanged.
+    "tv_iso_2d_pixel": (
+        lambda rng, shape: _spatial(rng, shape, "pixel_weights", 2),
+        lambda p: fp.TVIso(2, p["weights"], pixel_weights=p["pixel_weights"]),
+        _iso_pixel_term,
+    ),
+    "tv_iso_3d_pixel": (
+        lambda rng, shape: _spatial(rng, shape, "pixel_weights", 3),
+        lambda p: fp.TVIso(3, p["weights"], pixel_weights=p["pixel_weights"]),
+        _iso_pixel_term,
+    ),
+    "tv_aniso_2d_edge": (
+        lambda rng, shape: _spatial(rng, shape, "edge_weights", 2),
+        lambda p: fp.TVAniso(2, p["weights"], edge_weights=p["edge_weights"]),
+        _aniso_edge_term,
+    ),
+    "tv_aniso_3d_edge": (
+        lambda rng, shape: _spatial(rng, shape, "edge_weights", 3),
+        lambda p: fp.TVAniso(3, p["weights"], edge_weights=p["edge_weights"]),
+        _aniso_edge_term,
+    ),
 }
 
 IMAGE_SHAPES = {
@@ -227,4 +272,8 @@ IMAGE_SHAPES = {
     "tv_iso_3d": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
     "graph_tv": ((3,), (8,), (30,), (120,)),
     "tree_tv": ((3,), (8,), (30,), (120,)),
+    "tv_iso_2d_pixel": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
+    "tv_iso_3d_pixel": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
+    "tv_aniso_2d_edge": ((1, 7), (2, 3), (5, 7), (12, 15), (20, 9)),
+    "tv_aniso_3d_edge": ((2, 3, 4), (4, 5, 6), (3, 1, 8), (6, 6, 5)),
 }

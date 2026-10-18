@@ -40,9 +40,10 @@ struct Geom {
 
 inline double fista_t(double t) noexcept { return 0.5 * (1.0 + std::sqrt(1.0 + 4.0 * t * t)); }
 
-// Per-thread scratch of fiber_pass.
+// Per-thread scratch of fiber_pass: inputs, outputs and edge weights of a
+// block of fibers, and the 1D kernel's scratch.
 inline size_t fiber_thread_bytes(const fp_op &tv, const Geom &g) noexcept {
-    return 2 * static_cast<size_t>(kFiberBlock * g.Lmax) * sizeof(double) + 64 + tv.scratch_bytes(g.Lmax);
+    return 3 * static_cast<size_t>(kFiberBlock * g.Lmax) * sizeof(double) + 64 + tv.scratch_bytes(g.Lmax);
 }
 
 // Blocks of fibers along axis a that fiber_pass hands out: one per fiber for
@@ -55,7 +56,7 @@ inline int64_t fiber_blocks(const Geom &g, int a) noexcept {
 
 template <bool Sum, class In, class Out>
 double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, double *part,
-                       In &&in, Out &&out) {
+                       In &&in, Out &&out, const double *wt) {
     const int64_t L = g.L[a], s = g.S[a];
     const int64_t bpo = s == 1 ? 1 : (s + kFiberBlock - 1) / kFiberBlock;
     const int64_t nblk = fiber_blocks(g, a);
@@ -65,7 +66,8 @@ double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const 
     parallel_for(c.nt, nblk, grain, [&](int tid, int64_t b0, int64_t b1) {
         double *bin = reinterpret_cast<double *>(c.thread_scratch(tid));
         double *bout = bin + kFiberBlock * g.Lmax;
-        void *scr = bout + kFiberBlock * g.Lmax;
+        double *bw = bout + kFiberBlock * g.Lmax;
+        void *scr = bw + kFiberBlock * g.Lmax;
         for (int64_t blk = b0; blk < b1; ++blk) {
             const int64_t oo = blk / bpo;
             const int64_t q0 = (blk % bpo) * kFiberBlock;
@@ -73,8 +75,12 @@ double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const 
             const int64_t base = oo * L * s + q0;
             for (int64_t i = 0; i < L; ++i)
                 for (int64_t q = 0; q < W; ++q) bin[q * L + i] = in(base + i * s + q);
+            if (wt && !ident)
+                for (int64_t i = 0; i < L; ++i)
+                    for (int64_t q = 0; q < W; ++q) bw[q * L + i] = i + 1 < L ? wt[base + i * s + q] : 0.0;
             for (int64_t q = 0; q < W; ++q) {
                 if (ident) std::memcpy(bout + q * L, bin + q * L, static_cast<size_t>(L) * sizeof(double));
+                else if (wt) tv.prox_edges(bin + q * L, bout + q * L, L, lam, bw + q * L, scr);
                 else tv.prox_row(bin + q * L, bout + q * L, L, lam, scr, nullptr);
             }
             double acc = 0.0;
@@ -94,11 +100,12 @@ double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const 
 
 // For every fiber along axis a: z = prox_{lam TV}(v) by the 1D TV operator tv
 // (unit weight), with v(o) = in(o) at each entry o of the fiber, then
-// out(o, z, v). lam == 0 is the identity.
+// out(o, z, v). lam == 0 is the identity. With wt (N entries), the edge
+// (o, o + e_a) has weight wt[o] (wt at the last entry of a fiber is unused).
 template <class In, class Out>
 void fiber_pass(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, In &&in,
-                Out &&out) {
-    fiber_pass_impl<false>(tv, g, a, lam, c, nullptr, in, out);
+                Out &&out, const double *wt = nullptr) {
+    fiber_pass_impl<false>(tv, g, a, lam, c, nullptr, in, out, wt);
 }
 
 // fiber_pass whose out returns a double: their sum, per block into part
@@ -106,8 +113,8 @@ void fiber_pass(const fp_op &tv, const Geom &g, int a, double lam, const ImageCa
 // on the thread count.
 template <class In, class Out>
 double fiber_pass_sum(const fp_op &tv, const Geom &g, int a, double lam, const ImageCall &c, double *part,
-                      In &&in, Out &&out) {
-    return fiber_pass_impl<true>(tv, g, a, lam, c, part, in, out);
+                      In &&in, Out &&out, const double *wt = nullptr) {
+    return fiber_pass_impl<true>(tv, g, a, lam, c, part, in, out, wt);
 }
 
 // Sum over the rows (length L[k-1]) of f(r), formed in a fixed order.

@@ -1,6 +1,12 @@
 // Anisotropic TV of 2D and 3D images: the prox of
 //   gamma sum_a w_a TV_a(z),
-// TV_a the sum of |z_{p + e_a} - z_p| along image axis a, by dual methods
+// TV_a the sum of |z_{p + e_a} - z_p| along image axis a, or since 0.3, with
+// edge weights beta >= 0 for one image shape, of beta_{a,p} |z_{p + e_a} -
+// z_p| (beta_{a,p} at the last entry along a unused). The weights enter as
+// per-edge bounds lam_e = gamma w_a beta_e wherever lam_a = gamma w_a did:
+// the 1D steps are weighted 1D TV proxes (src/ops/tv1d.cpp, prox_edges), the
+// gap, the dual's feasibility, the polish and the structure read lam_e, and
+// the derivatives below take the weight of each boundary edge. By dual methods
 // whose steps are exact 1D TV proxes along one axis (src/ops/tv1d.cpp) on
 // every fiber of the image.
 //
@@ -86,19 +92,33 @@ struct TVAniso final : ImageOp<TVAniso> {
     int k;
     double w[3];
     std::unique_ptr<fp_op> tv;  // 1D TV with unit weight; gamma carries the radius
+    Vec beta;                   // edge weights beta[a * N + p] for one image shape, or empty
+    int64_t eshape[3] = {1, 1, 1};
 
-    TVAniso(int kk, const double *ww, std::unique_ptr<fp_op> t) : k(kk), tv(std::move(t)) {
+    TVAniso(int kk, const double *ww, std::unique_ptr<fp_op> t, Vec b = {}, const int64_t *shape = nullptr)
+        : k(kk), tv(std::move(t)), beta(std::move(b)) {
         for (int a = 0; a < 3; ++a) w[a] = a < k ? ww[a] : 0.0;
+        if (shape)
+            for (int a = 0; a < k; ++a) eshape[a] = shape[a];
     }
 
     const char *name() const noexcept override { return "tv_aniso"; }
-    int64_t nparams() const noexcept override { return k; }
+    int64_t nparams() const noexcept override { return k + static_cast<int64_t>(beta.size()); }
     int image_ndim() const noexcept override { return k; }
     // Component labels are 32-bit.
     fp_status check_image(const int64_t *shape) const noexcept override {
         double n = 1.0;
         for (int a = 0; a < k; ++a) n *= static_cast<double>(shape[a]);
+        if (!beta.empty())
+            for (int a = 0; a < k; ++a)
+                if (shape[a] != eshape[a]) return FP_ESHAPE;
         return n < 2147483647.0 ? FP_OK : FP_ESHAPE;
+    }
+    // The edge weights along axis a (N entries), or null.
+    const double *bw(int a, int64_t N) const noexcept { return beta.empty() ? nullptr : beta.data() + a * N; }
+    // lam_e of the edge (i, i + e_a).
+    double le(const double *lam, int a, int64_t i, int64_t N) const noexcept {
+        return beta.empty() ? lam[a] : lam[a] * beta[static_cast<size_t>(a * N + i)];
     }
 
     // Working set: d, z, u, y_0..2, w_0..2, the polish scratch (3N doubles),
@@ -110,16 +130,20 @@ struct TVAniso final : ImageOp<TVAniso> {
         return (12 * static_cast<size_t>(g.N) + static_cast<size_t>(P) + 8) * sizeof(double);
     }
     // Saved structure: the number of components, a component label per entry,
-    // and per component 1/|C| and the boundary sign sums S_{C,a} (k of them).
+    // and per component 1/|C| and the boundary sign sums S_{C,a} (k of them;
+    // with edge weights, sums of beta_e sign_e); with edge weights also the
+    // sign of every edge (k N bytes).
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
-        return 8 + round8(4 * static_cast<size_t>(g.N)) + (1 + static_cast<size_t>(k)) * static_cast<size_t>(g.N) * 8;
+        const size_t N = static_cast<size_t>(g.N), K = static_cast<size_t>(k);
+        return 8 + round8(4 * N) + (1 + K) * N * 8 + (beta.empty() ? 0 : K * N);
     }
     static size_t round8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     struct View {
         int64_t *ncomp;
         int32_t *label;
         double *inv, *S;  // S[a * N + C]
+        int8_t *sign;     // sign[a * N + i] of the edge (i, i + e_a), with edge weights
     };
     View view(char *save, int64_t N) const noexcept {
         View v;
@@ -127,6 +151,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         v.label = reinterpret_cast<int32_t *>(save + 8);
         v.inv = reinterpret_cast<double *>(save + 8 + round8(4 * static_cast<size_t>(N)));
         v.S = v.inv + N;
+        v.sign = beta.empty() ? nullptr : reinterpret_cast<int8_t *>(v.S + k * N);
         return v;
     }
 
@@ -139,29 +164,44 @@ struct TVAniso final : ImageOp<TVAniso> {
 
     template <class In, class Out>
     void pass(const Geom &g, int a, double lam, const ImageCall &c, In &&in, Out &&out) const {
-        fiber_pass(*tv, g, a, lam, c, in, out);
+        fiber_pass(*tv, g, a, lam, c, in, out, bw(a, g.N));
     }
 
     // sum_a lam_a TV_a(z) - <z, d - z>.
     double gap(const Geom &g, const ImageCall &c, const double *lam, const double *d, const double *z,
                double *part) const {
-        const int64_t n = g.L[g.k - 1];
         return row_sum(g, c, part, [&](int64_t r) {
-            const int64_t base = r * n;
-            double s = 0.0;
-            const double ll = lam[g.k - 1];
-            if (ll > 0.0)
-                for (int64_t j = 0; j + 1 < n; ++j) s += ll * std::fabs(z[base + j + 1] - z[base + j]);
-            for (int a = 0; a + 1 < g.k; ++a) {
-                if (lam[a] == 0.0 || (base / g.S[a]) % g.L[a] == g.L[a] - 1) continue;
-                const double *z1 = z + base + g.S[a];
-                double t = 0.0;
-                for (int64_t j = 0; j < n; ++j) t += std::fabs(z1[j] - z[base + j]);
-                s += lam[a] * t;
-            }
+            double s = tv_row(g, lam, z, r);
+            const int64_t n = g.L[g.k - 1], base = r * n;
             for (int64_t j = 0; j < n; ++j) s -= z[base + j] * (d[base + j] - z[base + j]);
             return s;
         });
+    }
+    // sum of lam_e |z_j - z_i| over the edges (i, j) leaving row r.
+    double tv_row(const Geom &g, const double *lam, const double *z, int64_t r) const {
+        const int64_t n = g.L[g.k - 1], base = r * n, N = g.N;
+        double s = 0.0;
+        const int l = g.k - 1;
+        const double ll = lam[l];
+        const double *bl = bw(l, N);
+        if (ll > 0.0) {
+            if (bl)
+                for (int64_t j = 0; j + 1 < n; ++j) s += ll * bl[base + j] * std::fabs(z[base + j + 1] - z[base + j]);
+            else
+                for (int64_t j = 0; j + 1 < n; ++j) s += ll * std::fabs(z[base + j + 1] - z[base + j]);
+        }
+        for (int a = 0; a + 1 < g.k; ++a) {
+            if (lam[a] == 0.0 || (base / g.S[a]) % g.L[a] == g.L[a] - 1) continue;
+            const double *z1 = z + base + g.S[a];
+            const double *ba = bw(a, N);
+            double t = 0.0;
+            if (ba)
+                for (int64_t j = 0; j < n; ++j) t += ba[base + j] * std::fabs(z1[j] - z[base + j]);
+            else
+                for (int64_t j = 0; j < n; ++j) t += std::fabs(z1[j] - z[base + j]);
+            s += lam[a] * t;
+        }
+        return s;
     }
 
     // ---- prox --------------------------------------------------------------
@@ -222,7 +262,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         // The certificate needs a feasible dual, so a given one is made so.
         if (c.warm && na >= 2)
             for (int a = 0; a < k; ++a)
-                if (lam[a] > 0.0) feasible_dual(g, c, a, lam[a], q + a * N);
+                if (lam[a] > 0.0) feasible_dual(g, c, a, lam[a], bw(a, N), q + a * N);
 
         if (na == 0) {
             for (int64_t i = 0; i < N; ++i) z[i] = x[i];
@@ -397,7 +437,7 @@ struct TVAniso final : ImageOp<TVAniso> {
             auto in = [&](int64_t o) { return u[o] - wv[o]; };
             const bool test = it % kCheck == 0;
             double up = 0.0;
-            if (test) up = fiber_pass_sum(*tv, g, a2, lam[a2], c, part, in, upd);
+            if (test) up = fiber_pass_sum(*tv, g, a2, lam[a2], c, part, in, upd, bw(a2, N));
             else pass(g, a2, lam[a2], c, in, [&](int64_t o, double zo, double v) { upd(o, zo, v); });
             if (restart(test, up)) {
                 std::memcpy(wv, y, static_cast<size_t>(N) * sizeof(double));
@@ -488,7 +528,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                     return r;
                 };
                 auto in = [&](int64_t o) { return u[o] - p * wa[o]; };
-                if (test) up += fiber_pass_sum(*tv, g, a, p * lam[a], c, part, in, upd);
+                if (test) up += fiber_pass_sum(*tv, g, a, p * lam[a], c, part, in, upd, bw(a, N));
                 else pass(g, a, p * lam[a], c, in, [&](int64_t o, double zo, double v) { upd(o, zo, v); });
             }
             if (restart(test, up)) {
@@ -520,7 +560,9 @@ struct TVAniso final : ImageOp<TVAniso> {
     // (non-finite ones set to 0). Without this, an infeasible dual could
     // certify a wrong point: q_1 = 0, q_2 = x - mean(x) gives z = mean(x)
     // with gap 0 in 2D. Fibers are independent, so chunks run in parallel.
-    static void feasible_dual(const Geom &g, const ImageCall &c, int a, double lam, double *__restrict qa) {
+    // With edge weights wt, the bound of the edge (i, i + e_a) is lam wt[i].
+    static void feasible_dual(const Geom &g, const ImageCall &c, int a, double lam, const double *wt,
+                              double *__restrict qa) {
         constexpr int64_t W = kEdgeChunk;
         const int64_t s = g.S[a], L = g.L[a], outer = g.N / (L * s);
         const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
@@ -531,28 +573,33 @@ struct TVAniso final : ImageOp<TVAniso> {
                 const int64_t oo = u / per, r0 = (u % per) * W;
                 const int64_t w = std::min(W, s - r0);
                 const int64_t b = oo * L * s + r0;
-                for (int64_t r = 0; r < w; ++r) acc[r] = mass[r] = peak[r] = 0.0;
+                for (int64_t r = 0; r < w; ++r) {
+                    acc[r] = mass[r] = 0.0;
+                    peak[r] = -lam;
+                }
                 for (int64_t l = 0; l < L; ++l) {
                     const int64_t o = b + l * s;
                     for (int64_t r = 0; r < w; ++r) {
                         acc[r] += qa[o + r];
                         mass[r] += std::fabs(qa[o + r]);
                         // NaN in a fiber makes peak NaN and Inf makes mass Inf,
-                        // and either fails the test below.
-                        const double e = l + 1 < L ? std::fabs(acc[r]) : 0.0;
+                        // and either fails the test below. With edge weights,
+                        // peak is the largest excess over the edge's bound.
+                        const double e = l + 1 < L ? std::fabs(acc[r]) - (wt ? lam * wt[o + r] : lam) : -lam;
                         peak[r] = e > peak[r] || e != e ? e : peak[r];
                     }
                 }
                 for (int64_t r = 0; r < w; ++r) {
                     const double tau = 1e-10 * lam + 16.0 * std::numeric_limits<double>::epsilon() * mass[r];
-                    if (std::isfinite(mass[r]) && peak[r] <= lam + tau && std::fabs(acc[r]) <= tau) continue;
+                    if (std::isfinite(mass[r]) && peak[r] <= tau && std::fabs(acc[r]) <= tau) continue;
                     // q_i = p_{i-1} - p_i, p_e = clip(-(running sum)).
                     double run = 0.0, prev = 0.0;
                     for (int64_t l = 0; l < L; ++l) {
                         double &qi = qa[b + l * s + r];
                         run += qi;
                         double pe = 0.0;
-                        if (l + 1 < L && std::isfinite(run)) pe = std::clamp(-run, -lam, lam);
+                        const double lb = l + 1 < L && wt ? lam * wt[b + l * s + r] : lam;
+                        if (l + 1 < L && std::isfinite(run)) pe = std::clamp(-run, -lb, lb);
                         qi = prev - pe;
                         prev = pe;
                     }
@@ -569,11 +616,10 @@ struct TVAniso final : ImageOp<TVAniso> {
     // lam sign(p_e) added to v[i] and taken from v[j]. Each
     // entry is touched only by the edges of its own fiber, so the fixed chunks
     // of fibers run in parallel.
-    static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, double eta, const double *qa,
-                           uint8_t *flag, double *v) {
+    static void mark_edges(const Geom &g, const ImageCall &c, int a, double lam, const double *wt, double eta,
+                           const double *qa, uint8_t *flag, double *v) {
         constexpr int64_t W = kEdgeChunk;
         const int64_t s = g.S[a], L = g.L[a], outer = g.N / (L * s);
-        const double in = lam * (1.0 - eta);
         const uint8_t bit = static_cast<uint8_t>(1u << a);
         const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
         parallel_for(c.nt, outer * per, std::max<int64_t>(1, kChunk / (L * std::min(s, W))),
@@ -581,7 +627,8 @@ struct TVAniso final : ImageOp<TVAniso> {
             for (int64_t u = u0; u < u1; ++u) {
                 const int64_t oo = u / per, r0 = (u % per) * W;
                 const int64_t b = oo * L * s + r0;
-                mark_chunk(qa + b, flag + b, v + b, std::min(W, s - r0), L, s, lam, in, bit);
+                if (wt) mark_chunk<true>(qa + b, wt + b, flag + b, v + b, std::min(W, s - r0), L, s, lam, eta, bit);
+                else mark_chunk<false>(qa + b, nullptr, flag + b, v + b, std::min(W, s - r0), L, s, lam, eta, bit);
             }
         });
     }
@@ -589,8 +636,11 @@ struct TVAniso final : ImageOp<TVAniso> {
     // A separate function, so that the pointers are restrict here: through a
     // lambda's captures they are not, and the loop did not vectorise (5.6x
     // slower).
-    static void mark_chunk(const double *__restrict q, uint8_t *__restrict flag, double *__restrict v, int64_t w,
-                           int64_t L, int64_t s, double lam, double in, uint8_t bit) {
+    // With Wt, the edge at o has the bound lam wt[o].
+    template <bool Wt>
+    static void mark_chunk(const double *__restrict q, const double *__restrict wt, uint8_t *__restrict flag,
+                           double *__restrict v, int64_t w, int64_t L, int64_t s, double lam, double eta,
+                           uint8_t bit) {
         double acc[kEdgeChunk];
         for (int64_t r = 0; r < w; ++r) acc[r] = 0.0;
         for (int64_t l = 0; l + 1 < L; ++l) {
@@ -598,8 +648,10 @@ struct TVAniso final : ImageOp<TVAniso> {
             for (int64_t r = 0; r < w; ++r) {
                 acc[r] += q[o + r];
                 const double pe = -acc[r];
-                const bool inside = std::fabs(pe) < in;
-                const double ls = inside ? 0.0 : std::copysign(lam, pe);
+                double lb = lam;
+                if constexpr (Wt) lb = lam * wt[o + r];
+                const bool inside = std::fabs(pe) < lb * (1.0 - eta);
+                const double ls = inside ? 0.0 : std::copysign(lb, pe);
                 flag[o + r] |= inside ? bit : uint8_t{0};
                 v[o + r] += ls;
                 v[o + r + s] -= ls;
@@ -635,7 +687,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         std::memset(flag, 0, static_cast<size_t>(N));
         std::memcpy(zp, d, static_cast<size_t>(N) * sizeof(double));
         for (int a = 0; a < g.k; ++a)
-            if (lam[a] > 0.0) mark_edges(g, c, a, lam[a], kPolishEta, c.dual + a * N, flag, zp);
+            if (lam[a] > 0.0) mark_edges(g, c, a, lam[a], bw(a, N), kPolishEta, c.dual + a * N, flag, zp);
         // Components by union-find with union by the smaller root, so every
         // root is the smallest index of its component and every parent
         // pointer points backwards. Along the contiguous axis the components
@@ -784,15 +836,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                 for (int a = 1; a < g.k; ++a) sj += q[a * N + b + j];
                 acc += 0.5 * e * e - (d[b + j] * sj - 0.5 * sj * sj);
             }
-            if (lam[g.k - 1] > 0.0)
-                for (int64_t j = 0; j + 1 < n; ++j) acc += lam[g.k - 1] * std::fabs(zp[b + j + 1] - zp[b + j]);
-            for (int a = 0; a + 1 < g.k; ++a) {
-                if (lam[a] == 0.0 || (b / g.S[a]) % g.L[a] == g.L[a] - 1) continue;
-                double t = 0.0;
-                for (int64_t j = 0; j < n; ++j) t += std::fabs(zp[b + j + g.S[a]] - zp[b + j]);
-                acc += lam[a] * t;
-            }
-            return acc;
+            return acc + tv_row(g, lam, zp, r);
         });
         if (!(pz <= accept && pz <= kPolishRatio * gp)) return false;
         std::memcpy(z, zp, static_cast<size_t>(N) * sizeof(double));
@@ -846,9 +890,8 @@ struct TVAniso final : ImageOp<TVAniso> {
         };
         for (int a = 0; a < g.k; ++a) {
             if (lam[a] == 0.0 || g.L[a] == 1) continue;
-            const double in = lam[a] * (1.0 - kPolishEta);
             edges(a, [&](int64_t i, int64_t s, double pe) {
-                if (!(std::fabs(pe) < in)) return;
+                if (!(std::fabs(pe) < le(lam, a, i, N) * (1.0 - kPolishEta))) return;
                 int64_t ri = find(i), rj = find(i + s);
                 if (ri == rj) return;
                 if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
@@ -863,24 +906,37 @@ struct TVAniso final : ImageOp<TVAniso> {
         std::fill(inv, inv + nc, 0.0);
         std::fill(S, S + g.k * N, 0.0);
         for (int64_t i = 0; i < N; ++i) inv[label[i]] += 1.0;
+        // With edge weights, S sums beta_e sign_e and sign keeps sign_e; an
+        // edge without weight (lam_e = 0, so p_e = 0) takes the sign of z's jump.
+        if (v.sign) std::memset(v.sign, 0, static_cast<size_t>(g.k * N));
         for (int a = 0; a < g.k; ++a) {
             const int64_t s = g.S[a], L = g.L[a];
             if (L == 1) continue;
             double *Sa = S + a * N;
+            const double *ba = bw(a, N);
+            auto zsign = [&](int64_t i) {
+                const double diff = z[i] - z[i + s];
+                return diff > 0.0 ? 1.0 : (diff < 0.0 ? -1.0 : 0.0);
+            };
             auto add = [&](int64_t i, double sg) {
                 const int32_t ci = label[i], cj = label[i + s];
                 if (ci == cj) return;
+                if (ba) {
+                    v.sign[a * N + i] = static_cast<int8_t>(sg);
+                    sg *= ba[i];
+                }
                 Sa[ci] += sg;
                 Sa[cj] -= sg;
             };
             if (lam[a] > 0.0) {
-                edges(a, [&](int64_t i, int64_t, double pe) { add(i, pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : 0.0)); });
+                edges(a, [&](int64_t i, int64_t, double pe) {
+                    add(i, pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : (ba && ba[i] == 0.0 ? zsign(i) : 0.0)));
+                });
                 continue;
             }
             for (int64_t i = 0; i < N; ++i) {
                 if ((i / s) % L == L - 1) continue;
-                const double diff = z[i] - z[i + s];
-                add(i, diff > 0.0 ? 1.0 : (diff < 0.0 ? -1.0 : 0.0));
+                add(i, zsign(i));
             }
         }
         for (int64_t C = 0; C < nc; ++C) inv[C] = 1.0 / inv[C];
@@ -889,7 +945,9 @@ struct TVAniso final : ImageOp<TVAniso> {
 
     // ---- derivatives (structure saved by prox_img) --------------------------
 
-    // dz_C = mean_C(dx) - (1/|C|) sum_a (dgamma w_a + gamma dw_a) S_{C,a}.
+    // dz_C = mean_C(dx) - (1/|C|) sum_a (dgamma w_a + gamma dw_a) S_{C,a}, and
+    // with edge weights - (1/|C|) gamma w_a dbeta_e sign_e for every boundary
+    // edge e of C along a (+ for C the tail of e, - for its head).
     template <class T>
     void jvp_img(const char *save, const T *dx, T *dz, const int64_t *shape, double gamma, double dgamma,
                  const double *dparams, char *work, DerivCtl &) const noexcept {
@@ -904,8 +962,20 @@ struct TVAniso final : ImageOp<TVAniso> {
             double t = 0.0;
             for (int a = 0; a < k; ++a)
                 t += (dgamma * w[a] + (dparams ? gamma * dparams[a] : 0.0)) * v.S[a * N + C];
-            accc[C] = (accc[C] - t) * v.inv[C];
+            accc[C] -= t;
         }
+        if (v.sign && dparams)
+            for (int a = 0; a < k; ++a) {
+                const double *db = dparams + k + a * N;
+                const int64_t s = g.S[a];
+                for (int64_t i = 0; i < N; ++i) {
+                    if (v.sign[a * N + i] == 0 || db[i] == 0.0) continue;
+                    const double t = gamma * w[a] * db[i] * v.sign[a * N + i];
+                    accc[v.label[i]] -= t;
+                    accc[v.label[i + s]] += t;
+                }
+            }
+        for (int64_t C = 0; C < nc; ++C) accc[C] *= v.inv[C];
         for (int64_t i = 0; i < N; ++i) dz[i] = static_cast<T>(accc[v.label[i]]);
     }
 
@@ -919,7 +989,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         double *G = reinterpret_cast<double *>(work);
         std::fill(G, G + nc, 0.0);
         for (int64_t i = 0; i < N; ++i) G[v.label[i]] += static_cast<double>(gin[i]);
-        const int64_t P = k;
+        const int64_t P = nparams();
         for (int64_t C = 0; C < nc; ++C) {
             const double gc = G[C] * v.inv[C];
             for (int a = 0; a < k; ++a) {
@@ -928,13 +998,23 @@ struct TVAniso final : ImageOp<TVAniso> {
             }
             G[C] = gc;
         }
+        // d/dbeta_e = -gamma w_a sign_e (g_C(i) - g_C(j)) for e = (i, j), with
+        // g_C the cotangent averaged over each component.
+        if (v.sign)
+            for (int a = 0; a < k; ++a) {
+                double *gb = acc + k + a * N;
+                const int64_t s = g.S[a];
+                for (int64_t i = 0; i < N; ++i)
+                    if (v.sign[a * N + i] != 0)
+                        gb[i] -= gamma * w[a] * v.sign[a * N + i] * (G[v.label[i]] - G[v.label[i + s]]);
+            }
         for (int64_t i = 0; i < N; ++i) gx[i] = static_cast<T>(G[v.label[i]]);
     }
 };
 
 }  // namespace
 
-fp_status make_tv_aniso(int ndim, Vec w, fp_op **out) {
+fp_status make_tv_aniso(int ndim, Vec w, fp_op **out, Vec beta, const int64_t *shape) {
     if (ndim != 2 && ndim != 3) return FP_EPARAM;
     double ww[3] = {1.0, 1.0, 1.0};
     if (w.size() == 1) {
@@ -945,10 +1025,23 @@ fp_status make_tv_aniso(int ndim, Vec w, fp_op **out) {
     }
     for (int a = 0; a < ndim; ++a)
         if (!finite_nonneg(ww[a])) return FP_EPARAM;
+    if (!beta.empty()) {
+        double n = 1.0;
+        for (int a = 0; a < ndim; ++a) n *= static_cast<double>(shape[a]);
+        if (!(n < 2147483647.0)) return FP_ESHAPE;  // 32-bit component labels
+        // The weights at the last entry along each axis belong to no edge.
+        const Geom g(ndim, shape);
+        for (int a = 0; a < ndim; ++a)
+            for (int64_t i = 0; i < g.N; ++i) {
+                double &b = beta[static_cast<size_t>(a * g.N + i)];
+                if (!finite_nonneg(b)) return FP_EPARAM;
+                if (!g.has_next(i, a)) b = 0.0;
+            }
+    }
     fp_op *t = nullptr;
     if (fp_status s = make_tv1d(Vec{1.0}, FP_TV1D_AUTO, &t)) return s;
     std::unique_ptr<fp_op> tv(t);
-    *out = new TVAniso(ndim, ww, std::move(tv));
+    *out = new TVAniso(ndim, ww, std::move(tv), std::move(beta), shape);
     return FP_OK;
 }
 

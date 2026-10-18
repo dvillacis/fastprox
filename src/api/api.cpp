@@ -89,6 +89,32 @@ fp_status read_vec(const fp_array *a, Vec &v) {
     return FP_OK;
 }
 
+// Reads an array of exactly nd >= 1 axes, each of extent >= 1, in C order,
+// with its shape.
+fp_status read_nd(const fp_array *a, int nd, Vec &v, int64_t *shape) {
+    Arr x;
+    if (fp_status s = to_arr(a, x)) return s;
+    if (a->ndim != nd) return FP_ESHAPE;
+    for (int d = 0; d < nd; ++d) {
+        if (x.shape[d] < 1) return FP_ESHAPE;
+        shape[d] = x.shape[d];
+    }
+    const int64_t m = x.numel();
+    v.resize(static_cast<size_t>(m));
+    int64_t idx[FP_MAX_NDIM] = {0};
+    for (int64_t i = 0; i < m; ++i) {
+        int64_t o = 0;
+        for (int d = 0; d < nd; ++d) o += idx[d] * x.strides[d];
+        v[static_cast<size_t>(i)] = x.dtype == FP_F32 ? reinterpret_cast<const float *>(x.data)[o]
+                                                      : reinterpret_cast<const double *>(x.data)[o];
+        for (int d = nd - 1; d >= 0; --d) {
+            if (++idx[d] < shape[d]) break;
+            idx[d] = 0;
+        }
+    }
+    return FP_OK;
+}
+
 // Reads exactly m values (a vector of length m, or a scalar when m == 1).
 fp_status read_exact(const fp_array *a, int64_t m, double *dst) noexcept {
     Arr x;
@@ -839,6 +865,37 @@ FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **ou
         Vec w;
         if (fp_status s = fp::read_vec(axis_weights, w)) return s;
         return fp::make_tv_iso(ndim, std::move(w), out);
+    });
+}
+
+FP_API fp_status fp_op_tv_aniso_weighted(int ndim, const fp_array *axis_weights, const fp_array *edge_weights,
+                                         fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        if (!edge_weights) return FP_EINVAL;
+        if (ndim != 2 && ndim != 3) return FP_EPARAM;
+        Vec w, b;
+        int64_t shape[4] = {1, 1, 1, 1};
+        if (fp_status s = fp::read_vec(axis_weights, w)) return s;
+        if (fp_status s = fp::read_nd(edge_weights, ndim + 1, b, shape)) return s;
+        if (shape[0] != ndim) return FP_ESHAPE;
+        return fp::make_tv_aniso(ndim, std::move(w), out, std::move(b), shape + 1);
+    });
+}
+
+FP_API fp_status fp_op_tv_iso_weighted(int ndim, const fp_array *axis_weights, const fp_array *pixel_weights,
+                                       fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        if (!pixel_weights) return FP_EINVAL;
+        if (ndim != 2 && ndim != 3) return FP_EPARAM;
+        Vec w, al;
+        int64_t shape[3] = {1, 1, 1};
+        if (fp_status s = fp::read_vec(axis_weights, w)) return s;
+        if (fp_status s = fp::read_nd(pixel_weights, ndim, al, shape)) return s;
+        return fp::make_tv_iso(ndim, std::move(w), out, std::move(al), shape);
     });
 }
 

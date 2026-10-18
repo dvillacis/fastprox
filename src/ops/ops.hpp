@@ -64,11 +64,12 @@ fp_status make_scad(double lambda, double a, Vec w, fp_op **out);  // w empty: u
 fp_status make_mcp(double lambda, double b, Vec w, fp_op **out);
 fp_status make_log(double lambda, double eps, fp_op **out);
 
-// tv_aniso.cpp
-fp_status make_tv_aniso(int ndim, Vec w, fp_op **out);
+// tv_aniso.cpp: beta (edge weights, ndim blocks in C order over shape) empty
+// for none.
+fp_status make_tv_aniso(int ndim, Vec w, fp_op **out, Vec beta = {}, const int64_t *shape = nullptr);
 
-// tv_iso.cpp
-fp_status make_tv_iso(int ndim, Vec w, fp_op **out);
+// tv_iso.cpp: alpha (C order over shape) empty for no pixel weights.
+fp_status make_tv_iso(int ndim, Vec w, fp_op **out, Vec alpha = {}, const int64_t *shape = nullptr);
 
 // graph_tv.cpp: edges holds 2m node indices (u_0, v_0, u_1, v_1, ...).
 fp_status make_graph_tv(int64_t n, int64_t m, const int64_t *edges, Vec w, fp_op **out);

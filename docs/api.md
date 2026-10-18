@@ -55,6 +55,8 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
+| Anisotropic TV with edge weights (*since 0.3*) | Σₐ wₐ Σ_p β_{a,p} \|z_{p+eₐ} − z_p\| | `fp_op_tv_aniso_weighted(ndim, w, beta)` | `TVAniso(ndim, weights, edge_weights=beta)` | (w, β in C order) |
+| Isotropic TV with pixel weights (*since 0.3*) | Σ_p α_p ‖(w₀ D₀z, …)_p‖₂ | `fp_op_tv_iso_weighted(ndim, w, alpha)` | `TVIso(ndim, weights, pixel_weights=alpha)` | (w, α in C order) |
 | Graph TV (*since 0.3*) | Σ_e w_e \|z_u − z_v\| over the edges e = (u, v) of a graph, on the last axis | `fp_op_graph_tv(n, m, edges, w)` | `GraphTV(n, edges, weights)`, `graph_tv` | w (scalar or one per edge) |
 | Tree TV (*since 0.3*) | as graph TV, for edges that form a forest (a tree, a path) | `fp_op_tree_tv(n, m, edges, w)` | `TreeTV(n, edges, weights)`, `tree_tv` | w (scalar or one per edge) |
 
@@ -291,6 +293,50 @@ TV_I.
   closed-form values.
 - FISTA converges like 1/k² in the dual, so very tight tolerances take
   many iterations (about 1/√tol); the default `tol` of 1e-6 is cheap.
+
+**Spatially varying weights** (*since 0.3*), for spatially dependent
+regularisation (e.g. learned in a bilevel problem) and for reweighted ℓ1
+methods, whose convex majorisers of nonconvex TV are weighted TV problems
+(Ochs, Dosovitskiy, Brox and Pock, SIAM J. Imaging Sci. 8, 2015; see
+[examples/reweighted_tv.py](../examples/reweighted_tv.py)):
+
+- `fp_op_tv_iso_weighted(ndim, w, alpha)` minimises
+  γ Σ_p α_p ‖(w₀ D₀z, …)_p‖₂ with pixel weights α ≥ 0, an array of the image
+  shape; `fp_op_tv_aniso_weighted(ndim, w, beta)` minimises
+  γ Σₐ wₐ Σ_p β_{a,p} |z_{p+eₐ} − z_p| with edge weights β ≥ 0 of shape
+  (ndim, image shape), β_{a,p} weighting the edge from p to its forward
+  neighbour along a (the entries at the last position along a belong to no
+  edge and are ignored). The operator then takes only images of that shape
+  (`FP_ESHAPE` otherwise), batched over leading axes as before. In Python:
+  `TVIso(ndim, weights, pixel_weights=alpha)` and
+  `TVAniso(ndim, weights, edge_weights=beta)`.
+- **Methods.** The weights enter only the dual bounds: ‖u_p‖ ≤ γα_p, and
+  |p_e| ≤ γwₐβ_e for the 1D duals, so the iterations, the gap and warm starts
+  are those above. Anisotropic TV's 1D steps are weighted 1D TV proxes (the
+  same kernels as `TV1D` with edge weights) and its polish uses each edge's
+  bound. Isotropic TV with a single active axis runs the 2D method rather
+  than the exact 1D pass. A zero weight frees its pixel or edge: no dual,
+  no coupling. All-ones weights give the unweighted operator bit for bit.
+- **Derivatives** in x, γ, w and the spatial weights, with one gradient per
+  pixel or edge (zero at the ignored entries): `grads.pixel_weights` has the
+  image shape and `grads.edge_weights` the shape of β. Isotropic TV's linear
+  system takes γα_p in its curvature and dr_p = dγ α_p + γ dα_p in its
+  right-hand side; the gradient in α_p is −γ⟨(G v)_p, n_p⟩ on non-flat
+  pixels and 0 on flat ones. Anisotropic TV's region averages take the
+  weight of each boundary edge; the gradient in β_e is
+  −γwₐ σ_e (ḡ_{C(i)} − ḡ_{C(j)}) for e = (i, j), with σ_e the sign of the
+  jump and ḡ the cotangent averaged over each region. At a zero weight the
+  derivative is one-sided (weights cannot go below 0).
+- **Cost.** The same iterations as the unweighted operator for comparable
+  weights, and 14% (isotropic) to 20–33% (anisotropic) more time per solve
+  for the per-pixel or per-edge bounds (512² image, γ = 0.1, tol 1e-6, 15
+  threads: 101 against 89 ms, 36–40 against 30 ms). Isotropic TV with
+  weights near zero can need many more iterations to very tight tolerances
+  (a 20 × 9 test image: a gap of 2e-11 after 10⁶ iterations, against 1e-14
+  unweighted).
+- The device-native `fastprox.torch.tv_iso`/`tv_aniso` do not take spatial
+  weights yet; `fastprox.torch.prox(fp.TVIso, x, gamma, pixel_weights=a)`
+  runs the C kernel with gradients in `a`.
 
 ### Graph TV (*since 0.3*)
 
@@ -665,6 +711,10 @@ residual, cg_iters = ctx.deriv
 tv = fp.TVAniso(ndim=3, weights=[1.0, 1.0, 0.5])
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True)   # ctx.info is an IterInfo
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)
+alpha = np.ones((256, 256)); alpha[:, :128] = 0.5          # since 0.3: one weight per pixel
+wiso = fp.TVIso(2, pixel_weights=alpha)
+v, ctx = wiso.prox(img, 0.2, keep=True)
+gx, grads = wiso.vjp(ctx, np.ones_like(img))                 # grads.pixel_weights: (256, 256)
 ```
 
 - **Inputs** must be float32 or float64 NumPy arrays; other dtypes raise

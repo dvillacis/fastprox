@@ -268,6 +268,17 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
  * with the last iterate written). Its dual is kept in the workspace. */
 FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out);
 
+/* Anisotropic TV with edge weights (since 0.3):
+ *     g(z) = sum_a w_a sum_p beta_{a,p} |z_{p + e_a} - z_p|,
+ * as fp_op_tv_aniso otherwise. edge_weights: an array of shape (ndim, image
+ * shape), all finite and >= 0, beta_{a,p} weighting the edge from p to its
+ * forward neighbour along a (the entries at the last position along a are
+ * unused); the operator then takes only images of that shape (FP_ESHAPE
+ * otherwise). A zero weight leaves an edge free. theta = (w_0, ...,
+ * w_{ndim-1}, beta in C order), the unused entries with zero gradients. */
+FP_API fp_status fp_op_tv_aniso_weighted(int ndim, const fp_array *axis_weights, const fp_array *edge_weights,
+                                         fp_op **out);
+
 /* Isotropic TV of an image: g(z) = sum_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
  * with forward differences D_a along the last ndim axes (2 or 3; zero past the
  * last entry), batched over the others; the weights scale each axis inside
@@ -277,6 +288,16 @@ FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **
  * z = x - sum_a w_a D_a^T u_a. Derivatives solve a linear system by conjugate
  * gradients (fp_workspace_set_deriv_tol, fp_workspace_deriv_info). */
 FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **out);
+
+/* Isotropic TV with pixel weights (since 0.3):
+ *     g(z) = sum_p alpha_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2,
+ * as fp_op_tv_iso otherwise. pixel_weights: an array of ndim axes, the image
+ * shape, all finite and >= 0; the operator then takes only images of that
+ * shape (FP_ESHAPE otherwise). The dual has |u_p|_2 <= gamma alpha_p; a zero
+ * weight leaves a pixel's differences free. theta = (w_0, ..., w_{ndim-1},
+ * alpha in C order). */
+FP_API fp_status fp_op_tv_iso_weighted(int ndim, const fp_array *axis_weights, const fp_array *pixel_weights,
+                                       fp_op **out);
 
 /* Graph TV (since 0.3): g(z) = sum_e w_e |z_u - z_v| over the m edges
  * e = (u, v) of a graph on n nodes. It acts on the last axis, of length n,

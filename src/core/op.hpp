@@ -151,6 +151,11 @@ struct fp_op {
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
+    // 1D TV only: the row prox with edge weights given per call (n of them,
+    // the last 0), for image operators with weights per edge.
+    virtual int prox_edges(const double *, double *, int64_t, double, const double *, void *) const noexcept {
+        return fp::kRowNonFinite;
+    }
     // True when the kernel cannot write its output over its input.
     virtual bool needs_distinct() const noexcept { return false; }
     // Rows are contiguous. code, if not null, receives n bytes of structure.
