@@ -85,7 +85,7 @@ struct ImageCall {
 // residual and iterations out. Operators with closed-form derivatives leave
 // the outputs at zero.
 struct DerivCtl {
-    double tol = 1e-10;
+    double tol = 0.0;  // 0: the operator's default
     int max_iter = 10000;
     double residual = 0.0;
     int iters = 0;

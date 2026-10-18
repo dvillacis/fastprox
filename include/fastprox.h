@@ -331,7 +331,9 @@ FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on);
 
 /* Derivatives of iterative image operators that solve a linear system
  * (isotropic TV, by conjugate gradients): the relative residual tolerance
- * and iteration cap of fp_jvp/fp_vjp (defaults 1e-10 and 10000), and the
+ * and iteration cap of fp_jvp/fp_vjp (defaults 0 and 10000; a tolerance of 0,
+ * since 0.3, stops each image at the relative error of z that its gap
+ * certifies, sqrt(2 gap) / |x|, and at 1e-10 at the tightest), and the
  * worst residual and iteration count of the last fp_jvp/fp_vjp over the
  * batch (0 for derivatives in closed form). Other operators: FP_EINVAL. */
 FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter);

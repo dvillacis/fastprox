@@ -100,7 +100,7 @@ def main():
     c64 = rng.normal(size=x64.shape)
     op = fp.TVIso(2)
     ref, ctx = op.prox(x64, GAMMA, keep=True, tol=1e-13, max_iter=10 ** 6)
-    gref, _ = op.vjp(ctx, c64, max_iter=10 ** 5)  # 18 548 iterations here; the default stops at 10 000
+    gref, _ = op.vjp(ctx, c64, tol=1e-10, max_iter=10 ** 5)  # 18 548 iterations here; the default cap is 10 000
     devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else []) + \
         (["cuda"] if torch.cuda.is_available() else [])
     print(f"isotropic TV, {batch} x {size}^2 float32, gamma {GAMMA}; reference: C kernel, float64, gap 1e-13",

@@ -918,7 +918,7 @@ FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side,
 
 FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter) {
     if (!ws || !ws->image_ndim) return FP_EINVAL;
-    if (!(tol > 0.0) || !std::isfinite(tol) || max_iter < 1) return FP_EPARAM;
+    if (!(tol >= 0.0) || !std::isfinite(tol) || max_iter < 1) return FP_EPARAM;
     ws->deriv_tol = tol;
     ws->deriv_max_iter = max_iter;
     return FP_OK;
