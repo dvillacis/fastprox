@@ -1101,3 +1101,58 @@ kernels' systems: exact averages for anisotropic TV (no iterations) and
 Finding them by min-label propagation took 225 rounds (670 ms on MPS);
 hooking with a scatter of minima and pointer jumping takes a few rounds
 (45–160 ms). JAX on the CPU runs the region sums more slowly than PyTorch.
+
+## 2026-10-18, Apple M5 Pro: isotropic TV against DeepInverse
+
+`bench/compare_deepinv.py 256 8` against DeepInverse 0.4.2's `TVDenoiser`,
+which solves the same problem as `TVIso` (both agree to 1e-12 when run to
+convergence): an over-relaxed Chambolle-Pock method that stops on the
+relative change of x and is differentiated by autograd through its
+iterations. Eight 256² images (a disk and a band plus noise 0.1, float32),
+γ = 0.1. The reference is the C kernel in float64 to a gap of 1e-13 (410 604
+iterations); errors are ‖z − z*‖ / ‖z*‖ over the batch.
+
+**Time to reach an error (ms).** DeepInverse at fixed iteration counts
+(`crit = 0`); fastprox's device path (`fastprox.torch.tv_iso`) at gap
+tolerances; the C kernel through `fastprox.torch.prox`, which copies to the
+host and back.
+
+| Error | DeepInverse, CPU | fastprox device, CPU | DeepInverse, MPS | fastprox device, MPS | C via host (MPS tensors) |
+| --- | --- | --- | --- | --- | --- |
+| 1e-2 | 145 (100 it) | 20 (tol 1e-3) | 191 | 11 | 52 (tol 1e-4) |
+| 1e-3 | 575 (400 it) | 172 (tol 1e-5) | 762 | 92 | 358 (tol 1e-6) |
+| 1e-4 | 575 (400 it) | 447 (tol 1e-6) | 762 | 232 | 358 (tol 1e-6) |
+
+DeepInverse's defaults (`crit = 1e-5`, at most 1000 iterations) reach 6.9e-6
+in 868 ms on the CPU and 1153 ms on MPS. In float32 a gap tolerance of 1e-8
+is below rounding and is never met (100 000 iterations, 98 s): use 1e-7 or
+looser.
+
+**Host transfers.** The round trip of the batch (4 MiB) to the CPU and back
+takes 0.9 ms on this machine's unified memory, against 50–2100 ms for the
+solves: transfers do not dominate, so the C path through the host is a fair
+option here, and moving the CUDA kernels of 1.x forward is not called for by
+these numbers (a discrete GPU over PCIe was not measured).
+
+**Backward** (gradient of ⟨z, c⟩ for a random c; memory on MPS is the
+allocation alive after the forward):
+
+| Method | backward, MPS | memory kept | gradient error |
+| --- | --- | --- | --- |
+| DeepInverse, 50 iterations | 191 ms | 492 MiB | 2.4 |
+| DeepInverse, 100 iterations | 180 ms | 992 MiB | 1.1 |
+| DeepInverse, 200 iterations | 354 ms | 1992 MiB | 0.32 |
+| DeepInverse, 400 iterations | 708 ms | 3992 MiB | 0.065 |
+| fastprox, tol 1e-4 | 195 ms | 6 MiB | 0.89 |
+| fastprox, tol 1e-6 | 131 ms | 6 MiB | 0.66 |
+
+The unrolled backward keeps 10 MiB per iteration of this batch, so its
+memory grows with the iterations (4 GiB at 400; 1600 would not fit); the
+implicit one keeps the solution and the dual. The gradient errors are
+against the exact gradient at the reference solution. fastprox's are those
+of the C kernel's derivative at the same tolerance (0.89, 0.66, 0.29 and 0.10
+at 1e-4 to 1e-10): its test for flat pixels, |g_p| ≤ 8·rms(gap), groups
+pixels that are nearly flat at a loose tolerance. Reading flat pixels off the
+dual (|u_p| < γ(1 − δ)) cut the error to 0.04 at a tolerance of 1e-6 and
+0.004 at 1e-8 on 2 × 128² images; that change, for the C kernel and the
+device path, is the next item in ROADMAP.md.
