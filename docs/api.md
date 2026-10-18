@@ -715,11 +715,52 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   prox calls and one VJP. Float64 needs `jax_enable_x64`.
 - **Devices and dtypes.** The computation runs on the CPU in float32 or
   float64. PyTorch tensors on another device are copied to the CPU and the
-  result back; other dtypes raise `TypeError`. A device-native path for image
-  TV is planned (ROADMAP, 0.3).
+  result back; other dtypes raise `TypeError`. For image TV on a GPU, use the
+  device-native functions below.
 - **Install** PyTorch or JAX yourself; fastprox does not depend on them. In
   this repository, `uv sync --group interop` installs both (PyTorch's CPU
   wheels on Linux).
+
+### Device-native image TV (*since 0.3*)
+
+`fastprox.torch.tv_iso`, `tv_aniso` and `fastprox.jax.tv_iso`, `tv_aniso`
+solve the problems of `TVIso` and `TVAniso` in tensor operations on the
+input's device (CUDA, MPS or the CPU), with no copy to the host and no
+change to the C API.
+
+```python
+z = fpt.tv_iso(x_cuda, 0.1, tol=1e-5)                 # last 2 axes, batched
+z, info = fpt.tv_aniso(x, gamma, ndim=3, weights=w, return_info=True)
+z2 = fpt.tv_aniso(x, gamma, ndim=3, weights=w, warm_start=info.dual)
+zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
+```
+
+- **Arguments**: `x`, `gamma` (tensor or float), `ndim` (2 or 3), `weights`
+  (one per axis or one for all), `tol` and `max_iter` as for the C kernels,
+  `warm_start` (a dual in the C kernels' form, so the duals of `TVIso` and
+  `TVAniso` work too), `return_info`, `deriv_tol` and `deriv_max_iter`.
+  `info` is an `IterInfo` whose `gap` and `dual` live on the device.
+- **Forward**: FISTA on the dual with the C kernels' step, restart test and
+  stopping rule (each image stops when its gap is at most `tol`·‖x‖²/2), so
+  isotropic TV takes the C kernel's iterations. The anisotropic C kernel's
+  exact 1D steps and polish stay on the CPU, so the device path is a plain
+  dual method there: same certificate, more iterations to tight tolerances.
+  Agreement with the C kernels: ‖z − z_C‖² ≤ 2 (gap + gap_C).
+- **Backward** (PyTorch: reverse and forward mode; JAX: reverse mode, under
+  `vmap` too) in `x`, `gamma` and `weights`: the C kernels' systems on the
+  flat regions of the solution. Anisotropic TV averages over the regions
+  exactly; isotropic TV solves one unknown per region by conjugate gradients
+  (`deriv_tol`, default 1e-10 in float64 and 100 ε in float32). The regions
+  are found by label propagation and summed by a sort and a segmented scan,
+  so memory is a few images and does not grow with the iterations.
+- **Reproducible** run to run on one device: every step is a stencil, a
+  gather, a sort or a fixed-order reduction (no atomic scatter-adds). Not
+  bit-identical to the C kernels or across devices.
+- **Cost** (docs/benchmarks.md): on an Apple M5 Pro GPU (MPS), isotropic TV
+  of eight 512² images is about 4× faster than the C kernel on one thread
+  and level with it on 15, with a backward of 0.25–0.5 s. Anisotropic TV is
+  slower than the C kernel, whose exact 1D steps need about 10× fewer
+  iterations; its backward is 60 ms.
 
 ## Conventions
 

@@ -1062,3 +1062,42 @@ run over positions in that order with the input gathered once (random trees:
 110 ms to 57 ms). The deque for paths took them from 35–150 ms with heaps to
 21–26 ms. Recomputing the values as region means and the certificate cost
 about 1 ms of the 21.
+
+## 2026-10-18, Apple M5 Pro: device-native image TV
+
+`bench/device_tv.py 5` (medians of 5): eight 512² images (a disk and a band
+plus noise 0.1, float32), γ = 0.1, solved by `fastprox.torch.tv_iso` /
+`tv_aniso` on CPU tensors and on the M5 Pro's GPU (MPS), by
+`fastprox.jax.tv_iso` / `tv_aniso` under `jit` on the CPU, and by the C kernels
+on one thread and on 15. The backward is the VJP of a random cotangent
+(a constant one is trivial). Iterations in parentheses. Times in ms.
+
+| | gap tol | torch CPU | torch MPS | JAX CPU | C, 1 thread | C, 15 threads |
+| --- | --- | --- | --- | --- | --- | --- |
+| isotropic | 1e-4 | 223 (64) | 131 (64) | 186 | 584 (64) | 116 |
+| backward | | 343 | 245 | 1163 | | |
+| isotropic | 1e-6 | 1743 (492) | 1024 (492) | 1477 | 4397 (492) | 906–1322 |
+| backward | | 697 | 516 | 3430 | | |
+| anisotropic | 1e-4 | 244 (92) | 177 (92) | 194 | 293 (9) | 58 |
+| backward | | 103 | 58 | 222 | | |
+| anisotropic | 1e-6 | 1706 (624) | 1235 (624) | 1432 | 1558 (59) | 249 |
+| backward | | 115 | 67 | 138 | | |
+
+Isotropic TV on the device is the C kernel's method and takes its
+iterations; on this integrated GPU, which shares the memory bandwidth of the
+CPU, it is 4.3× faster than one C thread and level with fifteen. Anisotropic
+TV on the device is a plain dual method: the C kernel's exact 1D steps reach
+the same gap in about a tenth of the iterations, so the device path loses to
+the C kernel here and pays off only where the data already lives on a GPU.
+Each iteration is about a dozen passes over the batch; `torch.linalg.vector_norm`
+over the component axis was 100× slower than `torch.hypot` on MPS (9 ms
+against 0.07 ms per call) and is not used.
+
+The backward first solved the linearised dual problem by conjugate gradients
+without region labels (stencils only): 1500–2900 iterations on a 256² image,
+3–21 s on these batches. Regions found on the device bring it to the C
+kernels' systems: exact averages for anisotropic TV (no iterations) and
+16–104 region-space iterations for isotropic TV (the C kernel: 26–197).
+Finding them by min-label propagation took 225 rounds (670 ms on MPS);
+hooking with a scatter of minima and pointer jumping takes a few rounds
+(45–160 ms). JAX on the CPU runs the region sums more slowly than PyTorch.

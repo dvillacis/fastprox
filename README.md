@@ -58,7 +58,7 @@ print(grads.gamma, grads.weights)         # gradients in the step and the weight
   the support functions max and the sum of the k largest entries.
 - **Signals:** isotonic regression, 1D total variation with per-edge weights, its ℓ2-of-differences
   variant, and the projection onto a 1D TV ball.
-- **Images:** anisotropic and isotropic total variation in 2D and 3D, with warm starts (since 0.2).
+- **Images:** anisotropic and isotropic total variation in 2D and 3D, with warm starts (since 0.2), also on GPUs through the PyTorch and JAX wrappers (since 0.3).
 - **Graphs:** total variation on any graph, exact, by parametric max-flow, and on trees and paths by dynamic programming (since 0.3).
 
 Each one has a conjugate prox through the Moreau identity. The elementwise maps with kinks report
