@@ -58,7 +58,11 @@ regularisation map, learned or predicted by a network.
   docs/benchmarks.md): to the same accuracy, fastprox's isotropic TV is
   3–16× faster on the GPU (MPS) and 1.3–7× on the CPU, and the backward at
   matched gradient accuracy takes 166 ms against 712; anisotropic TV is
-  2.2–12× faster on MPS, with a backward of 45–52 ms against 630.
+  2.2–12× faster on MPS, with a backward of 45–52 ms against 630. On an
+  NVIDIA T4 (CUDA) the forward gains are 6–8× at loose accuracy and
+  1.1–1.4× at 1e-3 to 1e-4; the isotropic backward takes 281 ms against 1002
+  (forward plus backward 560 against 1381 ms), the anisotropic one 9 ms
+  against 843, with the same memory savings.
 - **Requirements.** fastprox needs Python 3.12 or later.
 
 ## The C kernels from the GPU

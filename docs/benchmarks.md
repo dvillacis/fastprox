@@ -1273,3 +1273,46 @@ faster than the device path at 1e-4. The anisotropic gradient is exact in
 float64 once the dual identifies the regions (from a gap tolerance of 1e-8
 on 128² images); in float32 its error is 0.04 here at 1e-7, still 4× below
 that of 400 unrolled iterations, with 1/160 of the memory.
+
+## 2026-10-19, Google Colab, NVIDIA Tesla T4: image TV against DeepInverse on CUDA
+
+`bench/compare_deepinv.py 256 8 iso` and `... aniso` with fastprox 0.3.0rc1
+from PyPI and DeepInverse from pip, on a Colab T4 (15 GiB), the CPU section
+skipped. The float64 references were computed on the M5 Pro and read from
+the script's cache (on Colab's two CPU cores the isotropic one takes over
+half an hour). Same images, γ and error measures as the two sections above.
+
+**Time to reach an error (ms):**
+
+| Error | `TVDenoiser` | `tv_iso` | C via host | `TVL1Denoiser` | `tv_aniso` | C via host |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1e-2 | 98 (100 it) | 13 (tol 1e-3) | 684 | 89 (100 it) | 16 (tol 1e-3) | 243 |
+| 1e-3 | 379 (400 it) | 109 (tol 1e-5) | 4977 | 177 (200 it) | 155 (tol 1e-5) | 1067 |
+| 1e-4 | 379 (400 it) | 279 (tol 1e-6) | 4977 | 353 (400 it) | 326 (tol 1e-6) | 1067 |
+
+DeepInverse's defaults reach 6.8e-6 in 573 ms (isotropic) and 5.8e-6 in
+528 ms (anisotropic).
+
+**Backward** (memory: allocated after the forward minus before):
+
+| Method | isotropic | memory | error | anisotropic | memory | error |
+| --- | --- | --- | --- | --- | --- | --- |
+| DeepInverse, 100 it | 250 ms | 992 MiB | 1.1 | 210 ms | 398 MiB | 3.7 |
+| DeepInverse, 200 it | 499 ms | 1992 MiB | 0.32 | 415 ms | 798 MiB | 1.2 |
+| DeepInverse, 400 it | 1002 ms | 3992 MiB | 0.061 | 843 ms | 1598 MiB | 0.16 |
+| fastprox, tol 1e-6 | 281 ms | 6 MiB | 0.065 | 9.3 ms | 10 MiB | 0.099 |
+| fastprox, tol 1e-7 | 458 ms | 6 MiB | 0.066 | 9.2 ms | 10 MiB | 0.040 |
+
+The first backward of each method in a run includes one-time costs on the
+device (fastprox at tol 1e-4: 316 and 142 ms; DeepInverse at 50 iterations:
+249 and 144 ms), so those rows are left out.
+
+On this GPU the forward gains are smaller than on MPS: 6–8× at loose
+accuracy, but 1.1–1.4× at 1e-3 to 1e-4, as DeepInverse's iteration is a few
+fused operations that a discrete GPU runs well. The backward keeps its
+lead: at matched gradient accuracy isotropic TV's forward plus backward
+takes 560 ms against 1381 ms (279 + 281 against 379 + 1002) with 1/650 of
+the memory, and anisotropic TV's backward is about 90× faster with 1/160 of
+the memory and a smaller error. The host round trip of the batch is 1.1 ms,
+but the C kernel through the host is slow here, on two CPU cores.
+
