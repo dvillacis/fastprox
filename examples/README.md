@@ -19,6 +19,7 @@ uv run --group examples python examples/tv_denoising.py   # with a plot (matplot
 | [group_sparsity.py](group_sparsity.py) | Lasso, group lasso, sparse group lasso, group MCP and SCAD (0.2) on grouped regression with λ chosen on a validation set, and hierarchical sparsity with tree-structured groups |
 | [weighted_glasso.py](weighted_glasso.py) | Weighted graphical lasso by ADMM (0.2): the −log det step as `eigh` plus `LogBarrier`, the penalty step as weighted `Soft` or weighted `MCP` on the packed upper triangle; the graphical lasso against adaptive weights and weighted MCP, with a KKT check |
 | [autodiff_frameworks.py](autodiff_frameworks.py) | The operators in PyTorch and JAX (0.3): one TV weight per edge as an `nn.Parameter` trained by Adam, and γ of isotropic TV learned with `jax.jit(jax.value_and_grad(...))` (needs `--group interop`) |
+| [deepinv_tv.py](deepinv_tv.py) | `fastprox.torch.tv_iso`/`tv_aniso` in place of DeepInverse's `TVDenoiser`/`TVL1Denoiser` (0.3): the same results, warm starts in an inpainting loop, gradients in the image and a per-sample step (needs `--group interop --with deepinv`; about 6 s) |
 | [sparse_recovery.py](sparse_recovery.py) | Proximal gradient with ℓ1 against MCP, SCAD, ℓ0, ℓ1/2 and the log penalty (0.2) on a batch of sparse recovery problems, and the tie rule |
 
 `tests/python/test_examples.py` runs every script here, so they are kept in
