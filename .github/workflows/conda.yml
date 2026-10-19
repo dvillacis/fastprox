@@ -28,5 +28,6 @@ jobs:
       - uses: prefix-dev/rattler-build-action@v0.2.39
         with:
           recipe-path: packaging/conda/recipe.yaml
-          build-args: --experimental -c conda-forge
+          # conda-forge's compilers and stdlib (its global pinning supplies them there).
+          build-args: --experimental -c conda-forge -m packaging/conda/variants.yaml
           artifact-name: conda-${{ matrix.os }}
