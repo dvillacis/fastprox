@@ -20,7 +20,7 @@ nav:
   - Examples: examples.md
   - Reference:
       - Python: reference/python.md
-      - PyTorch and JAX: reference/frameworks.md
+      - PyTorch, JAX and PyProximal: reference/frameworks.md
       - C header: https://github.com/dvillacis/fastprox/blob/master/include/fastprox.h
   - Benchmarks: benchmarks.md
   - Project:

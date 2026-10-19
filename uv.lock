@@ -479,6 +479,7 @@ examples = [
 ]
 interop = [
     { name = "jax" },
+    { name = "pyproximal" },
     { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
 ]
@@ -505,6 +506,7 @@ docs = [
 examples = [{ name = "matplotlib", specifier = ">=3.11.2" }]
 interop = [
     { name = "jax", specifier = ">=0.4.34" },
+    { name = "pyproximal", specifier = ">=0.10" },
     { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=2.4" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
 ]
@@ -1576,6 +1578,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pylops"
+version = "2.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/38/b39f3db9af5bf349046a1f1fe96426c789c2912d533bc167a6281a40fc0c/pylops-2.8.0.tar.gz", hash = "sha256:7fb6a3e4c57f14059131aded722ae9c331c12f26075d7e7e98e4ec3915e1262c", size = 50490902, upload-time = "2026-07-25T20:11:30.91Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/59/c68343f86ebe90b26a02796c447179ed6e4bbb108c04422299e234d81ad7/pylops-2.8.0-py3-none-any.whl", hash = "sha256:5f2dff378e4dadd91d1424b6fc527fa96e893fc43e58fea0817ed9f3246a51cf", size = 369854, upload-time = "2026-07-25T20:11:28.068Z" },
+]
+
+[[package]]
 name = "pymdown-extensions"
 version = "12.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1595,6 +1610,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
+]
+
+[[package]]
+name = "pyproximal"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pylops" },
+    { name = "scipy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/5f/03f0e4e1e2d69a70f8c6519bb822172a391ff929cfd82f8b88ecbc6e9211/pyproximal-0.13.0.tar.gz", hash = "sha256:fd729c0ea4c9f0805ad8481854d6457173340b6efd9628b5ad29fa40836bc6f7", size = 367148, upload-time = "2026-10-03T19:56:04.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/43/5f26b4b144a63985a3e5bd03be81254137cc6fed896857bf0eb9fb992ed5/pyproximal-0.13.0-py3-none-any.whl", hash = "sha256:41f9df07e6880c03d6fc9a023964d5cbf39504cb061472edeee5c821423125bd", size = 136978, upload-time = "2026-10-03T19:56:03.35Z" },
 ]
 
 [[package]]

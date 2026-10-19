@@ -1,4 +1,4 @@
-# PyTorch and JAX reference
+# PyTorch, JAX and PyProximal reference
 
 Any operator as a differentiable function in PyTorch and JAX, and image TV
 on the input's device (CUDA, MPS or the CPU). See the
@@ -15,6 +15,13 @@ computed.
 ## fastprox.jax
 
 ::: fastprox.jax
+    options:
+      show_root_heading: false
+      members_order: source
+
+## fastprox.pyproximal
+
+::: fastprox.pyproximal
     options:
       show_root_heading: false
       members_order: source
