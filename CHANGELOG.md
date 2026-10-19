@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-19
+
 ### Added
 
 - Kink masks and branch overrides for the box and the nonnegative orthant (entries on a bound), the simplex and the ℓ1 ball (entries at the threshold, on or off the support; for the ℓ1 ball also a row on its sphere, inside or projected) and group ℓ2 (a group at its threshold, zeroed or live), through `fp_workspace_kinks`/`fp_workspace_set_branch` and `ctx.kinks`/`branch=` as for the other operators. Row-level kinks take the side given at the row's or group's first entry. Group ℓ2 now saves its live groups for its derivatives, which are unchanged. Each side matches its one-sided difference (`tests/python/test_kinks.py`).
@@ -15,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Graph TV's max-flow engine is excesses incremental breadth-first search (Goldberg, Hed, Kaplan, Kohli, Tarjan and Werneck, ESA 2015), written from the papers in `src/maxflow/eibfs.hpp`, instead of the Boykov–Kolmogorov engine: 1.9–2.7× faster at γ = 0.5 and 1.2–1.9× at γ = 0.1 on 512² grids, within 12% elsewhere (docs/benchmarks.md). The solutions are unchanged bit for bit (the same cuts); the flow, and with it `info.dual`, the gap to rounding and graph TV's kink masks, can differ.
 - A cleared branch override of an image operator (anisotropic, graph and tree TV) copies back the prox call's own structure instead of rebuilding it from the saved x and z, so it is the default bit for bit in float32 too.
+- The README describes what sets fastprox apart, with measured figures, and has quick starts for images, PyTorch on GPUs and the C API.
 
 ## [0.3.0] — 2026-10-19
 
