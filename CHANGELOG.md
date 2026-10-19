@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The conda recipe builds the Python package with Ninja. scikit-build-core had picked Makefiles, which conda-forge's Linux image lacks (the GitHub runners have make). Its tests now import the package on the oldest and the newest supported Python, and check the extension with `abi3audit`, as conda-forge's linter suggests.
+
 ## [0.5.0] — 2026-10-19
 
 ### Added
