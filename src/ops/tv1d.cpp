@@ -509,7 +509,7 @@ struct TV1D final : RowOp<TV1D> {
     // free, never kinks); 0 elsewhere, and at the last entry.
     bool has_kinks() const noexcept override { return true; }
     int64_t kink_row(const double *x, const double *z, int64_t n, double gamma, double tol, int8_t *mask,
-                     int64_t ms) const noexcept override {
+                     int64_t ms, void *) const noexcept override {
         int64_t count = 0;
         double u = 0.0;
         for (int64_t e = 0; e < n; ++e) {
@@ -531,7 +531,7 @@ struct TV1D final : RowOp<TV1D> {
     // step up (z = x - D^T u). These are the two pieces that meet there.
     bool has_branches() const noexcept override { return true; }
     void branch_row(const double *x, const double *z, uint8_t *code, int64_t n, double gamma, double tol,
-                    const int8_t *side) const noexcept override {
+                    const int8_t *side, void *) const noexcept override {
         double s = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) {
             s += x[e] - z[e];

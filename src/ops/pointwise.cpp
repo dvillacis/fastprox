@@ -181,21 +181,39 @@ struct Box final : ElemOp<Box> {
         const double l = lo[li(i)], h = hi[hj(i)];
         return static_cast<T>(xd < l ? l : (xd > h ? h : xd));
     }
-    ElemDeriv deriv1(double x, double, int64_t i) const noexcept {
+    // Pieces (since 0.3 explicit): 0 clipped to the lower bound, 1 inside, 2
+    // clipped to the upper bound. Kinks 1 at x = lower, 2 at x = upper.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double, int64_t i) const noexcept {
+        return {x < lo[li(i)] ? 0 : (x > hi[hj(i)] ? 2 : 1), 1.0};
+    }
+    ElemDeriv deriv_piece(double, double, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
-        const int64_t a = li(i), b = hj(i);
-        if (x < lo[a]) {
+        if (p.id == 0) {
             e.np = 1;
-            e.pi[0] = a;
+            e.pi[0] = li(i);
             e.pv[0] = 1.0;
-        } else if (x > hi[b]) {
+        } else if (p.id == 2) {
             e.np = 1;
-            e.pi[0] = static_cast<int64_t>(lo.size()) + b;
+            e.pi[0] = static_cast<int64_t>(lo.size()) + hj(i);
             e.pv[0] = 1.0;
         } else {
             e.j = 1.0;
         }
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    int kink1(double x, double, int64_t i, double tol, Kink &k) const noexcept {
+        const double l = lo[li(i)], h = hi[hj(i)];
+        const double dl = std::fabs(x - l), dh = std::fabs(x - h);
+        const int code = dl <= tol && (dl <= dh || !(dh <= tol)) ? 1 : (dh <= tol ? 2 : 0);
+        if (code) {
+            k.b = code == 1 ? l : h;
+            k.scale = std::fabs(k.b);
+        }
+        return code;
     }
 };
 
@@ -208,10 +226,22 @@ struct NonNeg final : ElemOp<NonNeg> {
     T prox1(T x, double, int64_t) const noexcept {
         return x < T(0) ? T(0) : x;
     }
-    ElemDeriv deriv1(double x, double, int64_t) const noexcept {
+    // Pieces (since 0.3 explicit): 0 clipped, 1 inside; kink 1 at x = 0.
+    static constexpr bool kKinks = true;
+    Piece piece_of(double x, double, int64_t) const noexcept { return {x < 0 ? 0 : 1, 1.0}; }
+    ElemDeriv deriv_piece(double, double, int64_t, Piece p) const noexcept {
         ElemDeriv e;
-        e.j = x < 0 ? 0.0 : 1.0;
+        e.j = p.id;
         return e;
+    }
+    ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
+        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+    }
+    int kink1(double x, double, int64_t, double tol, Kink &k) const noexcept {
+        if (!(std::fabs(x) <= tol)) return 0;
+        k.b = 0.0;
+        k.scale = 0.0;
+        return 1;
     }
 };
 

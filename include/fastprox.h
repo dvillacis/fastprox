@@ -376,6 +376,12 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *   lq (since 0.3)     1: the tie |x| = tau
  *   log (since 0.3)    1: the tie, or |x| = gamma lambda / eps where the map
  *                      is continuous (gamma lambda <= eps^2)
+ *   box (since 0.4)    1: x = lower, 2: x = upper; orthant 1: x = 0
+ *   simplex (0.4)      1: x_i at the threshold tau
+ *   l1 ball (0.4)      1: |x_i| at tau w_i; 2 at every entry of a row on the
+ *                      sphere, sum w_i |x_i| = r (within tol max w)
+ *   group l2 (0.4)     1 at every entry of a group with ||x_g|| at gamma
+ *                      lambda c_g
  * (breakpoints of a map that is the identity, gamma w = 0 or lambda = 0, are
  * not kinks). Since 0.3 also, from the saved solution and dual:
  *   1D TV              1 at entry i when the edge (i, i + 1) has no jump
@@ -402,7 +408,11 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  * one-sided difference (prox(x + h e_i) - prox(x)) / h, -1 that from below:
  * the elements of the B-Jacobian. For 1D and anisotropic TV, side -1 at the
  * tail of a kink's edge joins its two sides and +1 keeps them apart, the jump
- * taking the sign of the edge's dual. It applies to the fp_jvp and fp_vjp calls
+ * taking the sign of the edge's dual. For the simplex and the l1 ball (since
+ * 0.4) +1 at a threshold entry puts it on the support and -1 off it; a row
+ * on the l1 sphere, and a group of group l2 at its threshold, follow the
+ * side at their first entry (-1: inside, or the group zeroed; +1: the
+ * projection with tau = 0, or the shrink). It applies to the fp_jvp and fp_vjp calls
  * on this workspace until the next prox call or fp_workspace_set_branch(ws,
  * NULL, 0). */
 FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,

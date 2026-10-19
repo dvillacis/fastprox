@@ -421,3 +421,82 @@ def test_tv_branch_matches_one_sided_differences(name):
     assert not np.allclose(jp, jm)
     np.testing.assert_array_equal(op.jvp(ctx, dx), j0)
     assert np.allclose(j0, jp) or np.allclose(j0, jm)
+
+
+# ---- box, orthant, simplex, l1 ball, group l2 (since 0.3) -----------------
+
+
+def _one_sided(op, x, d, side, gamma=1.0, tol=1e-12, branch=None):
+    """The derivative along d with the override `branch` (default side at
+    every flagged entry) against the difference (prox(x + h d) - prox(x)) / h;
+    and the VJP's adjointness."""
+    _, ctx = op.prox(x, gamma, keep=True)
+    b = (side * (ctx.kinks(tol) != 0)).astype(np.int8) if branch is None else branch
+    jv = op.jvp(ctx, d, branch=b, kink_tol=tol)
+    h = 1e-7
+    fd = (op.prox(x + h * d, gamma) - op.prox(x, gamma)) / h
+    np.testing.assert_allclose(jv, fd, rtol=1e-6, atol=1e-6)
+    g = np.random.default_rng(11).normal(size=x.shape)
+    gx, _ = op.vjp(ctx, g, branch=b, kink_tol=tol)
+    assert abs(float((g * jv).sum()) - float((gx * d).sum())) <= 1e-12 * (1 + float(np.abs(g).sum()))
+    return jv
+
+
+def test_box_and_orthant_kinks():
+    op = fp.Box(-0.5, 0.75)
+    x = np.array([-0.5, 0.75, 0.1, -2.0, 3.0])
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [1, 2, 0, 0, 0]  # 1: on the lower bound, 2: on the upper
+    for side in (1, -1):  # x + eps: inside at the lower bound, clipped at the upper
+        jv = _one_sided(op, x, side * np.ones_like(x), side)
+        assert jv[:2].tolist() == ([1.0, 0.0] if side > 0 else [0.0, -1.0])  # J times dx = side
+    op = fp.NonNeg()
+    x = np.array([0.0, 1.0, -1.0])
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [1, 0, 0]
+    for side in (1, -1):
+        assert _one_sided(op, x, side * np.ones_like(x), side)[0] == (1.0 if side > 0 else 0.0)
+
+
+def test_simplex_and_l1_ball_ties():
+    """Entries exactly at the threshold (x = (3, 2, 1, 1) on the simplex of
+    radius 3: tau = 1): +1 puts them on the support, -1 off it, each the
+    derivative along a direction that moves them to that side."""
+    x = np.array([3.0, 2.0, 1.0, 1.0])
+    op = fp.Simplex(3.0)
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [0, 0, 1, 1]
+    tie = np.array([0.0, 0.0, 1.0, 1.0])
+    up = _one_sided(op, x, tie, 1)
+    np.testing.assert_allclose(up, [-0.5, -0.5, 0.5, 0.5])
+    np.testing.assert_allclose(_one_sided(op, x, -tie, -1), 0.0, atol=1e-15)
+    # The l1 ball of radius 3: the same with signs, and a row on the sphere.
+    op = fp.L1Ball(3.0)
+    x = np.array([3.0, -2.0, 1.0, -1.0])
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [0, 0, 1, 1]
+    s = np.sign(x) * (np.abs(x) == 1)
+    _one_sided(op, x, s, 1)
+    _one_sided(op, x, -s, -1)
+    x = np.array([1.0, 2.0, -1.0])  # |x|_1 = 4 = r
+    op = fp.L1Ball(4.0)
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [2, 2, 2]
+    first = lambda v: np.array([v, 0, 0], np.int8)  # the side at the first entry decides
+    np.testing.assert_allclose(_one_sided(op, x, -x, -1, branch=first(-1)), -x)       # inside
+    np.testing.assert_allclose(_one_sided(op, x, x, 1, branch=first(1)), x - np.sign(x) * 4 / 3)
+
+
+def test_group_l2_kinks():
+    """A group whose norm equals its threshold (0.6, 0.8) at gamma lambda = 1:
+    +1 keeps it live (its shrink taken at x), -1 kills it; the side at the
+    group's first entry decides."""
+    op = fp.GroupL2(1.0, groups=np.array([0, 1, 0, 1]))
+    x = np.array([0.6, 3.0, 0.8, 4.0])
+    _, ctx = op.prox(x, 1.0, keep=True)
+    assert ctx.kinks().tolist() == [1, 0, 1, 0]
+    g0 = np.array([0.6, 0.0, 0.8, 0.0])
+    np.testing.assert_allclose(_one_sided(op, x, g0, 1), g0, atol=1e-12)
+    np.testing.assert_allclose(_one_sided(op, x, -g0, -1), 0.0, atol=1e-15)
+    # The default is the killed group, as before.
+    np.testing.assert_allclose(op.jvp(ctx, g0), 0.0, atol=1e-15)

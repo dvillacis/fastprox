@@ -31,6 +31,7 @@
 #include <cmath>
 #include <numeric>
 #include <utility>
+#include <vector>
 
 namespace fp {
 namespace {
@@ -50,14 +51,17 @@ struct GroupL2 final : RowOp<GroupL2> {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;
     }
     size_t scratch_bytes(int64_t) const noexcept override {
-        return 2 * static_cast<size_t>(G) * sizeof(double);
+        return 2 * static_cast<size_t>(G) * sizeof(double) + static_cast<size_t>(G);
     }
 
     int64_t group(int64_t i) const noexcept { return gid.empty() ? 0 : gid[i]; }
     int64_t ci(int64_t g) const noexcept { return c.size() == 1 ? 0 : g; }
 
+    // Saved structure (since 0.3): code[i] = 1 when entry i's group is live,
+    // ||x_g|| > tau_g, read by the derivatives so that a branch override can
+    // set it (fp_workspace_set_branch).
     template <class T>
-    int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *) const noexcept {
+    int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
         double *scale = static_cast<double *>(scr);
         for (int64_t g = 0; g < G; ++g) scale[g] = 0.0;
         for (int64_t i = 0; i < n; ++i) {
@@ -73,7 +77,62 @@ struct GroupL2 final : RowOp<GroupL2> {
         }
         for (int64_t i = 0; i < n; ++i)
             z[i] = static_cast<T>(static_cast<double>(x[i]) * scale[group(i)]);
+        if (code)
+            for (int64_t i = 0; i < n; ++i) code[i] = scale[group(i)] > 0.0;  // NaN groups: dead
         return kRowOk;
+    }
+
+    // live[g] from the saved codes (every entry of a group carries its flag).
+    void live_groups(const uint8_t *code, int64_t n, uint8_t *live) const noexcept {
+        for (int64_t g = 0; g < G; ++g) live[g] = 0;
+        for (int64_t i = 0; i < n; ++i) live[group(i)] = code[i];
+    }
+
+    // Kinks (since 0.3): code 1 at every entry of a group whose norm ||x_g|| is
+    // within tol of its threshold tau_g = gamma lambda c_g > 0. Overrides: the
+    // side at the group's first entry keeps it live (+1, the shrink, its
+    // formula taken at x) or kills it (-1).
+    bool has_kinks() const noexcept override { return true; }
+    bool has_branches() const noexcept override { return true; }
+    // Per group at a kink: in the row scratch, the norm then the first entry
+    // (as a double) in the two arrays of G, and in the G bytes after them the
+    // side (branch_row) or 1 (kink_row); 0 for the other groups.
+    int8_t *group_kinks(const double *x, int64_t n, double gamma, double tol, const int8_t *side,
+                        void *scr) const noexcept {
+        double *s = static_cast<double *>(scr), *first = s + G;
+        int8_t *at = reinterpret_cast<int8_t *>(first + G);
+        for (int64_t g = 0; g < G; ++g) {
+            s[g] = 0.0;
+            first[g] = -1.0;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            const int64_t g = group(i);
+            s[g] += x[i] * x[i];
+            if (first[g] < 0.0) first[g] = static_cast<double>(i);
+        }
+        for (int64_t g = 0; g < G; ++g) {
+            const double tau = gamma * lambda * c[ci(g)];
+            const bool kink = first[g] >= 0.0 && tau > 0.0 && std::fabs(std::sqrt(s[g]) - tau) <= tol;
+            at[g] = !kink ? 0 : (side ? side[static_cast<int64_t>(first[g])] : 1);
+        }
+        return at;
+    }
+    int64_t kink_row(const double *x, const double *, int64_t n, double gamma, double tol, int8_t *mask,
+                     int64_t ms, void *scr) const noexcept override {
+        const int8_t *at = group_kinks(x, n, gamma, tol, nullptr, scr);
+        int64_t count = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            const int8_t m = at[group(i)];
+            if (mask) mask[i * ms] = m;
+            count += m;
+        }
+        return count;
+    }
+    void branch_row(const double *x, const double *, uint8_t *code, int64_t n, double gamma, double tol,
+                    const int8_t *side, void *scr) const noexcept override {
+        const int8_t *set = group_kinks(x, n, gamma, tol, side, scr);
+        for (int64_t i = 0; i < n; ++i)
+            if (set[group(i)] != 0) code[i] = set[group(i)] > 0;
     }
 
     // Fills nrm[g] = ||x_g|| and dot[g] = <x_g, v_g>.
@@ -89,15 +148,17 @@ struct GroupL2 final : RowOp<GroupL2> {
     }
 
     template <class T>
-    void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double gamma,
+    void jvp(const T *x, const T *, const uint8_t *code, const T *dx, T *dz, int64_t n, double gamma,
              double dgamma, const double *dparams, void *scr) const noexcept {
         double *a = static_cast<double *>(scr);  // coefficient of dx
         double *b = a + G;                       // coefficient of x
+        uint8_t *live = reinterpret_cast<uint8_t *>(b + G);
         norms_dots(x, dx, n, a, b);
+        live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
             const double s = a[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (s > tau) {
+            if (live[g]) {
                 const double cc = tau / s;
                 double coef = cc * b[g] / s - lambda * c[ci(g)] * dgamma;
                 if (dparams) coef -= gamma * lambda * dparams[ci(g)];
@@ -115,16 +176,18 @@ struct GroupL2 final : RowOp<GroupL2> {
     }
 
     template <class T>
-    void vjp(const T *x, const T *, const uint8_t *, const T *gv, T *gx, int64_t n, double gamma,
+    void vjp(const T *x, const T *, const uint8_t *code, const T *gv, T *gx, int64_t n, double gamma,
              double *acc, void *scr) const noexcept {
         const int64_t P = nparams();
         double *a = static_cast<double *>(scr);
         double *b = a + G;
+        uint8_t *live = reinterpret_cast<uint8_t *>(b + G);
         norms_dots(x, gv, n, a, b);
+        live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
             const double s = a[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (s > tau) {
+            if (live[g]) {
                 const double cc = tau / s;
                 const double ug = b[g] / s;  // <u, g_g>
                 acc[ci(g)] += -gamma * lambda * ug;
