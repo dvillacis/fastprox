@@ -213,7 +213,7 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             a0 = vec(c.params[0]);
             return fp_op_mcp(b.param(), b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
-        case 19: return fp_op_log(b.param(), b.param(), &c.op);
+        case 19: return fp_op_log_penalty(b.param(), b.param(), &c.op);
         case 20: return fp_op_max(b.param(), &c.op);
         case 21: return fp_op_sum_largest(b.param(), static_cast<int64_t>(b.u8() % 40) - 2, b.u8() % 2, &c.op);
         case 22: {  // hyperplane or half-space with a box; b often infeasible

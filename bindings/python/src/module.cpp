@@ -294,7 +294,7 @@ NB_MODULE(_fastprox, m) {
         return make([&](fp_op **o) { return fp_op_mcp(lam, b, pw.get(), o); });
     }, "lam"_a, "b"_a, "weights"_a.none());
     m.def("log_penalty", [](double lam, double eps) {
-        return make([&](fp_op **o) { return fp_op_log(lam, eps, o); });
+        return make([&](fp_op **o) { return fp_op_log_penalty(lam, eps, o); });
     }, "lam"_a, "eps"_a);
     // Group penalties: kind 0 Huber (p = delta), 1 SCAD (p = a), 2 MCP (p = b).
     m.def("group_radial", [](int kind, double lam, double p, std::optional<IdArr> groups,

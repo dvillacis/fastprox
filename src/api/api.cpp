@@ -945,7 +945,7 @@ FP_API fp_status fp_op_mcp(double lambda, double b, const fp_array *weights, fp_
     });
 }
 
-FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out) {
+FP_API fp_status fp_op_log_penalty(double lambda, double eps, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;
         *out = nullptr;

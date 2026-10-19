@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `fp_op_log` is now `fp_op_log_penalty`, matching the Python `LogPenalty` and leaving no doubt next to `fp_op_log_barrier`: a breaking change to the C API, made before the 1.0 freeze. The Python package is unchanged.
+
 ## [0.4.0] — 2026-10-19
 
 ### Added
