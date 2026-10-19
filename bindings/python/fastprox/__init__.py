@@ -1,8 +1,8 @@
-"""fastprox: exact proximal operators and projections with derivatives.
+r"""fastprox: exact proximal operators and projections with derivatives.
 
 Every operator computes
 
-    prox_{gamma g}(x) = argmin_z  g(z) + ||z - x||^2 / (2 gamma)
+$$\operatorname{prox}_{\gamma g}(x) = \operatorname*{argmin}_z \, g(z) + \frac{\lVert z - x \rVert_2^2}{2\gamma}$$
 
 along one axis of a float32 or float64 array, batched over the other axes.
 Projections ignore ``gamma``. Image operators (``TVAniso``) act on the last
@@ -72,10 +72,11 @@ class Info(NamedTuple):
 
 
 class IterInfo(NamedTuple):
-    """Certificate of an iterative operator: the duality gap of the prox
-    problem at the returned point (summed over the batch; |z - z*|^2 <= 2 gap
-    per image), the iterations (the maximum over the batch), whether every
-    image reached the tolerance, and the dual of shape (ndim, *x.shape), which
+    r"""Certificate of an iterative operator: the duality gap of the prox
+    problem at the returned point (summed over the batch;
+    $\lVert z - z^* \rVert_2^2 \le 2\,\mathrm{gap}$ per image), the iterations
+    (the maximum over the batch), whether every image reached the tolerance,
+    and the dual of shape (ndim, *x.shape), which
     ``warm_start=`` accepts back."""
 
     gap: float
@@ -86,9 +87,9 @@ class IterInfo(NamedTuple):
 
 
 class Grads:
-    """Parameter gradients returned by :meth:`Operator.vjp`.
+    r"""Parameter gradients returned by :meth:`Operator.vjp`.
 
-    ``gamma`` is the gradient with respect to the step (with respect to sigma
+    ``gamma`` is the gradient with respect to the step (with respect to $\sigma$
     after ``prox_conj``), ``params`` the flat gradient with respect to the
     operator's parameter vector, and each named parameter is an attribute.
     """
@@ -125,13 +126,13 @@ class Context:
         self.deriv = None  # (residual, iterations) of the last iterative derivative solve
 
     def jacobian_diag(self, branch=None, kink_tol=0.0):
-        """Diagonal of the Jacobian dz/dx at the saved point, for elementwise
+        r"""Diagonal of the Jacobian $\partial z / \partial x$ at the saved point, for elementwise
         operators (since 0.2): ``jvp(ctx, dx=ones)``, with ``branch`` and
         ``kink_tol`` as in :meth:`Operator.jvp`, so at a kink it is the
         chosen piece's slope. For the nonconvex maps an entry reads off its
         SCD subspace: 0 where the entry is fixed at zero, 1 on a piece
         without curvature (the identity, or soft's shift), and otherwise
-        the slope of the concave branch, b / (b - gamma w) for MCP. After
+        the slope of the concave branch, $b / (b - \gamma w)$ for MCP. After
         ``prox_conj`` it is the diagonal of the conjugate prox's Jacobian.
         Other operators raise ValueError: their Jacobian is not diagonal."""
         if not self.op._elementwise:
@@ -141,15 +142,15 @@ class Context:
                            kink_tol=kink_tol)
 
     def kinks(self, tol=0.0):
-        """Kink codes of the saved point, an int8 array of its shape (since
+        r"""Kink codes of the saved point, an int8 array of its shape (since
         0.2; soft thresholding, l1 over a box, SCAD and MCP, and since 0.3 the
-        ties of l0, lq and the log penalty): 0 away from a kink, k >= 1 within
+        ties of l0, lq and the log penalty): 0 away from a kink, $k \ge 1$ within
         ``tol`` (absolute, in the units of the input) of the operator's
-        breakpoint k, the nearest one (see ``fp_workspace_kinks`` in
+        breakpoint $k$, the nearest one (see ``fp_workspace_kinks`` in
         fastprox.h for the numbering). Pass the entries to keep and the side
         to ``jvp``/``vjp`` as ``branch``. Since 0.3 also 1D TV (1 at the tail
         of an edge whose dual is on its bound with no jump), anisotropic TV
-        (bit a for such an edge along axis a) and isotropic TV (1 at a pixel
+        (bit $a$ for such an edge along axis $a$) and isotropic TV (1 at a pixel
         with no gradient whose dual is on its sphere; no branch overrides).
         Since 0.4 the box, the orthant, the simplex, the l1 ball, group l2
         and graph and tree TV, whose kinks are their edges: their masks and
@@ -256,7 +257,7 @@ class Operator:
 
     @property
     def nparams(self) -> int:
-        """Length of the parameter vector theta."""
+        r"""Length of the parameter vector $\theta$."""
         return self._op.nparams
 
     def __repr__(self) -> str:
@@ -265,12 +266,13 @@ class Operator:
     # -- forward -----------------------------------------------------------
     def prox(self, x, gamma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
              copy=False):
-        """prox_{gamma g}(x). With ``keep=True`` returns ``(z, ctx)``."""
+        r"""$\operatorname{prox}_{\gamma g}(x)$. With ``keep=True`` returns ``(z, ctx)``."""
         return self._run(x, gamma, axis, out, threads, keep, ctx, copy, conj=False)
 
     def prox_conj(self, y, sigma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
                   copy=False):
-        """prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y/sigma) (Moreau)."""
+        r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
+        (Moreau)."""
         return self._run(y, sigma, axis, out, threads, keep, ctx, copy, conj=True)
 
     def _run(self, x, step, axis, out, threads, keep, ctx, copy, conj):
@@ -296,14 +298,16 @@ class Operator:
     # -- derivatives -------------------------------------------------------
     def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None, branch=None,
             kink_tol=0.0):
-        """J_x dx + (dz/dgamma) dgamma + (dz/dtheta) dparams at the saved point.
+        r"""$J_x \, dx + (\partial z / \partial \gamma) \, d\gamma + (\partial z / \partial \theta) \, d\theta$
+        at the saved point.
 
         ``branch`` (soft thresholding, l1 over a box, SCAD and MCP; since 0.2):
         -1, 0 or +1 per entry. At the entries within ``kink_tol`` of a
         breakpoint (``ctx.kinks(kink_tol)`` nonzero), -1 and +1 take the
-        piece on the x - eps and the x + eps side of it, so +1 matches the
-        one-sided difference (prox(x + h e_i) - prox(x)) / h; 0 and all other
-        entries keep the default rule."""
+        piece on the $x - \varepsilon$ and the $x + \varepsilon$ side of it, so +1
+        matches the one-sided difference
+        $(\operatorname{prox}(x + h e_i) - \operatorname{prox}(x)) / h$; 0 and all
+        other entries keep the default rule."""
         self._check_ctx(ctx)
         if dx is not None:
             dx = _input(dx, True).astype(ctx.dtype, copy=False)
@@ -315,7 +319,7 @@ class Operator:
         return dout
 
     def vjp(self, ctx: Context, g, *, out=None, branch=None, kink_tol=0.0):
-        """(J_x^T g, Grads) at the saved point; ``branch`` as in :meth:`jvp`."""
+        r"""($J_x^\top g$, Grads) at the saved point; ``branch`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = np.empty(ctx.shape, ctx.dtype) if out is None else out
@@ -353,8 +357,8 @@ class Operator:
 
 
 class Soft(Operator):
-    """g(z) = lam * sum_i w_i |z_i| (soft thresholding). Parameters: weights
-    (scalar when not given); ``grads.lam`` is also provided."""
+    r"""$g(z) = \lambda \sum_i w_i \lvert z_i \rvert$ (soft thresholding).
+    Parameters: weights (scalar when not given); ``grads.lam`` is also provided."""
 
     _elementwise = True
 
@@ -372,7 +376,8 @@ class Soft(Operator):
 
 
 class ElasticNet(Operator):
-    """g(z) = l1 ||z||_1 + (l2/2) ||z||^2. Parameters: l1, l2."""
+    r"""$g(z) = \ell_1 \lVert z \rVert_1 + \tfrac{\ell_2}{2} \lVert z \rVert_2^2$.
+    Parameters: l1, l2."""
 
     _elementwise = True
 
@@ -383,8 +388,9 @@ class ElasticNet(Operator):
 
 
 class Huber(Operator):
-    """g(z) = lam * sum_i h_delta(z_i), h_delta(t) = t^2/(2 delta) for
-    |t| <= delta and |t| - delta/2 otherwise. Parameters: lam, delta."""
+    r"""$g(z) = \lambda \sum_i h_\delta(z_i)$, $h_\delta(t) = t^2 / (2\delta)$ for
+    $\lvert t \rvert \le \delta$ and $\lvert t \rvert - \delta/2$ otherwise.
+    Parameters: lam, delta."""
 
     _elementwise = True
 
@@ -395,7 +401,7 @@ class Huber(Operator):
 
 
 class GroupL2(Operator):
-    """g(z) = lam * sum_g c_g ||z_g||_2 along the axis. ``groups`` gives a
+    r"""$g(z) = \lambda \sum_g c_g \lVert z_g \rVert_2$ along the axis. ``groups`` gives a
     group id per entry (None: one group, the l2 norm). Parameters:
     group_weights."""
 
@@ -411,11 +417,11 @@ class GroupL2(Operator):
 
 
 class TreeL2(Operator):
-    """g(z) = l1 ||z||_1 + sum_g eta_g ||z_g||_2 along the axis, for groups that
-    are pairwise nested or disjoint (a tree; Bach et al. 2012, (3.8)). ``groups``
-    is a sequence of index arrays, in any order; ValueError when two groups
-    overlap without nesting. ``group_weights``: None (eta = 1), a scalar, or one
-    per group. Parameters: l1, group_weights (eta)."""
+    r"""$g(z) = \ell_1 \lVert z \rVert_1 + \sum_g \eta_g \lVert z_g \rVert_2$ along the
+    axis, for groups that are pairwise nested or disjoint (a tree; Bach et al.
+    2012, (3.8)). ``groups`` is a sequence of index arrays, in any order; ValueError when two groups
+    overlap without nesting. ``group_weights``: None ($\eta = 1$), a scalar, or one
+    per group. Parameters: l1, group_weights ($\eta$)."""
 
     def __init__(self, groups=(), group_weights=None, l1=0.0):
         parts = [np.asarray(g, np.int64).reshape(-1) for g in groups]
@@ -431,8 +437,9 @@ class TreeL2(Operator):
 
     @classmethod
     def sparse_group(cls, l1=1.0, lam=1.0, groups=None, group_weights=None):
-        """The sparse group lasso l1 ||z||_1 + lam sum_g c_g ||z_g||_2 for a
-        group id per entry (as in GroupL2); eta = lam c."""
+        r"""The sparse group lasso
+        $\ell_1 \lVert z \rVert_1 + \lambda \sum_g c_g \lVert z_g \rVert_2$ for a
+        group id per entry (as in GroupL2); $\eta = \lambda c$."""
         groups = np.asarray(groups, np.int64).reshape(-1)
         ng = int(groups.max()) + 1 if groups.size else 0
         members = [np.flatnonzero(groups == g) for g in range(ng)]
@@ -442,7 +449,7 @@ class TreeL2(Operator):
 
 
 class Box(Operator):
-    """Projection onto lower <= z <= upper (scalars or per-entry along the
+    r"""Projection onto $\mathrm{lower} \le z \le \mathrm{upper}$ (scalars or per-entry along the
     axis; infinities allowed). Parameters: lower, upper."""
 
     _elementwise = True
@@ -465,8 +472,8 @@ class NonNeg(Operator):
 
 
 class LogBarrier(Operator):
-    """g(z) = -lam * sum_i log z_i, lam > 0: z = (x + sqrt(x^2 + 4 gamma lam)) / 2
-    (Beck, Lemma 6.5). Parameters: lam."""
+    r"""$g(z) = -\lambda \sum_i \log z_i$, $\lambda > 0$:
+    $z = (x + \sqrt{x^2 + 4 \gamma \lambda}) / 2$ (Beck, Lemma 6.5). Parameters: lam."""
 
     _elementwise = True
 
@@ -477,8 +484,10 @@ class LogBarrier(Operator):
 
 
 class L1Box(Operator):
-    """g(z) = lam * sum_i w_i |z_i| restricted to lower <= z <= upper:
-    z = clip(soft(x, gamma lam w), lower, upper) (Beck, Example 6.23). The
+    r"""$g(z) = \lambda \sum_i w_i \lvert z_i \rvert$ restricted to
+    $\mathrm{lower} \le z \le \mathrm{upper}$:
+    $z = \operatorname{clip}(\operatorname{soft}(x, \gamma \lambda w), \mathrm{lower}, \mathrm{upper})$
+    (Beck, Example 6.23). The
     weights and bounds are scalars or one entry per element along the axis.
     Parameters: weights, lower, upper; ``grads.lam`` is also provided."""
 
@@ -503,8 +512,9 @@ class L1Box(Operator):
 
 
 class SOC(Operator):
-    """Projection onto the second-order cone {(t, y) : ||y||_2 <= t} along the
-    axis, with t the first entry (Beck, Example 6.37)."""
+    r"""Projection onto the second-order cone
+    $\{(t, y) : \lVert y \rVert_2 \le t\}$ along the axis, with $t$ the first entry
+    (Beck, Example 6.37)."""
 
     def __init__(self):
         super().__init__(_C.soc())
@@ -532,8 +542,9 @@ class _GroupRadial(Operator):
 
 
 class GroupHuber(_GroupRadial):
-    """g(z) = lam * sum_g c_g H_delta(||z_g||_2), with H_delta the Huber function
-    of Huber: z_g = (1 - gamma c_g lam / max(||x_g||, delta + gamma c_g lam)) x_g
+    r"""$g(z) = \lambda \sum_g c_g H_\delta(\lVert z_g \rVert_2)$, with $H_\delta$ the
+    Huber function of Huber:
+    $z_g = (1 - \gamma c_g \lambda / \max(\lVert x_g \rVert_2, \delta + \gamma c_g \lambda)) \, x_g$
     (Beck, Example 6.66). Parameters: lam, delta, group_weights."""
 
     _kind, _pname = 0, "delta"
@@ -543,8 +554,9 @@ class GroupHuber(_GroupRadial):
 
 
 class GroupSCAD(_GroupRadial):
-    """Group SCAD: sum_g c_g SCAD(||z_g||_2) with threshold lam and concavity
-    a > 1; the prox needs a > 1 + gamma max c (ValueError otherwise).
+    r"""Group SCAD: $\sum_g c_g \operatorname{SCAD}(\lVert z_g \rVert_2)$ with
+    threshold $\lambda$ and concavity $a > 1$; the prox needs
+    $a > 1 + \gamma \max c$ (ValueError otherwise).
     Parameters: lam, a, group_weights."""
 
     _kind, _pname = 1, "a"
@@ -554,8 +566,9 @@ class GroupSCAD(_GroupRadial):
 
 
 class GroupMCP(_GroupRadial):
-    """Group MCP: sum_g c_g MCP(||z_g||_2) with threshold lam and concavity
-    b > 0; the prox needs b > gamma max c (ValueError otherwise).
+    r"""Group MCP: $\sum_g c_g \operatorname{MCP}(\lVert z_g \rVert_2)$ with
+    threshold $\lambda$ and concavity $b > 0$; the prox needs $b > \gamma \max c$
+    (ValueError otherwise).
     Parameters: lam, b, group_weights."""
 
     _kind, _pname = 2, "b"
@@ -565,7 +578,8 @@ class GroupMCP(_GroupRadial):
 
 
 class L2Ball(Operator):
-    """Projection onto ||z||_2 <= radius along the axis. Parameters: radius."""
+    r"""Projection onto $\lVert z \rVert_2 \le \mathrm{radius}$ along the axis.
+    Parameters: radius."""
 
     _layout = [("radius", 1, True)]
 
@@ -574,7 +588,8 @@ class L2Ball(Operator):
 
 
 class Simplex(Operator):
-    """Projection onto {z >= 0, sum z = radius} along the axis (Condat 2016).
+    r"""Projection onto $\{z \ge 0, \sum_i z_i = \mathrm{radius}\}$ along the axis
+    (Condat 2016).
     Parameters: radius."""
 
     _layout = [("radius", 1, True)]
@@ -584,8 +599,8 @@ class Simplex(Operator):
 
 
 class L1Ball(Operator):
-    """Projection onto sum_i w_i |z_i| <= radius along the axis.
-    Parameters: radius."""
+    r"""Projection onto $\sum_i w_i \lvert z_i \rvert \le \mathrm{radius}$ along the
+    axis. Parameters: radius."""
 
     _layout = [("radius", 1, True)]
 
@@ -594,7 +609,7 @@ class L1Ball(Operator):
 
 
 class LInf(Operator):
-    """g(z) = lam ||z||_inf along the axis. Parameters: lam."""
+    r"""$g(z) = \lambda \lVert z \rVert_\infty$ along the axis. Parameters: lam."""
 
     _layout = [("lam", 1, True)]
 
@@ -603,8 +618,8 @@ class LInf(Operator):
 
 
 class Max(Operator):
-    """g(z) = lam * max_i z_i along the axis: z = min(x, tau) by the Moreau
-    identity with the simplex. Parameters: lam."""
+    r"""$g(z) = \lambda \max_i z_i$ along the axis: $z = \min(x, \tau)$ by the
+    Moreau identity with the simplex. Parameters: lam."""
 
     _layout = [("lam", 1, True)]
 
@@ -613,9 +628,9 @@ class Max(Operator):
 
 
 class SumLargest(Operator):
-    """g(z) = lam * (sum of the k largest z_i) along the axis, k at most the
-    axis length; with absolute=True the k largest |z_i| (any k; k >= n is
-    lam * ||z||_1). Parameters: lam."""
+    r"""$g(z) = \lambda$ (sum of the $k$ largest $z_i$) along the axis, $k$ at
+    most the axis length; with absolute=True the $k$ largest $\lvert z_i \rvert$
+    (any $k$; $k \ge n$ is $\lambda \lVert z \rVert_1$). Parameters: lam."""
 
     _layout = [("lam", 1, True)]
 
@@ -624,8 +639,8 @@ class SumLargest(Operator):
 
 
 class Hyperplane(Operator):
-    """Projection onto {a^T z = b, lower <= z <= upper} along the axis (Beck,
-    Theorem 6.27): a is a scalar or one entry per element (None: all ones),
+    r"""Projection onto $\{a^\top z = b, \ \mathrm{lower} \le z \le \mathrm{upper}\}$
+    along the axis (Beck, Theorem 6.27): $a$ is a scalar or one entry per element (None: all ones),
     the box as in Box (unbounded by default). Raises ValueError when the set
     is empty for the axis length. Parameters: b, a, lower, upper."""
 
@@ -643,16 +658,16 @@ class Hyperplane(Operator):
 
 
 class HalfSpace(Hyperplane):
-    """Projection onto {a^T z <= b, lower <= z <= upper} along the axis; the
-    box projection when it satisfies the constraint, else as Hyperplane.
+    r"""Projection onto $\{a^\top z \le b, \ \mathrm{lower} \le z \le \mathrm{upper}\}$
+    along the axis; the box projection when it satisfies the constraint, else as Hyperplane.
     Parameters: b, a, lower, upper."""
 
     _inequality = True
 
 
 class Isotonic(Operator):
-    """Projection onto the monotone cone along the axis (pool-adjacent-
-    violators), minimising sum_i w_i (z_i - x_i)^2. Parameters: weights."""
+    r"""Projection onto the monotone cone along the axis (pool-adjacent-
+    violators), minimising $\sum_i w_i (z_i - x_i)^2$. Parameters: weights."""
 
     def __init__(self, weights=None, increasing=True):
         w = _vec(weights)
@@ -661,7 +676,8 @@ class Isotonic(Operator):
 
 
 class TV1D(Operator):
-    """g(z) = sum_i w_i |z_{i+1} - z_i| along the axis (1D total variation).
+    r"""$g(z) = \sum_i w_i \lvert z_{i+1} - z_i \rvert$ along the axis (1D total
+    variation).
     ``weights``: scalar or one per edge (axis length - 1). ``method``: "auto"
     (Condat's algorithm, taut string when it backtracks too much), "condat"
     or "taut_string". Parameters: weights."""
@@ -676,9 +692,9 @@ class TV1D(Operator):
 
 
 class TV1DBall(Operator):
-    """Projection onto {z : sum_i w_i |z_{i+1} - z_i| <= alpha} along the axis
-    (Beck, Theorem 6.30): x when inside, else the 1D TV prox at the step where
-    the TV equals alpha. Weights as in TV1D. Parameters: alpha, weights."""
+    r"""Projection onto $\{z : \sum_i w_i \lvert z_{i+1} - z_i \rvert \le \alpha\}$
+    along the axis (Beck, Theorem 6.30): $x$ when inside, else the 1D TV prox at
+    the step where the TV equals $\alpha$. Weights as in TV1D. Parameters: alpha, weights."""
 
     def __init__(self, alpha=1.0, weights=None):
         w = _vec(weights)
@@ -688,7 +704,8 @@ class TV1DBall(Operator):
 
 
 class TV1DL2(Operator):
-    """g(z) = ||W D z||_2 = sqrt(sum_i w_i^2 (z_{i+1} - z_i)^2) along the axis:
+    r"""$g(z) = \lVert W D z \rVert_2 = \sqrt{\sum_i w_i^2 (z_{i+1} - z_i)^2}$ along
+    the axis:
     1D TV with the l2 norm of the differences (Newton on the dual trust-region
     problem, to rounding). Weights as in TV1D. Parameters: weights."""
 
@@ -709,14 +726,15 @@ class _ImageOperator(Operator):
 
     def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
              tol=1e-6, max_iter=1000, warm_start=None, warm=False):
-        """prox_{gamma g}(x); see the class docstring."""
+        r"""$\operatorname{prox}_{\gamma g}(x)$; see the class docstring."""
         z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, max_iter,
                                warm_start, warm)
         return (z, ctx) if keep else z
 
     def prox_conj(self, y, sigma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
                   tol=1e-6, max_iter=1000, warm_start=None, warm=False):
-        """prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y/sigma) (Moreau)."""
+        r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
+        (Moreau)."""
         z, ctx, _ = self._iter(y, sigma, out, threads, keep, ctx, copy, True, tol, max_iter,
                                warm_start, warm)
         return (z, ctx) if keep else z
@@ -756,18 +774,18 @@ class _ImageOperator(Operator):
 
 
 class TVAniso(_ImageOperator):
-    """Anisotropic total variation of 2D or 3D images, on the last ``ndim``
+    r"""Anisotropic total variation of 2D or 3D images, on the last ``ndim``
     axes and batched over the others:
 
-        g(z) = sum_a w_a * (sum of beta_{a,p} |z_{p + e_a} - z_p| along image axis a)
+    $$g(z) = \sum_a w_a \sum_p \beta_{a,p} \lvert z_{p + e_a} - z_p \rvert$$
 
-    with optional edge weights beta >= 0 (since 0.3; 1 without them) of shape
-    (ndim, *image shape), beta[a][p] weighting the edge from p to its forward
-    neighbour along a (the last entries along a are unused), for spatially
+    with optional edge weights $\beta \ge 0$ (since 0.3; 1 without them) of shape
+    (ndim, *image shape), ``beta[a, p]`` weighting the edge from $p$ to its
+    forward neighbour along $a$ (the last entries along $a$ are unused), for spatially
     varying regularisation; the operator then takes only images of that
     shape.
     Iterative (accelerated dual block methods with exact 1D TV steps): each
-    image stops when its duality gap is at most ``tol * ||x||^2 / 2``.
+    image stops when its duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$.
     ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
     ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
     dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
@@ -796,21 +814,21 @@ class TVAniso(_ImageOperator):
 
 
 class GraphTV(_ImageOperator):
-    """Total variation on a graph, on the last axis (length ``n``) and batched
+    r"""Total variation on a graph, on the last axis (length ``n``) and batched
     over the others:
 
-        g(z) = sum_e w_e |z_u - z_v|   over the edges e = (u, v)
+    $$g(z) = \sum_e w_e \lvert z_u - z_v \rvert \quad \text{over the edges } e = (u, v)$$
 
-    ``edges`` is an array of shape (m, 2) of node indices, u != v (repeated
-    edges add); ``weights`` a scalar or one per edge, all >= 0. By parametric
+    ``edges`` is an array of shape (m, 2) of node indices, $u \ne v$ (repeated
+    edges add); ``weights`` a scalar or one per edge, all $\ge 0$. By parametric
     max-flow (Chambolle and Darbon; Hochbaum), each part of the graph cut at
     its mean value: exact up to rounding where a part ends at a trivial cut,
-    else within ``tol * (max x - min x)`` at every node, so ``tol=0`` (the
+    else within $\mathrm{tol} \cdot (\max x - \min x)$ at every node, so ``tol=0`` (the
     default) asks for the solution to rounding. ``info.gap`` is the duality
     gap with the flow as the dual, ``info.iters`` the number of max-flow
-    solves; ``info.dual`` (shape (1, *x.shape)) is q with z = x - q. Warm
+    solves; ``info.dual`` (shape (1, *x.shape)) is $q$ with $z = x - q$. Warm
     starts have no effect. ``jvp`` and ``vjp`` are exact (averages over the
-    regions where z is constant). Parameters: weights.
+    regions where $z$ is constant). Parameters: weights.
 
     Kinks (since 0.4) are edges: ``ctx.kinks`` and ``branch`` have the
     shape of x with the last axis over the edges, in the order of
@@ -858,11 +876,11 @@ class GraphTV(_ImageOperator):
 
 
 class TreeTV(GraphTV):
-    """Total variation on a tree or forest, on the last axis (length ``n``)
+    r"""Total variation on a tree or forest, on the last axis (length ``n``)
     and batched over the others: :class:`GraphTV`'s penalty for ``edges``
     that form a forest (no cycles or repeated edges, any order and
     orientation; a chain is a tree). By dynamic programming (Kolmogorov, Pock
-    and Rolinek), O(n log n) and exact up to rounding; ``tol`` and
+    and Rolinek), $O(n \log n)$ and exact up to rounding; ``tol`` and
     ``max_iter`` are ignored and ``info.iters`` is 1. ``info.gap``,
     ``info.dual``, the derivatives and the kinks are those of
     :class:`GraphTV`, with the flow unique on a forest. Parameters: weights."""
@@ -871,24 +889,25 @@ class TreeTV(GraphTV):
 
 
 class TVIso(_ImageOperator):
-    """Isotropic total variation of 2D or 3D images, on the last ``ndim`` axes
+    r"""Isotropic total variation of 2D or 3D images, on the last ``ndim`` axes
     and batched over the others:
 
-        g(z) = sum_p alpha_p |(w_0 D_0 z, ..., w_{ndim-1} D_{ndim-1} z)_p|_2
+    $$g(z) = \sum_p \alpha_p \lVert (w_0 D_0 z, \dots, w_{\mathrm{ndim}-1} D_{\mathrm{ndim}-1} z)_p \rVert_2$$
 
     with forward differences (zero past the last entry); the weights scale
     each axis inside the norm (e.g. voxel spacing), and the optional pixel
-    weights alpha >= 0 (since 0.3; 1 without them) each pixel's term, for
+    weights $\alpha \ge 0$ (since 0.3; 1 without them) each pixel's term, for
     spatially varying regularisation. With pixel weights the operator takes
     only images of their shape. Iterative (fast gradient
     projection on the dual), with the gap, warm starts and ``keep`` as in
-    :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has |u_p| <= gamma alpha_p and
-    z = x - sum_a w_a D_a^T u_a. ``jvp`` and ``vjp`` solve a linear system by
-    conjugate gradients to relative residual ``tol`` and record the residual
+    :class:`TVAniso`; the dual ``u`` (``IterInfo.dual``) has
+    $\lVert u_p \rVert_2 \le \gamma \alpha_p$ and $z = x - \sum_a w_a D_a^\top u_a$.
+    ``jvp`` and ``vjp`` solve a linear system by conjugate gradients to relative residual ``tol`` and record the residual
     and iterations reached in ``ctx.deriv``; by default (``tol=None``) they
-    stop at the relative error of z that the prox's gap certifies,
-    sqrt(2 gap) / |x|, and at 1e-10 at the tightest. Parameters: weights,
-    and pixel_weights when given (a gradient of their shape)."""
+    stop at the relative error of $z$ that the prox's gap certifies,
+    $\sqrt{2\,\mathrm{gap}} / \lVert x \rVert_2$, and at $10^{-10}$ at the tightest.
+    Parameters: weights, and pixel_weights when given (a gradient of their
+    shape)."""
 
     def __init__(self, ndim=2, weights=None, pixel_weights=None):
         if ndim not in (2, 3):
@@ -958,8 +977,8 @@ class _Pointwise(Operator):
 
 
 class L0(_Pointwise):
-    """g(z) = lam * sum_i w_i [z_i != 0] (hard thresholding at sqrt(2 gamma lam
-    w_i)). Parameters: weights (the map is piecewise constant in them)."""
+    r"""$g(z) = \lambda \sum_i w_i [z_i \ne 0]$ (hard thresholding at
+    $\sqrt{2 \gamma \lambda w_i}$). Parameters: weights (the map is piecewise constant in them)."""
 
     def __init__(self, lam=1.0, weights=None):
         w = _vec(weights)
@@ -968,8 +987,8 @@ class L0(_Pointwise):
 
 
 class Lq(_Pointwise):
-    """g(z) = lam * sum_i w_i |z_i|^q with 0 < q < 1 (closed form for q = 1/2
-    and 2/3, safeguarded Newton otherwise). Parameters: weights;
+    r"""$g(z) = \lambda \sum_i w_i \lvert z_i \rvert^q$ with $0 < q < 1$ (closed form
+    for $q = 1/2$ and $2/3$, safeguarded Newton otherwise). Parameters: weights;
     ``grads.lam`` is also provided."""
 
     def __init__(self, lam=1.0, q=0.5, weights=None):
@@ -986,11 +1005,11 @@ class Lq(_Pointwise):
 
 
 class SCAD(_Pointwise):
-    """g(z) = sum_i w_i SCAD(z_i), the SCAD penalty (Fan and Li 2001) with
-    threshold lam and concavity a > 1; entry i is the unweighted map at the
-    step gamma w_i. The prox needs a > 1 + gamma max(w) (ValueError
-    otherwise). Parameters: lam, a, and weights when given (a scalar or one
-    per element along the axis)."""
+    r"""$g(z) = \sum_i w_i \operatorname{SCAD}(z_i)$, the SCAD penalty (Fan and Li
+    2001) with threshold $\lambda$ and concavity $a > 1$; entry $i$ is the
+    unweighted map at the step $\gamma w_i$. The prox needs
+    $a > 1 + \gamma \max(w)$ (ValueError otherwise). Parameters: lam, a, and
+    weights when given (a scalar or one per element along the axis)."""
 
     def __init__(self, lam=1.0, a=3.7, weights=None):
         w = _vec(weights)
@@ -1001,9 +1020,10 @@ class SCAD(_Pointwise):
 
 
 class MCP(_Pointwise):
-    """g(z) = sum_i w_i MCP(z_i), the minimax concave penalty (Zhang 2010)
-    with threshold lam and concavity b > 0 (w MCP(lam, b) = MCP(w lam, b/w)).
-    The prox needs b > gamma max(w) (ValueError otherwise). Parameters: lam,
+    r"""$g(z) = \sum_i w_i \operatorname{MCP}(z_i)$, the minimax concave penalty
+    (Zhang 2010) with threshold $\lambda$ and concavity $b > 0$
+    ($w \operatorname{MCP}(\lambda, b) = \operatorname{MCP}(w \lambda, b/w)$).
+    The prox needs $b > \gamma \max(w)$ (ValueError otherwise). Parameters: lam,
     b, and weights when given."""
 
     def __init__(self, lam=1.0, b=3.0, weights=None):
@@ -1015,7 +1035,8 @@ class MCP(_Pointwise):
 
 
 class LogPenalty(_Pointwise):
-    """g(z) = lam * sum_i log(1 + |z_i| / eps), eps > 0. Parameters: lam, eps."""
+    r"""$g(z) = \lambda \sum_i \log(1 + \lvert z_i \rvert / \varepsilon)$,
+    $\varepsilon > 0$. Parameters: lam, eps."""
 
     _layout = [("lam", 1, True), ("eps", 1, True)]
 
@@ -1037,82 +1058,85 @@ def _once(handle, x, step, axis, out, threads, copy):
 
 def soft_threshold(x, lam=1.0, gamma=1.0, *, weights=None, out=None, axis=-1, threads=0,
                    copy=False):
-    """prox of gamma * lam * sum_i w_i |z_i|."""
+    r"""prox of $\gamma \lambda \sum_i w_i \lvert z_i \rvert$."""
     return _once(_C.soft(float(lam), _vec(weights)), x, gamma, axis, out, threads, copy)
 
 
 def elastic_net(x, l1=1.0, l2=1.0, gamma=1.0, *, out=None, threads=0, copy=False):
-    """prox of gamma * (l1 ||z||_1 + l2/2 ||z||^2)."""
+    r"""prox of $\gamma (\ell_1 \lVert z \rVert_1 + \tfrac{\ell_2}{2} \lVert z \rVert_2^2)$."""
     return _once(_C.elastic_net(float(l1), float(l2)), x, gamma, -1, out, threads, copy)
 
 
 def huber(x, lam=1.0, delta=1.0, gamma=1.0, *, out=None, threads=0, copy=False):
-    """prox of gamma * lam * sum_i h_delta(z_i)."""
+    r"""prox of $\gamma \lambda \sum_i h_\delta(z_i)$."""
     return _once(_C.huber(float(lam), float(delta)), x, gamma, -1, out, threads, copy)
 
 
 def group_soft_threshold(x, lam=1.0, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
                          out=None, threads=0, copy=False):
-    """prox of gamma * lam * sum_g c_g ||z_g||_2 along the axis."""
+    r"""prox of $\gamma \lambda \sum_g c_g \lVert z_g \rVert_2$ along the axis."""
     op = GroupL2(lam, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def prox_l2(x, lam=1.0, gamma=1.0, *, axis=-1, out=None, threads=0, copy=False):
-    """prox of gamma * lam * ||z||_2 along the axis."""
+    r"""prox of $\gamma \lambda \lVert z \rVert_2$ along the axis."""
     return _once(_C.group_l2(float(lam), None, 1, None), x, gamma, axis, out, threads, copy)
 
 
 def project_box(x, lower=-np.inf, upper=np.inf, *, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto lower <= z <= upper."""
+    r"""Projection onto $\mathrm{lower} \le z \le \mathrm{upper}$."""
     return _once(Box(lower, upper)._op, x, 1.0, axis, out, threads, copy)
 
 
 def project_nonneg(x, *, out=None, threads=0, copy=False):
-    """Projection onto z >= 0."""
+    r"""Projection onto $z \ge 0$."""
     return _once(_C.nonneg(), x, 1.0, -1, out, threads, copy)
 
 
 def project_l2_ball(x, radius=1.0, *, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto ||z||_2 <= radius along the axis."""
+    r"""Projection onto $\lVert z \rVert_2 \le \mathrm{radius}$ along the axis."""
     return _once(_C.l2_ball(float(radius)), x, 1.0, axis, out, threads, copy)
 
 
 def project_simplex(x, radius=1.0, *, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto {z >= 0, sum z = radius} along the axis."""
+    r"""Projection onto $\{z \ge 0, \sum_i z_i = \mathrm{radius}\}$ along the axis."""
     return _once(_C.simplex(float(radius)), x, 1.0, axis, out, threads, copy)
 
 
 def project_l1_ball(x, radius=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto sum_i w_i |z_i| <= radius along the axis."""
+    r"""Projection onto $\sum_i w_i \lvert z_i \rvert \le \mathrm{radius}$ along the axis."""
     return _once(_C.l1_ball(float(radius), _vec(weights)), x, 1.0, axis, out, threads, copy)
 
 
 def prox_linf(x, lam=1.0, gamma=1.0, *, axis=-1, out=None, threads=0, copy=False):
-    """prox of gamma * lam * ||z||_inf along the axis."""
+    r"""prox of $\gamma \lambda \lVert z \rVert_\infty$ along the axis."""
     return _once(_C.linf(float(lam)), x, gamma, axis, out, threads, copy)
 
 
 def prox_max(x, lam=1.0, gamma=1.0, *, axis=-1, out=None, threads=0, copy=False):
-    """prox of gamma * lam * max_i z_i along the axis."""
+    r"""prox of $\gamma \lambda \max_i z_i$ along the axis."""
     return _once(_C.max(float(lam)), x, gamma, axis, out, threads, copy)
 
 
 def prox_sum_largest(x, lam=1.0, k=1, gamma=1.0, *, absolute=False, axis=-1, out=None, threads=0,
                      copy=False):
-    """prox of gamma * lam * (sum of the k largest z_i, or |z_i|) along the axis."""
+    r"""prox of $\gamma \lambda$ (sum of the $k$ largest $z_i$, or $\lvert z_i \rvert$)
+    along the axis."""
     return _once(SumLargest(lam, k, absolute)._op, x, gamma, axis, out, threads, copy)
 
 
 def project_hyperplane(x, a=None, b=0.0, lower=-np.inf, upper=np.inf, *, axis=-1, out=None,
                        threads=0, copy=False):
-    """Projection onto {a^T z = b, lower <= z <= upper} along the axis."""
+    r"""Projection onto $\{a^\top z = b, \ \mathrm{lower} \le z \le \mathrm{upper}\}$
+    along the axis."""
     return _once(Hyperplane(a, b, lower, upper)._op, x, 1.0, axis, out, threads, copy)
 
 
 def project_halfspace(x, a=None, b=0.0, lower=-np.inf, upper=np.inf, *, axis=-1, out=None,
                       threads=0, copy=False):
-    """Projection onto {a^T z <= b, lower <= z <= upper} along the axis."""
+    r"""Projection onto $\{a^\top z \le b, \ \mathrm{lower} \le z \le \mathrm{upper}\}$
+    along the axis."""
     return _once(HalfSpace(a, b, lower, upper)._op, x, 1.0, axis, out, threads, copy)
 
 
@@ -1123,7 +1147,7 @@ def isotonic(x, *, weights=None, increasing=True, axis=-1, out=None, threads=0, 
 
 def tv1d(x, gamma=1.0, *, weights=None, axis=-1, method="auto", out=None, threads=0,
          copy=False):
-    """prox of gamma * sum_i w_i |z_{i+1} - z_i| along the axis."""
+    r"""prox of $\gamma \sum_i w_i \lvert z_{i+1} - z_i \rvert$ along the axis."""
     if method not in _TV1D_METHODS:
         raise ValueError(f"method must be one of {sorted(_TV1D_METHODS)}")
     return _once(_C.tv1d(_vec(weights), _TV1D_METHODS[method]), x, gamma, axis, out, threads,
@@ -1131,13 +1155,13 @@ def tv1d(x, gamma=1.0, *, weights=None, axis=-1, method="auto", out=None, thread
 
 
 def tv1d_l2(x, gamma=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=False):
-    """prox of gamma * sqrt(sum_i w_i^2 (z_{i+1} - z_i)^2) along the axis."""
+    r"""prox of $\gamma \sqrt{\sum_i w_i^2 (z_{i+1} - z_i)^2}$ along the axis."""
     return _once(_C.tv1d_l2(_vec(weights)), x, gamma, axis, out, threads, copy)
 
 
 def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
              out=None, threads=0, copy=False):
-    """prox of gamma * sum_a w_a TV_a on the last ``ndim`` (2 or 3) axes.
+    r"""prox of $\gamma \sum_a w_a \mathrm{TV}_a$ on the last ``ndim`` (2 or 3) axes.
     Returns ``(z, info)``; ``info.gap`` certifies the result and ``info.dual``
     can be passed back as ``warm_start``."""
     return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
@@ -1146,24 +1170,24 @@ def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, war
 
 def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
            out=None, threads=0, copy=False):
-    """prox of gamma * sum_p |(w_a D_a z)_p|_2 (isotropic TV) on the last ``ndim``
-    (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
+    r"""prox of $\gamma \sum_p \lVert (w_a D_a z)_p \rVert_2$ (isotropic TV) on the
+    last ``ndim`` (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
     return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
                                       max_iter=max_iter, warm_start=warm_start)
 
 
 def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=0.0, max_iter=1000, out=None,
              threads=0, copy=False):
-    """prox of gamma * sum_e w_e |z_u - z_v| over ``edges`` (pairs (u, v)) on
-    the last axis. Returns ``(z, info)`` as :func:`tv_aniso`."""
+    r"""prox of $\gamma \sum_e w_e \lvert z_u - z_v \rvert$ over ``edges`` (pairs
+    $(u, v)$) on the last axis. Returns ``(z, info)`` as :func:`tv_aniso`."""
     x = np.asarray(x)
     return GraphTV(x.shape[-1] if n is None else n, edges, weights).solve(
         x, gamma, out=out, threads=threads, copy=copy, tol=tol, max_iter=max_iter)
 
 
 def tree_tv(x, edges, gamma=1.0, *, n=None, weights=None, out=None, threads=0, copy=False):
-    """prox of gamma * sum_e w_e |z_u - z_v| over ``edges`` (pairs (u, v))
-    that form a forest, on the last axis. Returns ``(z, info)`` as
+    r"""prox of $\gamma \sum_e w_e \lvert z_u - z_v \rvert$ over ``edges`` (pairs
+    $(u, v)$) that form a forest, on the last axis. Returns ``(z, info)`` as
     :func:`tv_aniso`."""
     x = np.asarray(x)
     return TreeTV(x.shape[-1] if n is None else n, edges, weights).solve(
@@ -1172,85 +1196,92 @@ def tree_tv(x, edges, gamma=1.0, *, n=None, weights=None, out=None, threads=0, c
 
 def hard_threshold(x, lam=1.0, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,
                    threads=0, copy=False):
-    """prox of gamma * lam * sum_i w_i [z_i != 0]."""
+    r"""prox of $\gamma \lambda \sum_i w_i [z_i \ne 0]$."""
     return L0(lam, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy,
                                  tie=tie)
 
 
 def lq(x, lam=1.0, q=0.5, gamma=1.0, *, weights=None, tie="nonzero", out=None, axis=-1,
        threads=0, copy=False):
-    """prox of gamma * lam * sum_i w_i |z_i|^q, 0 < q < 1."""
+    r"""prox of $\gamma \lambda \sum_i w_i \lvert z_i \rvert^q$, $0 < q < 1$."""
     return Lq(lam, q, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy,
                                     tie=tie)
 
 
 def scad(x, lam=1.0, a=3.7, gamma=1.0, *, weights=None, out=None, axis=-1, threads=0, copy=False):
-    """prox of gamma * sum_i w_i SCAD(lam, a)(z_i); needs a > 1 + gamma max(w)."""
+    r"""prox of $\gamma \sum_i w_i \operatorname{SCAD}(\lambda, a)(z_i)$; needs
+    $a > 1 + \gamma \max(w)$."""
     return SCAD(lam, a, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy)
 
 
 def mcp(x, lam=1.0, b=3.0, gamma=1.0, *, weights=None, out=None, axis=-1, threads=0, copy=False):
-    """prox of gamma * sum_i w_i MCP(lam, b)(z_i); needs b > gamma max(w)."""
+    r"""prox of $\gamma \sum_i w_i \operatorname{MCP}(\lambda, b)(z_i)$; needs
+    $b > \gamma \max(w)$."""
     return MCP(lam, b, weights).prox(x, gamma, axis=axis, out=out, threads=threads, copy=copy)
 
 
 def prox_log(x, lam=1.0, eps=1.0, gamma=1.0, *, tie="nonzero", out=None, threads=0, copy=False):
-    """prox of gamma * lam * sum_i log(1 + |z_i| / eps)."""
+    r"""prox of $\gamma \lambda \sum_i \log(1 + \lvert z_i \rvert / \varepsilon)$."""
     return LogPenalty(lam, eps).prox(x, gamma, out=out, threads=threads, copy=copy, tie=tie)
 
 
 def prox_log_barrier(x, lam=1.0, gamma=1.0, *, out=None, threads=0, copy=False):
-    """prox of -gamma * lam * sum_i log z_i."""
+    r"""prox of $-\gamma \lambda \sum_i \log z_i$."""
     return _once(_C.log_barrier(float(lam)), x, gamma, -1, out, threads, copy)
 
 
 def prox_l1_box(x, lam=1.0, lower=-np.inf, upper=np.inf, gamma=1.0, *, weights=None, axis=-1,
                 out=None, threads=0, copy=False):
-    """prox of gamma * lam * sum_i w_i |z_i| over lower <= z <= upper."""
+    r"""prox of $\gamma \lambda \sum_i w_i \lvert z_i \rvert$ over
+    $\mathrm{lower} \le z \le \mathrm{upper}$."""
     op = L1Box(lam, lower, upper, weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def project_soc(x, *, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto {(t, y) : ||y||_2 <= t} along the axis, t the first entry."""
+    r"""Projection onto $\{(t, y) : \lVert y \rVert_2 \le t\}$ along the axis, $t$ the
+    first entry."""
     return _once(_C.soc(), x, 1.0, axis, out, threads, copy)
 
 
 def group_huber(x, lam=1.0, delta=1.0, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
                 out=None, threads=0, copy=False):
-    """prox of gamma * lam * sum_g c_g H_delta(||z_g||_2) along the axis."""
+    r"""prox of $\gamma \lambda \sum_g c_g H_\delta(\lVert z_g \rVert_2)$ along the axis."""
     op = GroupHuber(lam, delta, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def group_scad(x, lam=1.0, a=3.7, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
                out=None, threads=0, copy=False):
-    """prox of gamma * sum_g c_g SCAD(||z_g||_2) along the axis."""
+    r"""prox of $\gamma \sum_g c_g \operatorname{SCAD}(\lVert z_g \rVert_2)$ along the axis."""
     op = GroupSCAD(lam, a, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def group_mcp(x, lam=1.0, b=3.0, gamma=1.0, *, groups=None, group_weights=None, axis=-1,
               out=None, threads=0, copy=False):
-    """prox of gamma * sum_g c_g MCP(||z_g||_2) along the axis."""
+    r"""prox of $\gamma \sum_g c_g \operatorname{MCP}(\lVert z_g \rVert_2)$ along the axis."""
     op = GroupMCP(lam, b, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def tree_soft_threshold(x, groups, group_weights=None, l1=0.0, gamma=1.0, *, axis=-1, out=None,
                         threads=0, copy=False):
-    """prox of gamma * (l1 ||z||_1 + sum_g eta_g ||z_g||_2) for tree-structured groups."""
+    r"""prox of $\gamma (\ell_1 \lVert z \rVert_1 + \sum_g \eta_g \lVert z_g \rVert_2)$ for
+    tree-structured groups."""
     op = TreeL2(groups, group_weights, l1)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def sparse_group_soft_threshold(x, l1=1.0, lam=1.0, gamma=1.0, *, groups=None, group_weights=None,
                                 axis=-1, out=None, threads=0, copy=False):
-    """prox of gamma * (l1 ||z||_1 + lam sum_g c_g ||z_g||_2), one group id per entry."""
+    r"""prox of $\gamma (\ell_1 \lVert z \rVert_1 + \lambda \sum_g c_g \lVert z_g \rVert_2)$,
+    one group id per entry."""
     op = TreeL2.sparse_group(l1, lam, groups, group_weights)
     return _once(op._op, x, gamma, axis, out, threads, copy)
 
 
 def project_tv1d_ball(x, alpha=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=False):
-    """Projection onto {z : sum_i w_i |z_{i+1} - z_i| <= alpha} along the axis."""
+    r"""Projection onto $\{z : \sum_i w_i \lvert z_{i+1} - z_i \rvert \le \alpha\}$ along
+    the axis."""
     return _once(_C.tv1d_ball(float(alpha), _vec(weights)), x, 1.0, axis, out, threads, copy)

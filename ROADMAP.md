@@ -129,7 +129,7 @@ last. The conda-forge and BenchOpt submissions are posted only once their
 text is approved.
 
 - [x] API review before the freeze (2026-10-19): the C header exports exactly its 53 `fp_*` functions (C++ symbols hidden), its handles are opaque, and new options go through new functions such as the workspace setters (spec Section 9), so 1.x can grow without touching a struct. Changed: `fp_op_log` is `fp_op_log_penalty` (next to `fp_op_log_barrier`, and as Python's `LogPenalty`); the device comment now reserves the other values for 1.x. Kept: the Python names (`soft_threshold`, `project_simplex`, `prox_linf`, `tv1d`, ...), each clear on its own, rather than aliases and deprecations for a single pattern
-- [ ] Documentation: a site built with MkDocs Material from the Markdown in `docs/` and the examples, the Python reference from the docstrings (mkdocstrings), deployed to GitHub Pages by a workflow on each release
+- [~] Documentation: a site built with MkDocs Material from the Markdown in `docs/` and the examples, the Python reference from the docstrings (mkdocstrings), deployed to GitHub Pages by a workflow on each release — Built (2026-10-19): `mkdocs.yml`, the README, changelog and roadmap included with their links rewritten and the examples page made from `examples/README.md` (`docs/hooks/include.py`), formulas in LaTeX (KaTeX) in `docs/api.md` and the docstrings, `docs.yml` building strictly on every pull request. Open: GitHub Pages enabled for the repository (source: GitHub Actions) and the first deployment
 - [ ] PyProximal adapter (`ProxOperator` subclass)
 - [ ] conda-forge packages for the C library and the Python package
 - [ ] BenchOpt solvers for TV-1D and TV-2D, and a new simplex-projection benchmark

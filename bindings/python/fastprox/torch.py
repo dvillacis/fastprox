@@ -38,14 +38,14 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    """prox_{gamma g}(x) as a differentiable tensor. ``gamma`` may be a tensor
+    r"""$\operatorname{prox}_{\gamma g}(x)$ as a differentiable tensor. ``gamma`` may be a tensor
     (0-d) that requires grad; ``axis`` (row operators), ``tol`` and
     ``max_iter`` (iterative operators) are passed on when given."""
     return _apply(op, x, gamma, False, axis, threads, tol, max_iter, params)
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    """prox_{sigma g*}(y) as a differentiable tensor (Moreau's identity);
+    r"""$\operatorname{prox}_{\sigma g^*}(y)$ as a differentiable tensor (Moreau's identity);
     ``sigma`` as ``gamma`` in :func:`prox`."""
     return _apply(op, y, sigma, True, axis, threads, tol, max_iter, params)
 
@@ -127,21 +127,21 @@ class _Prox(torch.autograd.Function):
 
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, max_iter=1000,
            warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
-    """Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
+    r"""Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, computed in tensor operations on ``x``'s device and differentiable
     in ``x``, ``gamma`` and ``weights`` (tensors that require grad), forward
     and reverse. ``gamma`` is a number or one step per image: a tensor that
     broadcasts to the batch shape ``x.shape[:-ndim]``. Each image stops when its duality gap is at most
-    ``tol * |x|^2 / 2``. ``warm_start`` takes the ``dual`` of an earlier
+    $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape), the C kernel's form). With
     ``return_info=True`` returns ``(z, info)``, an :class:`IterInfo` whose
     ``dual`` is a tensor. The derivatives are the C kernel's: one unknown per
     flat region, solved by conjugate gradients to relative residual
     ``deriv_tol``; by default each image's solve stops at the relative error
-    of z that its gap certifies, sqrt(2 gap) / |x|, and at max(1e-10,
-    100 eps) at the tightest. ``pixel_weights`` (since 0.3): alpha >= 0 in
-    gamma sum_p alpha_p |(w D z)_p|, a tensor that broadcasts to x.shape (one
-    map for every image, or one per image, e.g. predicted by a network),
+    of $z$ that its gap certifies, $\sqrt{2\,\mathrm{gap}} / \lVert x \rVert_2$, and at
+    $\max(10^{-10}, 100\,\varepsilon)$ at the tightest. ``pixel_weights`` (since
+    0.3): $\alpha \ge 0$ in $\gamma \sum_p \alpha_p \lVert (w D z)_p \rVert_2$, a
+    tensor that broadcasts to x.shape (one map for every image, or one per image, e.g. predicted by a network),
     differentiable like gamma."""
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, pixel_weights)
@@ -149,14 +149,15 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, 
 
 def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=1e-6, max_iter=1000,
              warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
-    """Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`. A plain
+    r"""Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`. A plain
     dual method on the device (the C kernel's exact 1D steps and polish stay
     on the CPU), so tight tolerances take more iterations than ``TVAniso``;
-    the dual is in the C kernel's form (q_a with x - z = sum_a q_a). Its
+    the dual is in the C kernel's form ($q_a$ with $x - z = \sum_a q_a$). Its
     derivatives are exact region averages. ``edge_weights`` (since 0.3):
-    beta >= 0 in gamma sum_a w_a sum_p beta[a, ..., p] |z_{p + e_a} - z_p|, a
-    tensor that broadcasts to (ndim, *x.shape) (beta[a] at the last entry
-    along a unused), differentiable like gamma."""
+    $\beta \ge 0$ in
+    $\gamma \sum_a w_a \sum_p \beta[a, \dots, p] \lvert z_{p + e_a} - z_p \rvert$, a
+    tensor that broadcasts to (ndim, *x.shape) ($\beta[a]$ at the last entry
+    along $a$ unused), differentiable like gamma."""
     return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, edge_weights)
 

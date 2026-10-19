@@ -123,6 +123,9 @@ them but has one side only).
 
 ## Documentation
 
+The documentation site is at <https://dvillacis.github.io/fastprox/>; its
+pages are also in the repository:
+
 - [API reference](https://github.com/dvillacis/fastprox/blob/master/docs/api.md), for C and Python
 - [Examples](https://github.com/dvillacis/fastprox/tree/master/examples): 1D and image denoising, proximal gradient, sparse
   recovery, group sparsity, the weighted graphical lasso, derivatives,

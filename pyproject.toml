@@ -29,7 +29,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/dvillacis/fastprox"
-Documentation = "https://github.com/dvillacis/fastprox/blob/master/docs/api.md"
+Documentation = "https://dvillacis.github.io/fastprox/"
 Changelog = "https://github.com/dvillacis/fastprox/blob/master/CHANGELOG.md"
 Issues = "https://github.com/dvillacis/fastprox/issues"
 
@@ -43,6 +43,9 @@ ref = [
     "cvxpy>=1.9.3",
 ]
 interop = ["torch>=2.4", "jax>=0.4.34"]
+# The documentation site (mkdocs.yml); mkdocstrings reads the package statically.
+# MkDocs 2 drops the plugins Material and mkdocstrings need.
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

@@ -84,3 +84,11 @@ def test_autodiff_frameworks_learn():
     ex = _load("autodiff_frameworks")
     assert found == ex.JUMPS and after < before / 3
     assert abs(gamma / best - 1) < 0.1           # grid spacing is 7%
+
+
+def test_every_example_is_listed():
+    """examples/README.md's table lists every script: the documentation
+    site builds its examples page from it (docs/hooks/include.py)."""
+    table = (DIR / "README.md").read_text(encoding="utf-8")
+    missing = [p.name for p in EXAMPLES if f"| [{p.name}]({p.name}) |" not in table]
+    assert not missing
