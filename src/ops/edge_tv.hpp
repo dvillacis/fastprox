@@ -166,7 +166,12 @@ struct Base : ImageOp<D> {
     }
 
     // Regions of the solution zv into c.save; deg (n doubles) and uf (n) are scratch.
-    void structure(const double *d, const double *zv, double *deg, int32_t *uf, ImageCall &c) const noexcept {
+    // With side (since 0.4; one per edge, with the edge flows), an edge at a
+    // kink within stol, its jump within stol of 0 and its flow within stol of
+    // its capacity, is joined for side -1 and kept apart for +1 with the
+    // flow's sign (f_e = gamma w_e sign(z_u - z_v) across a jump).
+    void structure(const double *d, const double *zv, double *deg, int32_t *uf, ImageCall &c,
+                   const int8_t *side = nullptr, double stol = 0.0, const double *flow = nullptr) const noexcept {
         const View v = view(c.save);
         const double gamma = c.gamma;
         // Values are means of x plus boundary terms, within a few ulps of
@@ -182,9 +187,18 @@ struct Base : ImageOp<D> {
         double dmax = 0.0;
         for (int64_t i = 0; i < n; ++i) dmax = std::max(dmax, deg[i]);
         const double tau = 64.0 * kEps * (scale + dmax);
+        auto forced = [&](int64_t e) {  // the side at a kink, else 0
+            if (!side || side[e] == 0) return 0;
+            const double cap = gamma * we(e);
+            const bool kink = cap > 0.0 && std::fabs(zv[eu[e]] - zv[ev[e]]) <= stol && std::fabs(flow[e]) >= cap - stol;
+            return kink ? static_cast<int>(side[e]) : 0;
+        };
         for (int64_t i = 0; i < n; ++i) uf[i] = static_cast<int32_t>(i);
-        for (int64_t e = 0; e < m; ++e)
-            if (gamma * we(e) > 0.0 && std::fabs(zv[eu[e]] - zv[ev[e]]) <= tau) unite(uf, eu[e], ev[e]);
+        for (int64_t e = 0; e < m; ++e) {
+            const int f = forced(e);
+            if (f < 0 || (f == 0 && gamma * we(e) > 0.0 && std::fabs(zv[eu[e]] - zv[ev[e]]) <= tau))
+                unite(uf, eu[e], ev[e]);
+        }
         int64_t nr = 0;
         for (int64_t i = 0; i < n; ++i) {
             const int32_t r = find(uf, static_cast<int32_t>(i));
@@ -197,6 +211,7 @@ struct Base : ImageOp<D> {
             const int32_t a = v.label[eu[e]], bb = v.label[ev[e]];
             const double dz = zv[eu[e]] - zv[ev[e]];
             v.sgn[e] = a == bb ? 0 : (dz > 0.0 ? 1 : (dz < 0.0 ? -1 : 0));
+            if (a != bb && forced(e) > 0) v.sgn[e] = flow[e] > 0.0 ? 1 : (flow[e] < 0.0 ? -1 : 0);
         }
         *v.nreg = nr;
     }

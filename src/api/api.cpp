@@ -202,7 +202,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.dparams.resize(static_cast<size_t>(P) + 1);
             w.deriv_res.resize(static_cast<size_t>(B));
             w.deriv_its.resize(static_cast<size_t>(B));
-            if (op.has_branches()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
+            if (op.has_branches())
+                w.branch.resize(static_cast<size_t>(std::max(w.numel, B * op.kink_sites())) + 1);
         }
         return FP_OK;
     }
@@ -412,8 +413,9 @@ fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool b
     if (!aa) return FP_OK;
     if (fp_status s = to_arr(aa, *a, true)) return s;
     if (a->ndim != ws->ndim) return FP_ESHAPE;
+    const int64_t sites = ws->op->kink_sites();  // tree TV: (..., m) rather than x's shape
     for (int d = 0; d < a->ndim; ++d)
-        if (a->shape[d] != ws->shape[d]) return FP_ESHAPE;
+        if (a->shape[d] != (sites && d == a->ndim - 1 ? sites : ws->shape[d])) return FP_ESHAPE;
     return FP_OK;
 }
 
@@ -451,8 +453,9 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
                 zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
             }
             const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
+            const int64_t S = op.kink_sites() ? op.kink_sites() : N;  // sides per image
             op.branch_image(ws.image_struct(r), xb.data(), zb.data(), dual, ishape, ws.gamma, t,
-                            side ? side + r * N : nullptr, ws.image_set(0) + image_staging_bytes(N));
+                            side ? side + r * S : nullptr, ws.image_set(0) + image_staging_bytes(N));
         }
         return;
     }

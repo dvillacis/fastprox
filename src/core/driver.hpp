@@ -446,8 +446,12 @@ template <class T>
 int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const Arr *mask) {
     const int64_t cstr[FP_MAX_NDIM] = {};
     const int64_t *st[1] = {mask ? mask->strides : cstr};
-    const ImagePlan p = make_image_plan(ws.ndim, ws.shape, op.image_ndim(), 1, st);
-    const int64_t N = p.numel;
+    // The mask's shape: x's, or with kink_sites() along the last axis.
+    int64_t mshape[FP_MAX_NDIM];
+    for (int d = 0; d < ws.ndim; ++d) mshape[d] = ws.shape[d];
+    if (op.kink_sites()) mshape[ws.ndim - 1] = op.kink_sites();
+    const ImagePlan p = make_image_plan(ws.ndim, mshape, op.image_ndim(), 1, st);
+    const int64_t N = ws.image_numel, M = p.numel;
     const int k = p.k;
     const double t = ws.conj ? tol / ws.sigma : tol;
     int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
@@ -457,7 +461,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
     // count flagged entries from them.
     std::vector<int8_t> scratch;
     if (!md) {
-        scratch.resize(static_cast<size_t>(N));
+        scratch.resize(static_cast<size_t>(M));
         int64_t s = 1;
         for (int a = k - 1; a >= 0; --a) {
             ms[a] = s;
@@ -465,6 +469,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
         }
     }
     std::vector<double> xb(static_cast<size_t>(N)), zb(static_cast<size_t>(N));
+    std::vector<std::max_align_t> work(op.image_bytes(ws.shape + p.nlead) / sizeof(std::max_align_t) + 2);
     int64_t count = 0;
     for (int64_t r = 0; r < p.images; ++r) {
         const T *xs = ws.xs<T>() + r * N, *zs = ws.zs<T>() + r * N;
@@ -476,7 +481,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
         p.offsets(r, off);
         const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
         count += op.kink_image(xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.gamma, t,
-                               md ? md + off[0] : scratch.data(), ms);
+                               md ? md + off[0] : scratch.data(), ms, reinterpret_cast<char *>(work.data()));
     }
     return count;
 }

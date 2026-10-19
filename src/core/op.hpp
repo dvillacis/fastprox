@@ -151,11 +151,15 @@ struct fp_op {
     // saved input x and solution z (in double) and, for images, the dual of
     // the call: codes into mask (one per entry, at the given strides, the
     // image's axes for kink_image; never null for kink_image); returns the
-    // number of flagged entries.
+    // number of flagged entries. kink_image gets image_bytes(shape) of work.
     virtual int64_t kink_row(const double *, const double *, int64_t, double, double, int8_t *, int64_t,
                              void *) const noexcept { return 0; }
     virtual int64_t kink_image(const double *, const double *, const double *, const int64_t *, double,
-                               double, int8_t *, const int64_t *) const noexcept { return 0; }
+                               double, int8_t *, const int64_t *, char *) const noexcept { return 0; }
+    // Kink sites per image when they are not the image's entries (since 0.4):
+    // tree TV's m edges, so that its masks and sides have the shape of x with
+    // the last axis of length m. 0: one site per entry.
+    virtual int64_t kink_sites() const noexcept { return 0; }
     // Branch overrides (fp_workspace_set_branch): elementwise operators with
     // kinks, and since 0.3 the row and image operators that implement them.
     virtual bool has_branches() const noexcept { return elementwise() && has_kinks(); }

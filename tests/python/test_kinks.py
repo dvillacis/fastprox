@@ -500,3 +500,54 @@ def test_group_l2_kinks():
     np.testing.assert_allclose(_one_sided(op, x, -g0, -1), 0.0, atol=1e-15)
     # The default is the killed group, as before.
     np.testing.assert_allclose(op.jvp(ctx, g0), 0.0, atol=1e-15)
+
+
+# ---- tree TV: kinks are edges (since 0.4) ----------------------------------
+
+
+def test_tree_tv_edge_kinks():
+    """x = (2, -1, 5) on the chain 0-1-2 with gamma w = 1: nodes 0 and 1 meet
+    at 1, (2 - 1 + 1) / 2 with the push from the jump on edge (1, 2), and the
+    flow on edge (0, 1) is x_0 - z_0 = 1, at its bound: a kink. -1 joins the kink's ends (moving them apart is not first order),
+    +1 keeps them apart; masks and branches are shaped (..., m)."""
+    op = fp.TreeTV(3, np.array([[0, 1], [1, 2]]))
+    x = np.array([2.0, -1.0, 5.0])
+    z, ctx = op.prox(x, 1.0, keep=True)
+    np.testing.assert_allclose(z, [1.0, 1.0, 4.0])
+    assert ctx.kinks(1e-12).tolist() == [1, 0]
+    apart, joined = np.array([1.0, -1.0, 0.0]), np.array([-1.0, 1.0, 0.0])
+    np.testing.assert_allclose(_one_sided(op, x, apart, 1), apart, atol=1e-12)
+    np.testing.assert_allclose(_one_sided(op, x, joined, -1), 0.0, atol=1e-12)
+    # The default joins, as before; a cleared override restores it.
+    dz0 = op.jvp(ctx, apart)
+    np.testing.assert_allclose(dz0, 0.0, atol=1e-15)
+    op.jvp(ctx, apart, branch=np.array([1, 0], np.int8), kink_tol=1e-12)
+    np.testing.assert_array_equal(op.jvp(ctx, apart), dz0)
+    # Batched, along the edges: a second row without kinks.
+    X = np.stack([x, [3.0, 0.0, -3.0]])
+    _, ctx = op.prox(X, 1.0, keep=True)
+    assert ctx.kinks(1e-12).tolist() == [[1, 0], [0, 0]]
+    b = np.array([[1, 0], [0, 0]], np.int8)
+    jv = op.jvp(ctx, np.stack([apart, apart]), branch=b, kink_tol=1e-12)
+    np.testing.assert_allclose(jv[0], apart, atol=1e-12)
+    with pytest.raises(ValueError):
+        op.jvp(ctx, np.stack([apart, apart]), branch=np.zeros((2, 3), np.int8))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_tree_tv_restore_is_default(dtype):
+    """A cleared override gives back the prox call's own derivatives, bit for
+    bit, also in float32 where the structure is rebuilt from the rounded z."""
+    rng = np.random.default_rng(5)
+    n = 200
+    par = rng.integers(0, np.arange(1, n))  # a random tree
+    op = fp.TreeTV(n, np.stack([np.arange(1, n), par], 1))
+    X = (np.round(2 * rng.normal(size=(3, n))) / 2).astype(dtype)  # halves at gamma 1/2: many kinks
+    _, ctx = op.prox(X, 0.5, keep=True)
+    d = rng.normal(size=X.shape).astype(dtype)
+    before = op.jvp(ctx, d)
+    k = ctx.kinks(1e-5)
+    assert (k != 0).sum() > 10
+    split = op.jvp(ctx, d, branch=np.where(k != 0, 1, 0).astype(np.int8), kink_tol=1e-5)
+    assert np.abs(split - before).max() > 0.1
+    np.testing.assert_array_equal(op.jvp(ctx, d), before)
