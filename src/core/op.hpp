@@ -12,6 +12,7 @@
 
 #include "fastprox.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -179,6 +180,16 @@ struct fp_op {
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
+
+    // The value g(x) (since 1.0, fp_value), in double: of one row of length n
+    // (elementwise and row operators) or one image of the
+    // given shape (image operators). The indicator of a set is 0 when x lies
+    // in it up to atol = tol * max(1, max |x_i|) and INFINITY otherwise. scr has
+// value_doubles(n) doubles.
+    virtual bool has_value() const noexcept { return false; }
+    virtual int64_t value_doubles(int64_t n) const noexcept { return n; }  // scr's length
+    virtual double value_row(const double *, int64_t, double, double *) const noexcept { return 0.0; }
+    virtual double value_image(const double *, const int64_t *, double) const noexcept { return 0.0; }
     // 1D TV only: the row prox with edge weights given per call (n of them,
     // the last 0), for image operators with weights per edge.
     virtual int prox_edges(const double *, double *, int64_t, double, const double *, void *) const noexcept {
@@ -241,6 +252,17 @@ namespace fp {
 // Per-entry evaluation of an elementwise operator D: the tie-aware form
 // (D::kTies, nonconvex maps) takes the tie rule and reports a tie; the plain
 // form ignores both.
+// atol of a set's indicator for the row x (see fp_op::value_row).
+inline double value_atol(const double *x, int64_t n, double tol) noexcept {
+    double m = 1.0;
+    for (int64_t i = 0; i < n; ++i) m = std::max(m, std::fabs(x[i]));
+    return tol * m;
+}
+// 0 when the violation is within atol, else INFINITY.
+inline double indicator(double violation, double atol) noexcept {
+    return violation <= atol ? 0.0 : std::numeric_limits<double>::infinity();
+}
+
 template <class D>
 struct ElemCall {
     template <class T>
@@ -272,6 +294,17 @@ struct ElemOp : fp_op {
     bool elementwise() const noexcept override { return true; }
     bool has_ties() const noexcept override { return D::kTies; }
     bool has_kinks() const noexcept override { return D::kKinks; }
+
+    // g(x) = sum_i of D's value1(x_i, i, atol), the term of entry i (atol for
+    // the indicators of sets, see fp_op::value_row).
+    bool has_value() const noexcept override { return true; }
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        const D &d = static_cast<const D &>(*this);
+        const double atol = value_atol(x, n, tol);
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += d.value1(x[i], i, atol);
+        return s;
+    }
 
     // The derivative used at entry x: the default rule, or with a side
     // override at a flagged entry the piece on that side of its breakpoint

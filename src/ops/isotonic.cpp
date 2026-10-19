@@ -32,6 +32,14 @@ struct Isotonic final : RowOp<Isotonic> {
     }
     double wi(int64_t i) const noexcept { return w.empty() ? 1.0 : w[i]; }
 
+    bool has_value() const noexcept override { return true; }
+    // The indicator of the monotone cone.
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        double v = 0.0;
+        for (int64_t i = 0; i + 1 < n; ++i) v = std::max(v, increasing ? x[i] - x[i + 1] : x[i + 1] - x[i]);
+        return indicator(v, value_atol(x, n, tol));
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
         bool nan;

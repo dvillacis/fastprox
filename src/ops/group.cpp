@@ -60,6 +60,17 @@ struct GroupL2 final : RowOp<GroupL2> {
     // Saved structure (since 0.3): code[i] = 1 when entry i's group is live,
     // ||x_g|| > tau_g, read by the derivatives so that a branch override can
     // set it (fp_workspace_set_branch).
+    bool has_value() const noexcept override { return true; }
+    int64_t value_doubles(int64_t n) const noexcept override { return n > G ? n : G; }
+    // lambda sum_g c_g ||x_g||; scr holds the G squared norms (G <= n).
+    double value_row(const double *x, int64_t n, double, double *scr) const noexcept override {
+        for (int64_t g = 0; g < G; ++g) scr[g] = 0.0;
+        for (int64_t i = 0; i < n; ++i) scr[group(i)] += x[i] * x[i];
+        double s = 0.0;
+        for (int64_t g = 0; g < G; ++g) s += c[ci(g)] * std::sqrt(scr[g]);
+        return lambda * s;
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
         double *scale = static_cast<double *>(scr);
@@ -242,6 +253,20 @@ struct TreeL2 final : RowOp<TreeL2> {
         double q = 0.0;
         for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) q += w[idx[k]] * w[idx[k]];
         return std::sqrt(q);
+    }
+
+    bool has_value() const noexcept override { return true; }
+    // l1 ||x||_1 + sum_g eta_g ||x_g||, each group over its listed entries.
+    double value_row(const double *x, int64_t n, double, double *) const noexcept override {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += std::fabs(x[i]);
+        s *= l1;
+        for (int64_t g = 0; g < G; ++g) {
+            double q = 0.0;
+            for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) q += x[idx[k]] * x[idx[k]];
+            s += eta[ei(g)] * std::sqrt(q);
+        }
+        return s;
     }
 
     template <class T>

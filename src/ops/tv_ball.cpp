@@ -114,6 +114,14 @@ struct TVBall final : RowOp<TVBall> {
         return gm;
     }
 
+    bool has_value() const noexcept override { return true; }
+    // The indicator of sum_e w_e |x_{e+1} - x_e| <= alpha.
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        double s = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) s += we(e) * std::fabs(x[e + 1] - x[e]);
+        return indicator(s - alpha, value_atol(x, n, tol));
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
         char *base = static_cast<char *>(scr);

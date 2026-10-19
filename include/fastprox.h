@@ -455,6 +455,19 @@ FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws,
                         const fp_array *g, fp_array *gx, double *ggamma,
                         fp_array *gparams);
 
+/* The value g(x) (since 1.0): one value per row along opt->axis, or per image
+ * for the image operators, written to out (FP_F64, x's shape without the
+ * axis or without the image axes; ndim 0 for a single row or image). A
+ * row or image with a NaN gives NaN. The indicator of a set (the
+ * projections: box, nonnegative orthant, balls, simplex, hyperplane and
+ * half-space with their box, second-order cone, monotone cone, 1D TV ball)
+ * is 0 when x lies in the set up to opt->tol * max(1, max |x_i|) of each
+ * constraint's violation and INFINITY otherwise; l1 over a box and the log
+ * barrier add INFINITY outside their domain. Uses opt->axis and opt->tol
+ * only. With the step gamma, prox_{gamma g}(x) minimises g(z) +
+ * ||z - x||^2 / (2 gamma). */
+FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out);
+
 FP_API const char *fp_strerror(fp_status s);
 FP_API int         fp_abi_version(void);
 FP_API const char *fp_version_string(void);

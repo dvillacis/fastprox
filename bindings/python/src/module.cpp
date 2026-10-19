@@ -377,6 +377,17 @@ NB_MODULE(_fastprox, m) {
             check(fp_workspace_set_branch(ws.p, nullptr, tol));
         }
     }, "ws"_a, "side"_a.none(), "tol"_a);
+    m.def("value", [](const Op &op, const InArr &x, OutArr &out, int axis, double tol) {
+        const fp_array xa = view(x);
+        fp_array oa = view(out);
+        const fp_options o = options(axis, 1, false, tol);
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_value(op.p, &xa, &o, &oa);
+        }
+        check(s);
+    }, "op"_a, "x"_a, "out"_a, "axis"_a, "tol"_a);
     m.def("workspace", &workspace, "op"_a, "like"_a, "axis"_a, "threads"_a, "keep"_a,
           nb::keep_alive<0, 1>());
     m.def("jvp", &jvp, "op"_a, "ws"_a, "dx"_a.none(), "dgamma"_a, "dparams"_a.none(), "dout"_a);

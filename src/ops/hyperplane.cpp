@@ -263,6 +263,20 @@ struct HyperBox final : RowOp<HyperBox> {
     // The row in double and the breakpoints.
     size_t scratch_bytes(int64_t n) const noexcept override { return 3 * static_cast<size_t>(n) * sizeof(double); }
 
+    bool has_value() const noexcept override { return true; }
+    // The indicator of a^T x = b (or <=) and lo <= x <= hi; the plane's
+    // violation in its normalised form (max |a_i| = 1).
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        const Plane p = plane();
+        double s = 0.0, v = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            s += p.A(i) * x[i];
+            v = std::max(v, std::max(p.L(i) - x[i], x[i] - p.H(i)));
+        }
+        v = std::max(v, ineq ? s - p.b : std::fabs(s - p.b));
+        return indicator(v, value_atol(x, n, tol));
+    }
+
     template <class T>
     int prox(const T *xin, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
         double *x = static_cast<double *>(scr);
@@ -369,6 +383,17 @@ struct SumLargest final : RowOp<SumLargest> {
     fp_status check_n(int64_t n) const noexcept override { return absolute || k <= n ? FP_OK : FP_EPARAM; }
     // The row (|x| for the absolute values), the projection, the breakpoints.
     size_t scratch_bytes(int64_t n) const noexcept override { return 4 * static_cast<size_t>(n) * sizeof(double); }
+
+    bool has_value() const noexcept override { return true; }
+    // lambda times the sum of the k largest x_i (|x_i| when absolute); scr: n.
+    double value_row(const double *x, int64_t n, double, double *scr) const noexcept override {
+        for (int64_t i = 0; i < n; ++i) scr[i] = absolute ? std::fabs(x[i]) : x[i];
+        const int64_t m = std::min(k, n);
+        std::nth_element(scr, scr + (n - m), scr + n);
+        double s = 0.0;
+        for (int64_t i = n - m; i < n; ++i) s += scr[i];
+        return lambda * s;
+    }
 
     template <class T>
     int prox(const T *xin, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {

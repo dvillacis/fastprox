@@ -214,6 +214,27 @@ struct TVAniso final : ImageOp<TVAniso> {
         int32_t *label, *cnt, *parent;
     };
 
+    // sum_a w_a sum_p beta_{a,p} |x_{p+e_a} - x_p| over the forward neighbours.
+    bool has_value() const noexcept override { return true; }
+    double value_image(const double *x, const int64_t *shape, double) const noexcept override {
+        int64_t stride[3], N = 1;
+        for (int a = k - 1; a >= 0; --a) {
+            stride[a] = N;
+            N *= shape[a];
+        }
+        double s = 0.0;
+        for (int a = 0; a < k; ++a) {
+            double sa = 0.0;
+            for (int64_t p = 0; p < N; ++p) {
+                if ((p / stride[a]) % shape[a] == shape[a] - 1) continue;  // last along a
+                const double d = std::fabs(x[p + stride[a]] - x[p]);
+                sa += beta.empty() ? d : beta[static_cast<size_t>(a * N + p)] * d;
+            }
+            s += w[a] * sa;
+        }
+        return s;
+    }
+
     template <class T>
     int prox_img(const T *x, T *z, ImageCall &c) const noexcept {
         const Geom g(k, c.shape);

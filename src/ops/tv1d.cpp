@@ -448,6 +448,13 @@ struct TV1D final : RowOp<TV1D> {
         taut_string(x, z, m, [rp](int64_t e) { return rp[e]; }, code, scr);
     }
 
+    bool has_value() const noexcept override { return true; }
+    double value_row(const double *x, int64_t n, double, double *) const noexcept override {
+        double s = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) s += we(e) * std::fabs(x[e + 1] - x[e]);
+        return s;
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
         double lo, hi;

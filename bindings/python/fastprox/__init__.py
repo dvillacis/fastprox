@@ -269,6 +269,27 @@ class Operator:
         r"""$\operatorname{prox}_{\gamma g}(x)$. With ``keep=True`` returns ``(z, ctx)``."""
         return self._run(x, gamma, axis, out, threads, keep, ctx, copy, conj=False)
 
+    def value(self, x, *, axis=-1, tol=1e-6):
+        r"""The value $g(x)$ (since 1.0): one per row along ``axis`` (per image
+        for the image operators), a float for a single row or else an array
+        of the batch shape. The indicator of a set is 0 when $x$ lies in it,
+        each constraint violated by at most
+        $\mathrm{tol} \cdot \max(1, \max_i \lvert x_i \rvert)$, and ``inf``
+        otherwise; a row with a NaN gives NaN."""
+        x = _input(x, True)
+        out = np.empty(self._batch_shape(x.shape, axis), np.float64)
+        _C.value(self._op, x, out, axis, float(tol))
+        return float(out) if out.ndim == 0 else out
+
+    def _batch_shape(self, shape, axis):
+        if not shape:
+            return ()
+        a = operator.index(axis)
+        if not -len(shape) <= a < len(shape):
+            raise ValueError(f"axis {axis} out of range for {len(shape)} dimensions")
+        a %= len(shape)
+        return shape[:a] + shape[a + 1:]
+
     def prox_conj(self, y, sigma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
                   copy=False):
         r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
@@ -723,6 +744,11 @@ class _ImageOperator(Operator):
         super().__init__(handle)
         self.ndim = int(ndim)
         self._layout = [("weights", self.ndim, False)]  # one gradient per axis
+
+    def _batch_shape(self, shape, axis):
+        if len(shape) < self.ndim:
+            raise ValueError(f"{type(self).__name__} needs at least {self.ndim} axes")
+        return shape[:len(shape) - self.ndim]
 
     def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
              tol=1e-6, max_iter=1000, warm_start=None, warm=False):

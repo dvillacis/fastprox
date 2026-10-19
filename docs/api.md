@@ -714,6 +714,27 @@ double residual; int iters;
 fp_workspace_deriv_info(ws, &residual, &iters);  /* worst over the batch, last call */
 ```
 
+### Values (*since 1.0*)
+
+`fp_value(op, x, opt, out)` writes $g(x)$ into `out` (`FP_F64`), one
+value per row along `opt->axis`, or one per image for the image operators
+(anisotropic and isotropic TV, graph and tree TV). The shape of `out` is the
+shape of $x$ without the axis, or without the image axes; it has `ndim` 0
+for a single row or image. A row or image containing a NaN gives NaN.
+
+The projections give the indicator of their set. The value is 0 when every
+constraint of the set is violated by at most
+$\mathrm{tol} \cdot \max(1, \max_i \lvert x_i \rvert)$, with
+$\mathrm{tol}$ = `opt->tol`, and `INFINITY` otherwise. This tolerance
+absorbs the rounding of the projections' own outputs. $\ell_1$ over a box and
+the log barrier are `INFINITY` outside their domain. Only `opt->axis` and
+`opt->tol` are read. In Python, `op.value(x, axis=-1, tol=1e-6)` returns a
+float for one row or image, else an array of the batch shape.
+
+With the step $\gamma$, $z = \operatorname{prox}_{\gamma g}(x)$ minimises
+$g(y) + \lVert y - x \rVert_2^2 / (2\gamma)$. `tests/python/test_value.py`
+checks every operator's value against its prox this way.
+
 ### Conjugates
 
 `fp_prox_conj(op, σ, y, out, ...)` computes
@@ -781,6 +802,7 @@ z, ctx = op.prox(x, 0.5, keep=True)             # ctx: saved structure
 dz = op.jvp(ctx, dx=np.ones_like(x), dgamma=0.0, dparams={"weights": 1.0})
 gx, grads = op.vjp(ctx, g=np.ones_like(x))      # grads.gamma, grads.weights, grads.params
 y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
+g = op.value(z)                                 # g(z) per row (since 1.0)
 
 # Nonconvex maps (since 0.2): ties at thresholds follow tie= and are counted.
 zq = fp.lq(x, lam=0.1, q=0.5, gamma=1.0, tie="nonzero")

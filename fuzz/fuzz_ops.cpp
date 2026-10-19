@@ -426,6 +426,25 @@ void run(const uint8_t *data, size_t size) {
     const fp_status s4 = prox(c.op, gamma, &x, &o4, &o, nullptr, nullptr);
     if (!valid_status(s1) || s1 != s4) fail("prox status");
     const bool written = s1 == FP_OK || s1 == FP_ENOTCONV;  // ENOTCONV still writes the iterate
+
+    // The value (since 1.0), into x's shape without the axis: a row
+    // operator's batch shape (an image operator usually answers FP_ESHAPE).
+    {
+        const int ax = ndim ? (axis + ndim) % ndim : 0;
+        int64_t vshape[3], vn = 1;
+        int vnd = 0;
+        for (int d = 0; d < ndim; ++d)
+            if (d != ax) {
+                vshape[vnd++] = shape[d];
+                vn *= shape[d];
+            }
+        std::vector<double> vals(static_cast<size_t>(vn) + 1);
+        fp_array va{vals.data(), FP_F64, vnd, vshape, nullptr, FP_DEVICE_CPU};
+        o.tol = b.u8() % 2 ? 1e-6 : std::fabs(b.value());
+        const fp_status vs = fp_value(c.op, &x, &o, &va);
+        if (!valid_status(vs)) fail("value status");
+        o.tol = 1e-6;
+    }
     if (written && std::memcmp(z1.data(), z4.data(), static_cast<size_t>(numel) * item) != 0)
         fail("thread count changed the result");
 

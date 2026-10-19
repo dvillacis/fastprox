@@ -419,6 +419,88 @@ fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool b
     return FP_OK;
 }
 
+// g(x) per row (along the axis) or per image (the last image_ndim axes), one
+// value per batch entry in out (since 1.0). Rows run in C order over the
+// batch axes, so row r writes out at the C-order index r of its shape.
+template <class T>
+void value_driver(const fp_op &op, const Arr &x, int axis, double tol, const Arr &out) {
+    const int k = op.image_ndim();
+    const int64_t *st[1] = {x.strides};
+    double *od = reinterpret_cast<double *>(out.data);
+    auto out_at = [&](int64_t r) {  // out's element r in C order
+        int64_t o = 0;
+        for (int d = out.ndim - 1; d >= 0; --d) {
+            o += (r % out.shape[d]) * out.strides[d];
+            r /= out.shape[d];
+        }
+        return o;
+    };
+    const T *xd = reinterpret_cast<const T *>(x.data);
+    auto any_nan = [](const std::vector<double> &v) {
+        for (double a : v)
+            if (std::isnan(a)) return true;
+        return false;
+    };
+    if (k) {
+        const ImagePlan p = make_image_plan(x.ndim, x.shape, k, 1, st);
+        std::vector<double> xb(static_cast<size_t>(p.numel));
+        for (int64_t r = 0; r < p.images; ++r) {
+            int64_t off[1];
+            p.offsets(r, off);
+            p.for_each(0, [&](int64_t i, int64_t o) { xb[static_cast<size_t>(i)] = static_cast<double>(xd[off[0] + o]); });
+            od[out_at(r)] = any_nan(xb) ? std::numeric_limits<double>::quiet_NaN()
+                                        : op.value_image(xb.data(), x.shape + p.nlead, tol);
+        }
+        return;
+    }
+    const RowPlan p = make_row_plan(x.ndim, x.shape, axis, 1, st);
+    const int64_t n = p.n;
+    std::vector<double> xb(static_cast<size_t>(n)), scr(static_cast<size_t>(std::max(n, op.value_doubles(n))) + 1);
+    for (int64_t r = 0; r < p.rows; ++r) {
+        int64_t off[1];
+        p.offsets(r, off);
+        for (int64_t i = 0; i < n; ++i) xb[static_cast<size_t>(i)] = static_cast<double>(xd[off[0] + i * p.astride[0]]);
+        od[out_at(r)] = any_nan(xb) ? std::numeric_limits<double>::quiet_NaN()
+                                    : op.value_row(xb.data(), n, tol, scr.data());
+    }
+}
+
+fp_status value_impl(const fp_op *op, const fp_array *xa, const fp_options *opt, fp_array *oa) {
+    if (!op || !xa || !oa) return FP_EINVAL;
+    if (!op->has_value()) return FP_EINVAL;
+    const fp_options o = opt ? *opt : defaults();
+    if (!(o.tol >= 0.0) || !finite(o.tol)) return FP_EPARAM;
+    Arr x, out;
+    if (fp_status s = to_arr(xa, x)) return s;
+    if (fp_status s = to_arr(oa, out)) return s;
+    if (oa->dtype != FP_F64) return FP_EDTYPE;
+    // The batch shape: x's without the axis (rows) or the image axes.
+    const int k = op->image_ndim();
+    int axis = 0;
+    int64_t bshape[FP_MAX_NDIM];
+    int nb = 0;
+    if (k) {
+        if (xa->ndim < k) return FP_ESHAPE;
+        for (int d = 0; d < xa->ndim - k; ++d) bshape[nb++] = xa->shape[d];
+    } else {
+        if (norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
+        for (int d = 0; d < xa->ndim; ++d)
+            if (d != axis) bshape[nb++] = xa->shape[d];
+    }
+    if (oa->ndim != nb) return FP_ESHAPE;
+    for (int d = 0; d < nb; ++d)
+        if (oa->shape[d] != bshape[d]) return FP_ESHAPE;
+    if (k) {
+        if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
+    } else if (fp_status s = op->check_n(x.shape[axis])) {
+        return s;
+    }
+    if (out.numel() == 0) return FP_OK;
+    if (x.dtype == FP_F32) value_driver<float>(*op, x, axis, o.tol, out);
+    else value_driver<double>(*op, x, axis, o.tol, out);
+    return FP_OK;
+}
+
 fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *count) {
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr m;
@@ -1102,6 +1184,10 @@ FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on) {
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x, fp_array *out,
                          const fp_options *opt, fp_workspace *ws, fp_info *info) {
     return guard([&] { return fp::prox_impl(op, gamma, x, out, opt, ws, info, false); });
+}
+
+FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out) {
+    return guard([&] { return fp::value_impl(op, x, opt, out); });
 }
 
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y, fp_array *out,

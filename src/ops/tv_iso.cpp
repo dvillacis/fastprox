@@ -252,6 +252,28 @@ struct TVIso final : ImageOp<TVIso> {
 
     // ---- prox -------------------------------------------------------------------
 
+    // sum_p alpha_p ||(w_a (x_{p+e_a} - x_p))_a||_2, differences zero past the
+    // last entry along each axis.
+    bool has_value() const noexcept override { return true; }
+    double value_image(const double *x, const int64_t *shape, double) const noexcept override {
+        int64_t stride[3], N = 1;
+        for (int a = k - 1; a >= 0; --a) {
+            stride[a] = N;
+            N *= shape[a];
+        }
+        double s = 0.0;
+        for (int64_t p = 0; p < N; ++p) {
+            double q = 0.0;
+            for (int a = 0; a < k; ++a) {
+                if ((p / stride[a]) % shape[a] == shape[a] - 1) continue;
+                const double d = w[a] * (x[p + stride[a]] - x[p]);
+                q += d * d;
+            }
+            s += (alpha.empty() ? 1.0 : alpha[static_cast<size_t>(p)]) * std::sqrt(q);
+        }
+        return s;
+    }
+
     template <class T>
     int prox_img(const T *x, T *zout, ImageCall &c) const noexcept {
         const Geom g(k, c.shape);
