@@ -1,7 +1,9 @@
 // Graph TV: the prox of gamma sum_e w_e |z_u - z_v| over the edges e = (u, v)
-// of a given graph, by parametric max-flow on the engine of
-// src/maxflow/maxflow.hpp. The signal is the last axis (length n), batched
-// over the others.
+// of a given graph, by parametric max-flow on the EIBFS engine of
+// src/maxflow/eibfs.hpp (since 0.4; the Boykov-Kolmogorov engine of
+// src/maxflow/maxflow.hpp before, still built with -DFASTPROX_GRAPH_BK for
+// comparisons). The signal is the last axis (length n), batched over the
+// others.
 //
 // Levels (A. Chambolle and J. Darbon, "On total variation minimization and
 // surface evolution using parametric maximum flows", IJCV 84(3), 2009,
@@ -18,7 +20,8 @@
 // min 1/2 |z - x|^2 - <b, z> + gamma TV). The maximum flow saturates every
 // such edge from U to L, so deleting the edges and moving each side's
 // terminals by its change of level leaves a feasible flow of the new
-// problems: the next solve continues from the flow and the search trees.
+// problems: the next solve continues from the flow, on the active parts only
+// (EIBFS rebuilds its forests there; BK keeps its search trees).
 //
 // Mean levels (Hochbaum). Inside a part the dual's divergence sums to zero,
 // so the solution has mean m_P = sum_P (x_p + b_p) / |P| there. A part is
@@ -39,6 +42,7 @@
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "maxflow/maxflow.hpp"
+#include "maxflow/eibfs.hpp"
 #include "ops/edge_tv.hpp"
 #include "ops/ops.hpp"
 
@@ -53,7 +57,11 @@ namespace fp {
 namespace {
 
 using maxflow::Index;
+#ifndef FASTPROX_GRAPH_BK
+using MF = maxflow::EIBFS<double>;
+#else
 using MF = maxflow::MaxFlow<double>;
+#endif
 
 using edge_tv::find;
 using edge_tv::kEps;
@@ -279,7 +287,11 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
                 break;
             }
             ++rounds;
+#ifndef FASTPROX_GRAPH_BK
+            mf.solve(act, nact);  // no edge is left between finished parts and active ones
+#else
             mf.solve();
+#endif
             for (int32_t k = 0; k < np; ++k) pa[k].up = 0;
             for (int64_t j = 0; j < nact; ++j) {
                 const int32_t i = act[j];

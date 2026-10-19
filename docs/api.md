@@ -357,8 +357,12 @@ signal, for any thread count; threads go to the batch.
   part is constant at its mean, exactly; otherwise it splits, the edges
   across the cut become fixed terms of the two sides, and each side goes on
   as its connected pieces. All parts are cut in one max-flow solve per round,
-  which starts from the previous round's flow and search trees (the engine
-  in `src/maxflow/`, Boykov and Kolmogorov, TPAMI 26, 2004). A level is
+  which starts from the previous round's flow on the parts still active
+  (since 0.4 the excesses incremental breadth-first search of Goldberg, Hed,
+  Kaplan, Kohli, Tarjan and Werneck, ESA 2015, in `src/maxflow/eibfs.hpp`:
+  augmenting along shortest paths between the excesses and deficits of the
+  flow; before, the Boykov–Kolmogorov engine of `src/maxflow/maxflow.hpp`,
+  1.9–2.7× slower at γ = 0.5 on 512² grids). A level is
   clamped into the middle half of the interval known to hold the part's
   values, so the interval shrinks by at least a quarter per round.
 - **Precision.** A part whose values are known within `tol`·(max x − min x)

@@ -1316,3 +1316,50 @@ the memory, and anisotropic TV's backward is about 90× faster with 1/160 of
 the memory and a smaller error. The host round trip of the batch is 1.1 ms,
 but the C kernel through the host is slow here, on two CPU cores.
 
+## 2026-10-19, Apple M5 Pro: graph TV on EIBFS
+
+`bench/compare_graph_tv.py` (single thread, medians of 3) with graph TV's
+max-flow engine switched from Boykov–Kolmogorov (BK, `src/maxflow/maxflow.hpp`)
+to excesses incremental breadth-first search (EIBFS,
+`src/maxflow/eibfs.hpp`, from Goldberg, Hed, Kaplan, Tarjan and Werneck, ESA
+2011, and Goldberg, Hed, Kaplan, Kohli, Tarjan and Werneck, ESA 2015). Both
+find the same cuts, so the solutions are the same bit for bit; only the flow
+(the dual, and the gap to rounding) differs. Exact solves (`tol=0`), ms,
+EIBFS / BK, with the ratio BK / EIBFS.
+
+| Graph | γ = 0.02 | γ = 0.1 | γ = 0.5 |
+| --- | --- | --- | --- |
+| 256², 4 neighbours | 34.4 / 32.7 (0.95) | 131.6 / 171.1 (1.30) | 268.0 / 487.3 (1.82) |
+| 512², 4 neighbours | 133.2 / 134.8 (1.01) | 636.2 / 787.6 (1.24) | 2244.7 / 4288.0 (1.91) |
+| 256², 8 neighbours | 94.0 / 86.3 (0.92) | 319.7 / 435.6 (1.36) | 480.2 / 1122.9 (2.34) |
+| 512², 8 neighbours | 424.5 / 373.3 (0.88) | 2078.9 / 3951.9 (1.90) | 3343.1 / 8920.2 (2.67) |
+| kNN, 10⁴ points | 11.9 / 12.5 (1.05) | 24.2 / 23.0 (0.95) | 32.6 / 30.2 (0.93) |
+| kNN, 10⁵ points | 134.7 / 147.0 (1.09) | 339.4 / 307.6 (0.91) | 612.7 / 651.9 (1.06) |
+| 256² + 5 hubs | 51.8 / 47.2 (0.91) | 178.5 / 172.0 (0.96) | 440.4 / 832.2 (1.89) |
+
+Stars of 10⁴, 10⁵ and 10⁶ leaves take 2.8, 49.7 and 381.7 ms (BK: 2.5,
+49.5, 422.5); `tol=1e-4` gains the same (512², 8 neighbours, γ = 0.5: 2695
+against 6525 ms). The gain is where the rounds re-route flow through large
+flat regions (the max-flow section above): BK's augmenting paths there run
+35–480 arcs through search trees that are not shortest, while EIBFS augments
+along shortest paths between the excesses and deficits left by the previous
+round. At small γ nearly every node is a root, each augmentation drains one,
+and the relabels of the drained roots cost EIBFS up to 12% more than BK's
+kept trees.
+
+Three choices mattered on 512²: solving on the active parts only (the
+finished ones keep nonzero terminals but no flow can move there; without
+this the reset and the regrowth there made γ = 0.02 1.7× slower than BK),
+growing the forest whose orphans took less adoption work (the rule of ESA
+2015, Section 3; 1.1–1.5× over growing the one with the smaller top level
+at γ ≥ 0.1, up to 9% slower at γ = 0.02),
+and ending an orphan relabel at a neighbour of the least possible label (ESA
+2011, Section 6.1; 5–10%). Trying the old parent first did not help.
+
+Two cheaper alternatives were tried first and dropped. Push-relabel on the
+same pseudoflow (highest label, global relabelling every 6n + m work) was
+20–200× slower than BK on 256²: the many small deficits fill as soon as flow
+reaches them, so the labels go stale and the excess climbs them one step at a
+time (125–280 relabels per node and solve). Cancelling each excess against
+adjacent deficits before every BK solve changed the times by −8% to +3%: the
+excesses and deficits a round has to pair are not neighbours.

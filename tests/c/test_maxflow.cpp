@@ -1,5 +1,6 @@
-// Tests of the max-flow engine (src/maxflow/maxflow.hpp), which is internal
-// and tested here directly. Every solve is checked by a certificate: the
+// Tests of the max-flow engines (src/maxflow/maxflow.hpp, and with
+// FP_TEST_EIBFS src/maxflow/eibfs.hpp, built as test_eibfs), which are
+// internal and tested here directly. Every solve is checked by a certificate: the
 // residuals are a feasible flow with conservation at every node, the source
 // tree equals the set reachable from the source in the residual graph and
 // the sink tree the set that reaches the sink, and the cut of the source
@@ -7,6 +8,7 @@
 // compared with Dinic's algorithm written here. Reuse is checked against a
 // fresh solve of the same residual problem, whose smallest and largest
 // minimum cuts are unique, so the trees must agree node for node.
+#include "maxflow/eibfs.hpp"
 #include "maxflow/maxflow.hpp"
 
 #include <algorithm>
@@ -54,8 +56,15 @@ static int g_fail = 0, g_checks = 0;
 
 using fp::maxflow::Graph;
 using fp::maxflow::Index;
+#ifdef FP_TEST_EIBFS
+template <class T>
+using MF = fp::maxflow::EIBFS<T>;
+constexpr bool kSinkTree = false;  // EIBFS reports the source side only
+#else
 template <class T>
 using MF = fp::maxflow::MaxFlow<T>;
+constexpr bool kSinkTree = true;
+#endif
 
 static std::mt19937_64 rng(2026);
 static int irand(int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); }
@@ -205,7 +214,7 @@ static bool certify(const Graph &g, const MF<T> &mf, const Problem &pb, double f
     double cut = 0;
     for (Index p = 0; p < g.n; ++p) {
         ok &= (mf.tree(p) == MF<T>::kSource) == bool(src[p]);
-        ok &= (mf.tree(p) == MF<T>::kSink) == bool(snk[p]);
+        if (kSinkTree) ok &= (mf.tree(p) == MF<T>::kSink) == bool(snk[p]);
         ok &= !(src[p] && snk[p]);
         if (!src[p] && pb.term[p] > 0) cut += pb.term[p];
         if (src[p] && pb.term[p] < 0) cut -= pb.term[p];
@@ -522,6 +531,42 @@ static void test_levels() {
     }
 }
 
+#ifdef FP_TEST_EIBFS
+// EIBFS's solve on a set of nodes: two disjoint problems, the first solved
+// alone must match a solve of both on its nodes, the second left untouched.
+static void test_subset() {
+    for (int rep = 0; rep < 8; ++rep) {
+        const Problem a = random_problem(300, 1200, 10, true), b = random_problem(200, 800, 10, true);
+        Problem pb = a;
+        for (size_t e = 0; e < b.u.size(); ++e) {
+            pb.u.push_back(b.u[e] + a.n);
+            pb.v.push_back(b.v[e] + a.n);
+            pb.cuv.push_back(b.cuv[e]);
+            pb.cvu.push_back(b.cvu[e]);
+        }
+        pb.term.insert(pb.term.end(), b.term.begin(), b.term.end());
+        pb.n = a.n + b.n;
+        Graph g;
+        build<double>(g, pb);
+        Mem mem(MF<double>::bytes(g)), mem2(MF<double>::bytes(g));
+        MF<double> part(g, mem.data()), full(g, mem2.data());
+        load(part, pb);
+        load(full, pb);
+        std::vector<int32_t> nodes(a.n);
+        for (Index p = 0; p < a.n; ++p) nodes[p] = rep % 2 ? a.n - 1 - p : p;  // any order
+        part.solve(nodes.data(), a.n);
+        full.solve();
+        bool same = true, untouched = true;
+        for (Index p = 0; p < a.n; ++p) same &= part.tree(p) == full.tree(p);
+        for (Index p = a.n; p < pb.n; ++p) untouched &= part.terminal(p) == pb.term[p];
+        for (Index e = Index(a.u.size()); e < g.m; ++e)
+            untouched &= part.residual(g.arc[e]) == pb.cuv[e] && part.residual(g.sister[g.arc[e]]) == pb.cvu[e];
+        CHECK(same);
+        CHECK(untouched);
+    }
+}
+#endif
+
 static void test_build_errors() {
     Graph g;
     const int64_t u[] = {0, 1}, v[] = {1, 1};
@@ -561,6 +606,9 @@ int main() {
     test_grids();
     test_reuse();
     test_levels();
+#ifdef FP_TEST_EIBFS
+    test_subset();
+#endif
     std::printf("%d checks, %d failures\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Graph TV's max-flow engine is excesses incremental breadth-first search (Goldberg, Hed, Kaplan, Kohli, Tarjan and Werneck, ESA 2015), written from the papers in `src/maxflow/eibfs.hpp`, instead of the Boykov–Kolmogorov engine: 1.9–2.7× faster at γ = 0.5 and 1.2–1.9× at γ = 0.1 on 512² grids, within 12% elsewhere (docs/benchmarks.md). The solutions are unchanged bit for bit (the same cuts); the flow, and with it `info.dual`, the gap to rounding and graph TV's kink masks, can differ.
 - A cleared branch override of an image operator (anisotropic, graph and tree TV) copies back the prox call's own structure instead of rebuilding it from the saved x and z, so it is the default bit for bit in float32 too.
 
 ## [0.3.0] — 2026-10-19
