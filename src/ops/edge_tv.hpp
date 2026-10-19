@@ -216,6 +216,24 @@ struct Base : ImageOp<D> {
         *v.nreg = nr;
     }
 
+    // Kinks (since 0.4) are edges (kink_sites, so masks and sides have the
+    // shape (..., m)): code 1 at an edge with no jump, |z_u - z_v| <= tol,
+    // whose flow f_e is within tol of its capacity gamma w_e > 0.
+    int64_t kink_sites() const noexcept override { return m; }
+    bool has_kinks() const noexcept override { return true; }
+    bool has_branches() const noexcept override { return true; }
+    int64_t kink_edges(const double *z, const double *f, double gamma, double tol, int8_t *mask,
+                       int64_t ms) const noexcept {
+        int64_t count = 0;
+        for (int64_t e = 0; e < m; ++e) {
+            const double cap = gamma * we(e);
+            const int8_t k = cap > 0.0 && std::fabs(z[eu[e]] - z[ev[e]]) <= tol && std::fabs(f[e]) >= cap - tol;
+            mask[e * ms] = k;
+            count += k;
+        }
+        return count;
+    }
+
     // dz_R = mean_R(dx) - (1/|R|) sum_{e in dR} (dgamma w_e + gamma dw_e) s_{e,R}.
     template <class T>
     void jvp_img(const char *save, const T *dx, T *dz, const int64_t *, double gamma, double dgamma,

@@ -171,26 +171,14 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
             f[e] = eu[e] == order[j] ? acc[j] : -acc[j];
         }
     }
-    // Kinks are edges (kink_sites): code 1 at an edge with no jump whose flow
-    // is within tol of its capacity gamma w_e > 0; overrides join it (-1) or
-    // keep it apart (+1), rebuilding the saved regions from x and z.
-    int64_t kink_sites() const noexcept override { return m; }
-    bool has_kinks() const noexcept override { return true; }
-    bool has_branches() const noexcept override { return true; }
-    int64_t kink_image(const double *x, const double *z, const double *, const int64_t *, double gamma, double tol,
-                       int8_t *mask, const int64_t *ms, char *work) const noexcept override {
+    // Kinks at edges (edge_tv::Base) with these flows; overrides join an
+    // edge's ends (-1) or keep them apart (+1), rebuilding the saved regions.
+    int64_t kink_image(const char *, const double *x, const double *z, const double *, const int64_t *,
+                       double gamma, double tol, int8_t *mask, const int64_t *ms, char *work) const noexcept override {
         Work wk;
         layout(&wk, aligned(work));
-        const double *f = wk.s;
         flows(x, z, wk.zv, wk.s);  // by position, then one flow per edge (m < n)
-        int64_t count = 0;
-        for (int64_t e = 0; e < m; ++e) {
-            const double cap = gamma * we(e);
-            const int8_t c = cap > 0.0 && std::fabs(z[eu[e]] - z[ev[e]]) <= tol && std::fabs(f[e]) >= cap - tol;
-            mask[e * ms[0]] = c;
-            count += c;
-        }
-        return count;
+        return kink_edges(z, wk.s, gamma, tol, mask, ms[0]);
     }
     void branch_image(char *save, const double *x, const double *z, const double *, const int64_t *shape,
                       double gamma, double tol, const int8_t *side, char *work) const noexcept override {

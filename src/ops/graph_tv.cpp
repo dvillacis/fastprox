@@ -131,14 +131,44 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         return off;
     }
     size_t image_bytes(const int64_t *) const noexcept override { return layout(nullptr, nullptr) + 64; }
+    static char *aligned(char *p) noexcept { return p + ((64 - reinterpret_cast<uintptr_t>(p) % 64) % 64); }
+
+    // Saved structure: edge_tv::Base's, then the solver's flow on every edge
+    // (since 0.4), which decides the kinks: on a graph with cycles the flow
+    // is not unique, and this is the one the certificate used.
+    size_t base_bytes() const noexcept { return round64(Base::struct_bytes(nullptr)); }
+    size_t struct_bytes(const int64_t *) const noexcept override {
+        return base_bytes() + 8 * static_cast<size_t>(m);
+    }
+    const double *saved_flow(const char *save) const noexcept {
+        return reinterpret_cast<const double *>(save + base_bytes());
+    }
+
+    // Kinks at edges (edge_tv::Base) with the saved flow; overrides join an
+    // edge's ends (-1) or keep them apart (+1), rebuilding the saved regions.
+    // A region is split only where every edge across the split is kept apart.
+    int64_t kink_image(const char *save, const double *, const double *z, const double *, const int64_t *,
+                       double gamma, double tol, int8_t *mask, const int64_t *ms, char *) const noexcept override {
+        return kink_edges(z, saved_flow(save), gamma, tol, mask, ms[0]);
+    }
+    void branch_image(char *save, const double *x, const double *z, const double *, const int64_t *shape,
+                      double gamma, double tol, const int8_t *side, char *work) const noexcept override {
+        Work wk;
+        layout(&wk, aligned(work));
+        ImageCall c;
+        c.shape = shape;
+        c.numel = n;
+        c.gamma = gamma;
+        c.save = save;
+        structure(x, z, wk.lev, wk.uf, c, side, tol, saved_flow(save));
+    }
 
     // ---- prox ---------------------------------------------------------------
 
     template <class T>
     int prox_img(const T *x, T *z, ImageCall &c) const noexcept {
         Work wk;
-        char *base = c.work + ((64 - reinterpret_cast<uintptr_t>(c.work) % 64) % 64);
-        layout(&wk, base);
+        layout(&wk, aligned(c.work));
         c.gap = 0.0;
         c.iters = 0;
         c.converged = true;
@@ -349,9 +379,12 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
             np = na;
         }
         c.iters = rounds;
+        double *fsave = c.save ? reinterpret_cast<double *>(c.save + base_bytes()) : nullptr;
         certificate(d, zv, [&](int64_t e) {
             const double cap = gamma * we(e);
-            return esgn[e] ? esgn[e] * cap : cap - mf.residual(g.arc[e]);
+            const double f = esgn[e] ? esgn[e] * cap : cap - mf.residual(g.arc[e]);
+            if (fsave) fsave[e] = f;
+            return f;
         }, c);
     }
 };

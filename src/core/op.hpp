@@ -151,11 +151,12 @@ struct fp_op {
     // saved input x and solution z (in double) and, for images, the dual of
     // the call: codes into mask (one per entry, at the given strides, the
     // image's axes for kink_image; never null for kink_image); returns the
-    // number of flagged entries. kink_image gets image_bytes(shape) of work.
+    // number of flagged entries. kink_image gets the image's saved structure
+    // and image_bytes(shape) of work.
     virtual int64_t kink_row(const double *, const double *, int64_t, double, double, int8_t *, int64_t,
                              void *) const noexcept { return 0; }
-    virtual int64_t kink_image(const double *, const double *, const double *, const int64_t *, double,
-                               double, int8_t *, const int64_t *, char *) const noexcept { return 0; }
+    virtual int64_t kink_image(const char *, const double *, const double *, const double *, const int64_t *,
+                               double, double, int8_t *, const int64_t *, char *) const noexcept { return 0; }
     // Kink sites per image when they are not the image's entries (since 0.4):
     // tree TV's m edges, so that its masks and sides have the shape of x with
     // the last axis of length m. 0: one site per entry.
@@ -169,8 +170,9 @@ struct fp_op {
     virtual void branch_row(const double *, const double *, uint8_t *, int64_t, double, double,
                             const int8_t *, void *) const noexcept {}
     // Images: rebuild the saved structure of one image from x, z (double) and
-    // the dual, with side (C order, or null for the default rule) applied at
-    // its kinks within tol; work: image_bytes(shape) of scratch.
+    // the dual, with side (C order, never null) applied at its kinks within
+    // tol; work: image_bytes(shape) of scratch. The API restores the prox
+    // call's own structure by a copy.
     virtual void branch_image(char *, const double *, const double *, const double *, const int64_t *,
                               double, double, const int8_t *, char *) const noexcept {}
 

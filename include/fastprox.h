@@ -394,16 +394,18 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *   tree TV (0.4)      1 at edge e = (u, v) when |z_u - z_v| <= tol and its
  *                      flow, the sum of x - z over the subtree below it, is
  *                      within tol of gamma w_e
+ *   graph TV (0.4)     the same with the solver's flow, saved by the prox
+ *                      call (on a graph with cycles the flow is not unique)
  * (edges and pixels of zero bound are free, not kinks).
  * fp_workspace_kinks writes the codes into mask (FP_I8, the shape
- * of x, any strides; for tree TV, whose kinks are edges, the shape of x with
+ * of x, any strides; for graph and tree TV, whose kinks are edges, the shape of x with
  * the last axis of length m, in the order of the edge list; NULL for the
  * count only) and the number of entries at a kink into *count (may be NULL).
  * The mask is the same for any thread count.
  *
  * fp_workspace_set_branch (elementwise operators, since 0.3 1D and
- * anisotropic TV, since 0.4 the projections, group l2 and tree TV; FP_EINVAL
- * for isotropic and graph TV) chooses, for the entries at a
+ * anisotropic TV, since 0.4 the projections, group l2, graph and tree TV;
+ * FP_EINVAL for isotropic TV) chooses, for the entries at a
  * kink (with its own
  * tol), which piece fp_jvp and fp_vjp differentiate: side (FP_I8, the shape
  * of the mask, values -1, 0, +1) picks the piece on the x - eps side (-1) or the
@@ -413,8 +415,9 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  * one-sided difference (prox(x + h e_i) - prox(x)) / h, -1 that from below:
  * the elements of the B-Jacobian. For 1D and anisotropic TV, side -1 at the
  * tail of a kink's edge joins its two sides and +1 keeps them apart, the jump
- * taking the sign of the edge's dual; the same for tree TV (since 0.4) at the
- * kink edge itself. For the simplex and the l1 ball (since
+ * taking the sign of the edge's dual; the same for graph and tree TV (since
+ * 0.4) at the kink edge itself, a region splitting only where every edge
+ * across the split is kept apart. For the simplex and the l1 ball (since
  * 0.4) +1 at a threshold entry puts it on the support and -1 off it; a row
  * on the l1 sphere, and a group of group l2 at its threshold, follow the
  * side at their first entry (-1: inside, or the group zeroed; +1: the

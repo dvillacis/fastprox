@@ -120,7 +120,7 @@ fp_array spatial(Bytes &b, Case &c, int k, bool edges, int xnd, const int64_t *x
 // Builds an operator from the bytes; params are sized for axis length n of
 // an array with xnd axes of extents xs.
 fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
-    const int kind = b.u8() % 34;
+    const int kind = b.u8() % 35;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -310,6 +310,24 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             a0 = vec(c.params[0]);
             c.sites = m;
             return fp_op_tree_tv(N, m, c.groups.data(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 34: {  // graph TV: random edges on the last axis, cycles and repeats allowed
+            const int64_t N = xnd ? xs[xnd - 1] : 1;
+            c.groups.clear();
+            const int64_t m0 = N > 1 ? b.u8() % (3 * N) : 0;
+            for (int64_t e = 0; e < m0; ++e) {
+                const int64_t i = b.u8() % N, j = (i + 1 + b.u8() % (N - 1)) % N;
+                c.groups.push_back(i);
+                c.groups.push_back(j);
+            }
+            const int64_t m = static_cast<int64_t>(c.groups.size() / 2);
+            fill(c.params[0], b.u8() % 2 ? 1 : m);
+            if (b.u8() % 4 == 0)
+                for (auto &w : c.params[0])
+                    if (b.u8() % 3 == 0) w = 0.0;
+            a0 = vec(c.params[0]);
+            c.sites = m;
+            return fp_op_graph_tv(N, m, c.groups.data(), b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
         case 29: {
             fill(c.params[0], pick == 1 ? 1 : n - 1);

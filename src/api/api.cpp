@@ -442,6 +442,15 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
     const fp_op &op = *ws.op;
     const double t = ws.conj ? tol / ws.sigma : tol;
     if (ws.image_ndim) {
+        const size_t bytes = ws.structure.size() * sizeof(double);
+        if (!side) {  // restore the prox call's structure
+            if (ws.override_on) std::memcpy(ws.structure.data(), ws.struct_default.data(), bytes);
+            return;
+        }
+        if (!ws.override_on) {
+            if (ws.struct_default.size() != ws.structure.size()) ws.struct_default.resize(ws.structure.size());
+            std::memcpy(ws.struct_default.data(), ws.structure.data(), bytes);
+        }
         const int64_t N = ws.image_numel, B = ws.rows;
         const int k = ws.image_ndim;
         std::vector<double> xb(static_cast<size_t>(N)), zb(static_cast<size_t>(N));
@@ -455,7 +464,7 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
             const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
             const int64_t S = op.kink_sites() ? op.kink_sites() : N;  // sides per image
             op.branch_image(ws.image_struct(r), xb.data(), zb.data(), dual, ishape, ws.gamma, t,
-                            side ? side + r * S : nullptr, ws.image_set(0) + image_staging_bytes(N));
+                            side + r * S, ws.image_set(0) + image_staging_bytes(N));
         }
         return;
     }
