@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-19
+
 ### Added
 
 - A conda-forge recipe, `packaging/conda/recipe.yaml`, for `libfastprox` (the C library, with its pkg-config and CMake files) and `fastprox` (the Python package, abi3). The new `conda` workflow builds and tests it with rattler-build on Linux, macOS and Windows.

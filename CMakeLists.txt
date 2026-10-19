@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fastprox VERSION 0.4.0 LANGUAGES C CXX)
+project(fastprox VERSION 0.5.0 LANGUAGES C CXX)
 # PEP 440 pre-release tag (a1, rc1, ...) appended to the version; empty for a
 # final release. pyproject.toml reads both lines.
 set(FASTPROX_VERSION_SUFFIX "")
