@@ -123,11 +123,17 @@ and beats DeepInverse's `TVL1Denoiser` at every accuracy).
 
 ## 1.0 — stable
 
-- [ ] ABI freeze; after this, only additions that keep the ABI until 2.0
-- [ ] conda-forge packages for the C library and the Python package
-- [ ] Documentation
+In this order (decided 2026-10-19): the API settled first, then the
+documentation that describes it, the adapters and packages, and the freeze
+last. The conda-forge and BenchOpt submissions are posted only once their
+text is approved.
+
+- [x] API review before the freeze (2026-10-19): the C header exports exactly its 53 `fp_*` functions (C++ symbols hidden), its handles are opaque, and new options go through new functions such as the workspace setters (spec Section 9), so 1.x can grow without touching a struct. Changed: `fp_op_log` is `fp_op_log_penalty` (next to `fp_op_log_barrier`, and as Python's `LogPenalty`); the device comment now reserves the other values for 1.x. Kept: the Python names (`soft_threshold`, `project_simplex`, `prox_linf`, `tv1d`, ...), each clear on its own, rather than aliases and deprecations for a single pattern
+- [ ] Documentation: a site built with MkDocs Material from the Markdown in `docs/` and the examples, the Python reference from the docstrings (mkdocstrings), deployed to GitHub Pages by a workflow on each release
 - [ ] PyProximal adapter (`ProxOperator` subclass)
+- [ ] conda-forge packages for the C library and the Python package
 - [ ] BenchOpt solvers for TV-1D and TV-2D, and a new simplex-projection benchmark
+- [ ] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
 
 ## 1.x — GPU backend
 
@@ -193,3 +199,4 @@ and beats DeepInverse's `TVL1Denoiser` at every accuracy).
 | 2026-10-19 | Tree TV's kink masks and branch overrides go through `fp_workspace_kinks` and `fp_workspace_set_branch` with arrays of the shape of x with the last axis of length m (one entry per edge, in the edge list's order), rather than a new pair of edge functions: its kinks are edges, which have no entry of x to sit on, and the shape follows from the operator (`fp_op::kink_sites`). Graph TV has none yet, since on a graph with cycles the flow, which decides a kink, is not unique | `fastprox.h`, `src/ops/tree_tv.cpp`, `src/api/api.cpp` |
 | 2026-10-19 | Graph TV's kinks are judged on the flow its solver found, saved with the structure (8 bytes per edge and image), since on a graph with cycles the flow is not unique and an edge can be on its bound for one optimal flow and not another; on a forest this is tree TV's unique flow. Isotropic TV gets kink masks but no branch overrides (`FP_EINVAL`), which the 0.4 roadmap item listed: keeping a pixel with zero gradient apart has infinite curvature γ/‖g_p‖, which its derivative system holds only through the curvature cap, so the +1 side is not well defined there | `fastprox.h`, `src/ops/graph_tv.cpp`, docs/api.md |
 | 2026-10-19 | Graph TV's max-flow engine is EIBFS (Goldberg, Hed, Kaplan, Kohli, Tarjan and Werneck, ESA 2015) rather than the Boykov–Kolmogorov style engine of spec Section 4: 1.9–2.7× faster where graph TV was slowest, within 12% elsewhere. Each solve rebuilds the forests from the flow's excesses and deficits on the active parts (the paper's reset, not its incremental repair of the forests). The BK engine stays in `src/maxflow/maxflow.hpp`, tested and built into graph TV with `-DFASTPROX_GRAPH_BK`, for comparisons | `src/maxflow/eibfs.hpp`, `src/ops/graph_tv.cpp` |
+| 2026-10-19 | Before the freeze, `fp_op_log` became `fp_op_log_penalty`, a break in 0.x so that 1.0 does not carry both names. The documentation site is MkDocs Material on GitHub Pages rather than Sphinx: the docs are already Markdown, and mkdocstrings reads the Python docstrings | `fastprox.h`, ROADMAP 1.0 |

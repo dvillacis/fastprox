@@ -390,7 +390,7 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"scad_w", [=](fp_op **o) { return fp_op_scad(0.5, 3.7, wn, o); }, 0.8},
         {"mcp", [](fp_op **o) { return fp_op_mcp(0.5, 3.0, nullptr, o); }, 0.8},
         {"mcp_w", [=](fp_op **o) { return fp_op_mcp(0.5, 3.0, wn, o); }, 0.8},
-        {"log", [](fp_op **o) { return fp_op_log(0.8, 0.5, o); }, 0.8},
+        {"log", [](fp_op **o) { return fp_op_log_penalty(0.8, 0.5, o); }, 0.8},
     };
 }
 
@@ -972,7 +972,7 @@ static void test_nonconvex() {
     CHECK(fp_op_lq(1.0, 1.0, nullptr, &bad) == FP_EPARAM);
     CHECK(fp_op_scad(1.0, 1.0, nullptr, &bad) == FP_EPARAM);
     CHECK(fp_op_mcp(1.0, 0.0, nullptr, &bad) == FP_EPARAM);
-    CHECK(fp_op_log(1.0, 0.0, &bad) == FP_EPARAM);
+    CHECK(fp_op_log_penalty(1.0, 0.0, &bad) == FP_EPARAM);
     CHECK(fp_op_l0(-1.0, nullptr, &bad) == FP_EPARAM);
     fp_op *op;
     CHECK_OK(fp_op_lq(0.5, 0.5, nullptr, &op));

@@ -52,7 +52,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | ℓq, 0 < q < 1 (*since 0.2*) | λ Σ wᵢ \|zᵢ\|^q | `fp_op_lq(λ, q, w)` | `Lq(lam, q, weights)`, `lq` | w (scalar or per entry) |
 | SCAD (*since 0.2*) | Σ wᵢ ρ(zᵢ), Fan and Li's penalty ρ, threshold λ, concavity a | `fp_op_scad(λ, a, w)` | `SCAD(lam, a, weights)`, `scad` | (λ, a), or (λ, a, w…) with weights |
 | MCP (*since 0.2*) | Σ wᵢ ρ(zᵢ), Zhang's minimax concave penalty ρ, threshold λ, concavity b | `fp_op_mcp(λ, b, w)` | `MCP(lam, b, weights)`, `mcp` | (λ, b), or (λ, b, w…) with weights |
-| Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
+| Log penalty (*since 0.2*) | λ Σ log(1 + \|zᵢ\|/ε) | `fp_op_log_penalty(λ, ε)` | `LogPenalty(lam, eps)`, `prox_log` | (λ, ε) |
 | Anisotropic TV, 2D and 3D (*since 0.2*) | Σₐ wₐ Σ \|z_{p+eₐ} − z_p\| over the last 2 or 3 axes | `fp_op_tv_aniso(ndim, w)` | `TVAniso(ndim, weights)`, `tv_aniso` | (w₀, …, w_{ndim−1}) |
 | Isotropic TV, 2D and 3D (*since 0.2*) | Σ_p ‖(w₀ D₀z, …, w_{ndim−1} D_{ndim−1}z)_p‖₂, forward differences | `fp_op_tv_iso(ndim, w)` | `TVIso(ndim, weights)`, `tv_iso` | (w₀, …, w_{ndim−1}) |
 | Anisotropic TV with edge weights (*since 0.3*) | Σₐ wₐ Σ_p β_{a,p} \|z_{p+eₐ} − z_p\| | `fp_op_tv_aniso_weighted(ndim, w, beta)` | `TVAniso(ndim, weights, edge_weights=beta)` | (w, β in C order) |

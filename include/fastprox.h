@@ -55,7 +55,7 @@ typedef struct {
     int            ndim;
     const int64_t *shape;
     const int64_t *strides;
-    fp_device      device; /* must be FP_DEVICE_CPU in 1.x */
+    fp_device      device; /* FP_DEVICE_CPU; other values reserved for 1.x */
 } fp_array;
 
 typedef enum {
@@ -243,8 +243,9 @@ FP_API fp_status fp_op_scad(double lambda, double a, const fp_array *weights, fp
  * for a. */
 FP_API fp_status fp_op_mcp(double lambda, double b, const fp_array *weights, fp_op **out);
 
-/* g(z) = lambda * sum_i log(1 + |z_i| / eps), eps > 0. theta = (lambda, eps). */
-FP_API fp_status fp_op_log(double lambda, double eps, fp_op **out);
+/* g(z) = lambda * sum_i log(1 + |z_i| / eps), eps > 0. theta = (lambda, eps).
+ * (Named fp_op_log before 1.0.) */
+FP_API fp_status fp_op_log_penalty(double lambda, double eps, fp_op **out);
 
 /* Group penalties g(z) = sum_g c_g h(||z_g||_2) along the axis (since 0.2),
  * with h the scalar map of fp_op_huber, fp_op_scad or fp_op_mcp: the prox
@@ -374,7 +375,7 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *   MCP                1: |x| = gamma w lambda, 2: |x| = b lambda
  *   l0 (since 0.3)     1: the tie |x| = sqrt(2 gamma lambda w)
  *   lq (since 0.3)     1: the tie |x| = tau
- *   log (since 0.3)    1: the tie, or |x| = gamma lambda / eps where the map
+ *   log penalty (0.3)  1: the tie, or |x| = gamma lambda / eps where the map
  *                      is continuous (gamma lambda <= eps^2)
  *   box (since 0.4)    1: x = lower, 2: x = upper; orthant 1: x = 0
  *   simplex (0.4)      1: x_i at the threshold tau
