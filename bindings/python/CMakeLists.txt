@@ -10,7 +10,7 @@ find_package(nanobind CONFIG REQUIRED)
 nanobind_add_module(_fastprox STABLE_ABI NB_STATIC src/module.cpp)
 target_link_libraries(_fastprox PRIVATE fastprox)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(FASTPROX_STATIC_LIBSTDCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_link_options(_fastprox PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 

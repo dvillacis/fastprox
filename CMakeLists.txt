@@ -11,6 +11,10 @@ option(FASTPROX_PYTHON "Build the nanobind Python extension" OFF)
 option(FASTPROX_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 option(FASTPROX_FUZZ "Build the fuzzing harnesses" OFF)
 option(BUILD_SHARED_LIBS "Build libfastprox as a shared library" ON)
+# Linux with GCC: link libstdc++ and libgcc statically, so that the library
+# and the wheels run next to an older or different libstdc++ (MATLAB, old
+# distributions). Off where the environment provides its own (conda-forge).
+option(FASTPROX_STATIC_LIBSTDCXX "Link libstdc++ statically on Linux with GCC" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,7 +107,7 @@ else()
   target_compile_definitions(fastprox PRIVATE FASTPROX_NO_THREADS)
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(FASTPROX_STATIC_LIBSTDCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Keep the host libstdc++ out of the picture (MATLAB, old distributions).
   target_link_options(fastprox PRIVATE -static-libstdc++ -static-libgcc)
 endif()
