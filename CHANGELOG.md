@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `fp_value` and `Operator.value(x)`: the value $g(x)$, one per row or image, for every operator. The projections give their set's indicator: 0 within a relative tolerance, else infinity. Each value is checked against the operator's prox: $z = \operatorname{prox}_{\gamma g}(x)$ must minimise $g(y) + \lVert y - x \rVert_2^2 / (2\gamma)$ (`tests/python/test_value.py`). This is what the PyProximal adapter needs for its objective, and it is added before the 1.0 freeze.
 - A documentation site, https://dvillacis.github.io/fastprox/, built with MkDocs Material from the Markdown in `docs/`, the README, the changelog and roadmap, and the examples (each with its source); the Python reference is generated from the docstrings (mkdocstrings), and formulas are LaTeX, rendered by KaTeX. A workflow builds it strictly on every pull request and deploys it to GitHub Pages on each release.
 
 ### Changed

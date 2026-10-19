@@ -216,6 +216,14 @@ struct Base : ImageOp<D> {
         *v.nreg = nr;
     }
 
+    // sum_e w_e |x_u - x_v| (since 1.0).
+    bool has_value() const noexcept override { return true; }
+    double value_image(const double *x, const int64_t *, double) const noexcept override {
+        double s = 0.0;
+        for (int64_t e = 0; e < m; ++e) s += we(e) * std::fabs(x[eu[e]] - x[ev[e]]);
+        return s;
+    }
+
     // Kinks (since 0.4) are edges (kink_sites, so masks and sides have the
     // shape (..., m)): code 1 at an edge with no jump, |z_u - z_v| <= tol,
     // whose flow f_e is within tol of its capacity gamma w_e > 0.

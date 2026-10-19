@@ -100,6 +100,8 @@ struct L0 final : ElemOp<L0> {
     int64_t wi(int64_t i) const noexcept { return w.size() == 1 ? 0 : i; }
     double thr(double gamma, int64_t i) const noexcept { return std::sqrt(2.0 * gamma * lambda * w[wi(i)]); }
 
+    double value1(double x, int64_t i, double) const noexcept { return x != 0.0 ? lambda * w[wi(i)] : 0.0; }
+
     template <class T>
     T prox1(T x, double gamma, int64_t i, int tie, bool &tied) const noexcept {
         const double a = std::fabs(static_cast<double>(x)), t = thr(gamma, i);
@@ -235,6 +237,10 @@ struct Lq final : ElemOp<Lq> {
         return root(a, lam, beta);
     }
 
+    double value1(double x, int64_t i, double) const noexcept {
+        return lambda * w[wi(i)] * std::pow(std::fabs(x), q);
+    }
+
     template <class T>
     T prox1(T x, double gamma, int64_t i, int tie, bool &tied) const noexcept {
         const double xd = static_cast<double>(x);
@@ -364,6 +370,15 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
         return p > 1.0 + gamma * wmax ? FP_OK : FP_EPARAM;
     }
 
+    // w_i SCAD(x): lambda |t| up to lambda, the quadratic piece up to a lambda,
+    // then (a + 1) lambda^2 / 2 (Fan and Li 2001).
+    double value1(double x, int64_t i, double) const noexcept {
+        const double l = this->lambda, a = this->p, t = std::fabs(x);
+        const double v = t <= l ? l * t : (t <= a * l ? (2.0 * a * l * t - t * t - l * l) / (2.0 * (a - 1.0))
+                                                      : 0.5 * (a + 1.0) * l * l);
+        return this->step(1.0, i) * v;
+    }
+
     template <class T>
     T prox1(T x, double gamma, int64_t i) const noexcept {
         const double xd = static_cast<double>(x), ax = std::fabs(xd), c = step(gamma, i), a = p;
@@ -441,6 +456,14 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
     bool axis_params() const noexcept override { return nw() > 1; }
     fp_status check_n(int64_t n) const noexcept override { return check_len(n); }
     fp_status check_step(double gamma) const noexcept override { return p > gamma * wmax ? FP_OK : FP_EPARAM; }
+
+    // w_i MCP(x): lambda |t| - t^2 / (2 b) up to b lambda, then b lambda^2 / 2
+    // (Zhang 2010).
+    double value1(double x, int64_t i, double) const noexcept {
+        const double l = this->lambda, b = this->p, t = std::fabs(x);
+        const double v = t <= b * l ? l * t - t * t / (2.0 * b) : 0.5 * b * l * l;
+        return this->step(1.0, i) * v;
+    }
 
     template <class T>
     T prox1(T x, double gamma, int64_t i) const noexcept {
@@ -532,6 +555,8 @@ struct LogPen final : ElemOp<LogPen> {
         }
         return 0.0;
     }
+
+    double value1(double x, int64_t, double) const noexcept { return lambda * std::log1p(std::fabs(x) / eps); }
 
     template <class T>
     T prox1(T x, double gamma, int64_t, int tie, bool &tied) const noexcept {

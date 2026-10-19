@@ -236,6 +236,13 @@ struct L2Ball final : RowOp<L2Ball> {
         return std::sqrt(s);
     }
 
+    bool has_value() const noexcept override { return true; }
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += x[i] * x[i];
+        return indicator(std::sqrt(s) - r, value_atol(x, n, tol));
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *, uint8_t *) const noexcept {
         for (int64_t i = 0; i < n; ++i)
@@ -293,6 +300,17 @@ struct Simplex final : RowOp<Simplex> {
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
     size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }
+
+    bool has_value() const noexcept override { return true; }
+    // The indicator of x >= 0, sum x = r.
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        double s = 0.0, v = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            s += x[i];
+            v = std::max(v, -x[i]);
+        }
+        return indicator(std::max(v, std::fabs(s - r)), value_atol(x, n, tol));
+    }
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
@@ -443,6 +461,14 @@ struct L1Ball final : RowOp<L1Ball> {
     size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }
     double wi(int64_t i) const noexcept { return w.size() == 1 ? w[0] : w[i]; }
 
+    bool has_value() const noexcept override { return true; }
+    // The indicator of sum_i w_i |x_i| <= r, in the weights given (w scale).
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += wi(i) * std::fabs(x[i]);
+        return indicator(scale * s - r, value_atol(x, n, tol));
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
         const double tau = l1_threshold(x, n, w, r / scale, scr);
@@ -578,6 +604,13 @@ struct LInf final : RowOp<LInf> {
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
     size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }
 
+    bool has_value() const noexcept override { return true; }
+    double value_row(const double *x, int64_t n, double, double *) const noexcept override {
+        double m = 0.0;
+        for (int64_t i = 0; i < n; ++i) m = std::max(m, std::fabs(x[i]));
+        return lambda * m;
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
         const double tau = l1_threshold(x, n, one, gamma * lambda, scr);
@@ -657,6 +690,14 @@ struct Max final : RowOp<Max> {
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
     size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }
+
+    bool has_value() const noexcept override { return true; }
+    double value_row(const double *x, int64_t n, double, double *) const noexcept override {
+        if (n == 0) return -lambda * std::numeric_limits<double>::infinity();  // the empty maximum
+        double m = x[0];
+        for (int64_t i = 1; i < n; ++i) m = std::max(m, x[i]);
+        return lambda * m;
+    }
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {

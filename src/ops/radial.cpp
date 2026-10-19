@@ -83,6 +83,20 @@ struct GroupRadial final : RowOp<GroupRadial> {
         return phi(s, step);
     }
 
+    bool has_value() const noexcept override { return true; }
+    int64_t value_doubles(int64_t n) const noexcept override { return n > G ? n : G; }
+    // sum_g c_g h(||x_g||), h the scalar map (its value at one entry).
+    double value_row(const double *x, int64_t n, double tol, double *scr) const noexcept override {
+        for (int64_t g = 0; g < G; ++g) scr[g] = 0.0;
+        for (int64_t i = 0; i < n; ++i) scr[group(i)] += x[i] * x[i];
+        double s = 0.0;
+        for (int64_t g = 0; g < G; ++g) {
+            const double t = std::sqrt(scr[g]);
+            s += c[ci(g)] * h->value_row(&t, 1, tol, nullptr);
+        }
+        return s;
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *) const noexcept {
         double *scale = static_cast<double *>(scr);
@@ -197,6 +211,15 @@ struct Soc final : RowOp<Soc> {
         if (s <= t) return kKeep;
         if (s <= -t) return kZero;
         return kMid;
+    }
+
+    bool has_value() const noexcept override { return true; }
+    // The indicator of ||y||_2 <= t, t = x_0.
+    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+        if (n == 0) return 0.0;
+        double s = 0.0;
+        for (int64_t i = 1; i < n; ++i) s += x[i] * x[i];
+        return indicator(std::sqrt(s) - x[0], value_atol(x, n, tol));
     }
 
     template <class T>

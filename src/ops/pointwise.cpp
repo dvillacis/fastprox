@@ -49,6 +49,8 @@ struct Soft final : ElemOp<Soft> {
     }
     int64_t wi(int64_t i) const noexcept { return w.size() == 1 ? 0 : i; }
 
+    double value1(double x, int64_t i, double) const noexcept { return lambda * w[wi(i)] * std::fabs(x); }
+
     template <class T>
     T prox1(T x, double gamma, int64_t i) const noexcept {
         const double xd = static_cast<double>(x);
@@ -94,6 +96,8 @@ struct ElasticNet final : ElemOp<ElasticNet> {
     int64_t nparams() const noexcept override { return 2; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 
+    double value1(double x, int64_t, double) const noexcept { return l1 * std::fabs(x) + 0.5 * l2 * x * x; }
+
     template <class T>
     T prox1(T x, double gamma, int64_t) const noexcept {
         const double xd = static_cast<double>(x);
@@ -127,6 +131,11 @@ struct Huber final : ElemOp<Huber> {
     const char *name() const noexcept override { return "huber"; }
     int64_t nparams() const noexcept override { return 2; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
+
+    double value1(double x, int64_t, double) const noexcept {
+        const double a = std::fabs(x);
+        return lambda * (a <= delta ? x * x / (2.0 * delta) : a - 0.5 * delta);
+    }
 
     template <class T>
     T prox1(T x, double gamma, int64_t) const noexcept {
@@ -173,6 +182,10 @@ struct Box final : ElemOp<Box> {
     }
     int64_t li(int64_t i) const noexcept { return lo.size() == 1 ? 0 : i; }
     int64_t hj(int64_t i) const noexcept { return hi.size() == 1 ? 0 : i; }
+
+    double value1(double x, int64_t i, double atol) const noexcept {
+        return indicator(std::max(lo[li(i)] - x, x - hi[hj(i)]), atol);
+    }
 
     template <class T>
     T prox1(T x, double, int64_t i) const noexcept {
@@ -222,6 +235,8 @@ struct NonNeg final : ElemOp<NonNeg> {
     int64_t nparams() const noexcept override { return 0; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 
+    double value1(double x, int64_t, double atol) const noexcept { return indicator(-x, atol); }
+
     template <class T>
     T prox1(T x, double, int64_t) const noexcept {
         return x < T(0) ? T(0) : x;
@@ -262,6 +277,11 @@ struct LogBarrier final : ElemOp<LogBarrier> {
     static double value(double x, double r, double gl) noexcept {
         // NaN fails x < 0 and stays NaN; -inf gives 0, +inf stays inf.
         return x < 0.0 ? gl / (0.5 * (r - x)) : 0.5 * x + 0.5 * r;
+    }
+
+    // -lambda log x; INFINITY at x <= 0, outside the domain.
+    double value1(double x, int64_t, double) const noexcept {
+        return x > 0.0 ? -lambda * std::log(x) : std::numeric_limits<double>::infinity();
     }
 
     template <class T>
@@ -307,6 +327,10 @@ struct L1Box final : ElemOp<L1Box> {
         return fits(w) && fits(lo) && fits(hi) ? FP_OK : FP_ESHAPE;
     }
     static int64_t at(const Vec &v, int64_t i) noexcept { return v.size() == 1 ? 0 : i; }
+
+    double value1(double x, int64_t i, double atol) const noexcept {
+        return lambda * w[at(w, i)] * std::fabs(x) + indicator(std::max(lo[at(lo, i)] - x, x - hi[at(hi, i)]), atol);
+    }
 
     template <class T>
     T prox1(T x, double gamma, int64_t i) const noexcept {

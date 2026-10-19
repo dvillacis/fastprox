@@ -1387,6 +1387,39 @@ struct I8 {  // int8 array with an fp_array view; strides in elements
 // Tree TV's kinks are edges (since 0.4): masks and sides of shape (..., m).
 // x = (2, -1, 5) on the chain 0-1-2, gamma = 1: z = (1, 1, 4) with the flow
 // on edge (0, 1) at its bound.
+// fp_value (since 1.0): one value per row or image, sets as indicators.
+static void test_value() {
+    fp_op *op;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &op));
+    Arr x({2, 3}, {1.0, -2.0, 0.5, 0.0, 3.0, -1.0}), v({2}), v3({3}), bad({2});
+    CHECK_OK(fp_value(op, &x.a, nullptr, &v.a));
+    CHECK(v.data == Vec({1.75, 2.0}));
+    fp_options o = opts(0);  // along axis 0: three columns
+    CHECK_OK(fp_value(op, &x.a, &o, &v3.a));
+    CHECK(v3.data == Vec({0.5, 2.5, 0.75}));
+    CHECK(fp_value(op, &x.a, nullptr, &v3.a) == FP_ESHAPE);
+    bad.a.dtype = FP_F32;
+    CHECK(fp_value(op, &x.a, nullptr, &bad.a) == FP_EDTYPE);
+    o = opts();
+    o.tol = -1.0;
+    CHECK(fp_value(op, &x.a, &o, &v.a) == FP_EPARAM);
+    CHECK(fp_value(nullptr, &x.a, nullptr, &v.a) == FP_EINVAL);
+    fp_op_free(op);
+    // The simplex of radius 1: 0 on it (within tol), INFINITY off it.
+    CHECK_OK(fp_op_simplex(1.0, &op));
+    Arr s({2, 3}, {0.2, 0.3, 0.5, 0.2, 0.3, 0.6});
+    CHECK_OK(fp_value(op, &s.a, nullptr, &v.a));
+    CHECK(v.data[0] == 0.0 && std::isinf(v.data[1]));
+    fp_op_free(op);
+    // An image operator: one value per image, out of ndim 0 for one image.
+    CHECK_OK(fp_op_tv_aniso(2, nullptr, &op));
+    Arr img({2, 2}, {0.0, 1.0, 3.0, 1.0}), one({});
+    one.a.ndim = 0;
+    CHECK_OK(fp_value(op, &img.a, nullptr, &one.a));
+    CHECK(one.data[0] == 6.0);  // down the columns |3 - 0| + |1 - 1|, along the rows |1 - 0| + |1 - 3|
+    fp_op_free(op);
+}
+
 static void test_edge_kinks() {
     const int64_t edges[4] = {0, 1, 1, 2};
     fp_op *op;
@@ -2159,6 +2192,7 @@ int main() {
     test_nonconvex();
     test_kinks();
     test_edge_kinks();
+    test_value();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();
