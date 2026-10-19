@@ -71,12 +71,12 @@ outputs:
       python:
         version_independent: true  # abi3: one package for CPython 3.12 and later
       script:
-        env:
-          # Otherwise scikit-build-core may pick Makefiles, and conda-forge's
-          # Linux image has no make.
-          CMAKE_GENERATOR: Ninja
-        content:
-          - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation -Ccmake.define.FASTPROX_STATIC_LIBSTDCXX=OFF
+        # Ninja on Unix, or scikit-build-core may pick Makefiles, and
+        # conda-forge's Linux image has no make. Windows keeps Visual Studio's
+        # generator: scikit-build-core passes it a platform (-A x64).
+        - if: unix
+          then: CMAKE_GENERATOR=Ninja ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation -Ccmake.define.FASTPROX_STATIC_LIBSTDCXX=OFF
+          else: ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
     requirements:
       build:
         - ${{ compiler('c') }}
