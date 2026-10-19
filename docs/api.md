@@ -483,7 +483,8 @@ avoid kinks.
 
 **Kink masks and branch overrides (*since 0.2*).** For soft thresholding,
 ℓ1 over a box, SCAD and MCP (since 0.3 also ℓ0, ℓq and the log penalty, 1D
-and anisotropic TV, and masks for isotropic TV), the kinks of a kept prox call can be read and
+and anisotropic TV, and masks for isotropic TV; since 0.4 the box, the
+orthant, the simplex, the ℓ1 ball and group ℓ2), the kinks of a kept prox call can be read and
 the piece differentiated there chosen, which gives the other elements of the
 B-subdifferential, for example both elements at a biactive entry, or the
 SCD subspaces of each entry:
@@ -501,6 +502,18 @@ SCD subspaces of each entry:
   piece and the nonzero branch, taken at max(|x|, τ) where the branch starts
   at τ. A map that is the identity (γwᵢ = 0 or λ = 0) has none. The mask is
   the same for any thread count.
+- **Projections and groups** (*since 0.4*): the box flags entries on its
+  bounds (1: lower, 2: upper) and the orthant those at 0, with the inside
+  piece on one side and the clipped one on the other; the simplex flags
+  entries at its threshold τ (code 1) and the ℓ1 ball those with |xᵢ| at
+  τwᵢ (1), with the support including them (+1) or not (−1); the ℓ1 ball
+  also flags every entry of a row on its sphere, Σwᵢ|xᵢ| = r within
+  `tol`·max w (2), and group ℓ2 every entry of a group whose norm is at its
+  threshold γλc_g (1). These row-level kinks take the side given at the
+  row's or group's first entry: −1 the inside piece (the identity) or the
+  zeroed group, +1 the projection with τ = 0 or the live shrink, its
+  formula taken at x. Each side is the derivative of the one-sided
+  difference in a direction that keeps its piece.
 - **TV kinks** (*since 0.3*), from the saved solution z and dual: 1D TV
   flags (code 1) the entry i at the tail of an edge with no jump,
   |z_{i+1} − z_i| ≤ `tol`, whose dual Σ_{j≤i}(x_j − z_j) is within `tol` of

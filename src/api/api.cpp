@@ -461,13 +461,14 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
     else std::memcpy(ws.code.data(), ws.code_default.data(), static_cast<size_t>(ws.numel));
     if (!side) return;
     std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
+    std::vector<std::max_align_t> scr(op.scratch_bytes(n) / sizeof(std::max_align_t) + 1);
     for (int64_t r = 0; r < ws.rows; ++r) {
         const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
         for (int64_t i = 0; i < n; ++i) {
             xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
             zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
         }
-        op.branch_row(xb.data(), zb.data(), ws.code.data() + r * n, n, ws.gamma, t, side + r * n);
+        op.branch_row(xb.data(), zb.data(), ws.code.data() + r * n, n, ws.gamma, t, side + r * n, scr.data());
     }
 }
 

@@ -180,6 +180,7 @@ int64_t row_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, co
     const double t = ws.conj ? tol / ws.sigma : tol;
     int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
     std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
+    std::vector<std::max_align_t> scr(op.scratch_bytes(n) / sizeof(std::max_align_t) + 1);
     int64_t count = 0;
     for (int64_t r = 0; r < p.rows; ++r) {
         const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
@@ -189,7 +190,8 @@ int64_t row_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, co
         }
         int64_t off[1];
         p.offsets(r, off);
-        count += op.kink_row(xb.data(), zb.data(), n, ws.gamma, t, md ? md + off[0] : nullptr, p.astride[0]);
+        count += op.kink_row(xb.data(), zb.data(), n, ws.gamma, t, md ? md + off[0] : nullptr, p.astride[0],
+                             scr.data());
     }
     return count;
 }

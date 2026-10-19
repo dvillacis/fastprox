@@ -354,6 +354,34 @@ struct Simplex final : RowOp<Simplex> {
             gx[i] = code[i] ? static_cast<T>(static_cast<double>(g[i]) - mean) : T(0);
         acc[0] += mean;
     }
+
+    // Kinks (since 0.3): code 1 at an entry within tol of the threshold tau
+    // (read off a support entry, tau = x_i - z_i), on or off the support.
+    // Overrides: side +1 puts it on the support (the x + eps piece), -1 off.
+    static double threshold(const double *x, const double *z, int64_t n) noexcept {
+        for (int64_t i = 0; i < n; ++i)
+            if (z[i] > 0.0) return x[i] - z[i];
+        return HUGE_VAL;  // no support (r = 0): no kinks
+    }
+    bool has_kinks() const noexcept override { return true; }
+    bool has_branches() const noexcept override { return true; }
+    int64_t kink_row(const double *x, const double *z, int64_t n, double, double tol, int8_t *mask,
+                     int64_t ms, void *) const noexcept override {
+        const double tau = threshold(x, z, n);
+        int64_t count = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            const int8_t c = std::fabs(x[i] - tau) <= tol;
+            if (mask) mask[i * ms] = c;
+            count += c;
+        }
+        return count;
+    }
+    void branch_row(const double *x, const double *z, uint8_t *code, int64_t n, double, double tol,
+                    const int8_t *side, void *) const noexcept override {
+        const double tau = threshold(x, z, n);
+        for (int64_t i = 0; i < n; ++i)
+            if (side[i] != 0 && std::fabs(x[i] - tau) <= tol) code[i] = side[i] > 0;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -487,6 +515,53 @@ struct L1Ball final : RowOp<L1Ball> {
             }
         }
         acc[0] += c / scale;
+    }
+
+    // Kinks (since 0.3): a row on the sphere, sum_i w_i |x_i| within tol max w
+    // of r, has code 2 at every entry (inside or projected); in a projected
+    // row, code 1 at an entry with |x_i| within tol of tau w_i (tau read off
+    // a support entry). Overrides: at a code-1 entry side +1 puts it on the
+    // support, -1 off; for a row on the sphere the side at its first entry
+    // picks the inside piece (-1) or the projection with tau = 0 (+1, the
+    // nonzero entries on the support).
+    double sphere_gap(const double *x, int64_t n) const noexcept {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += wi(i) * std::fabs(x[i]);
+        return std::fabs(s - r / scale);
+    }
+    double threshold(const double *x, const double *z, int64_t n) const noexcept {
+        for (int64_t i = 0; i < n; ++i)
+            if (z[i] != 0.0 && wi(i) > 0.0) return (std::fabs(x[i]) - std::fabs(z[i])) / wi(i);
+        return HUGE_VAL;
+    }
+    bool has_kinks() const noexcept override { return true; }
+    bool has_branches() const noexcept override { return true; }
+    int64_t kink_row(const double *x, const double *z, int64_t n, double, double tol, int8_t *mask,
+                     int64_t ms, void *) const noexcept override {
+        int64_t count = 0;
+        const bool sphere = sphere_gap(x, n) <= tol;
+        bool inside = true;
+        for (int64_t i = 0; i < n && inside; ++i) inside = x[i] == z[i];
+        const double tau = inside ? HUGE_VAL : threshold(x, z, n);
+        for (int64_t i = 0; i < n; ++i) {
+            const int8_t c = sphere ? 2 : (std::fabs(std::fabs(x[i]) - tau * wi(i)) <= tol ? 1 : 0);
+            if (mask) mask[i * ms] = c;
+            count += c != 0;
+        }
+        return count;
+    }
+    void branch_row(const double *x, const double *z, uint8_t *code, int64_t n, double, double tol,
+                    const int8_t *side, void *) const noexcept override {
+        if (sphere_gap(x, n) <= tol) {
+            if (side[0] < 0) std::memset(code, kInside, static_cast<size_t>(n));
+            if (side[0] > 0)
+                for (int64_t i = 0; i < n; ++i) code[i] = x[i] != 0.0;
+            return;
+        }
+        if (code[0] == kInside) return;
+        const double tau = threshold(x, z, n);
+        for (int64_t i = 0; i < n; ++i)
+            if (side[i] != 0 && std::fabs(std::fabs(x[i]) - tau * wi(i)) <= tol) code[i] = side[i] > 0;
     }
 };
 
