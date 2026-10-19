@@ -1,0 +1,90 @@
+site_name: fastprox
+site_description: Exact proximal operators and projections with derivatives
+site_url: https://dvillacis.github.io/fastprox/
+repo_url: https://github.com/dvillacis/fastprox
+repo_name: dvillacis/fastprox
+edit_uri: edit/master/docs/
+copyright: MIT License
+
+docs_dir: docs
+exclude_docs: |
+  hooks/
+hooks:
+  - docs/hooks/include.py
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Operators and APIs: api.md
+      - In place of DeepInverse's TV: deepinv.md
+  - Examples: examples.md
+  - Reference:
+      - Python: reference/python.md
+      - PyTorch and JAX: reference/frameworks.md
+      - C header: https://github.com/dvillacis/fastprox/blob/master/include/fastprox.h
+  - Benchmarks: benchmarks.md
+  - Project:
+      - Design specification: spec.md
+      - Roadmap: roadmap.md
+      - Changelog: changelog.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.betterem:
+      smart_enable: all   # w_i and z_{i+1} in the docstrings are not emphasis
+  - pymdownx.arithmatex:
+      generic: true       # $...$ and $$...$$, rendered by KaTeX (docs/javascripts/katex.js)
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+extra_javascript:
+  - javascripts/katex.js
+  - https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js
+  - https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js
+extra_css:
+  - https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [bindings/python]
+          options:
+            allow_inspection: false
+            docstring_style: sphinx
+            show_source: false
+            show_signature_annotations: true
+            merge_init_into_class: true
+            heading_level: 2
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn

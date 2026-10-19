@@ -38,13 +38,13 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    """prox_{gamma g}(x). ``axis`` (row operators), ``tol`` and ``max_iter``
+    r"""$\operatorname{prox}_{\gamma g}(x)$. ``axis`` (row operators), ``tol`` and ``max_iter``
     (iterative operators) are passed on when given."""
     return _apply(op, x, gamma, False, axis, threads, tol, max_iter, params)
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    """prox_{sigma g*}(y) (Moreau's identity)."""
+    r"""$\operatorname{prox}_{\sigma g^*}(y)$ (Moreau's identity)."""
     return _apply(op, y, sigma, True, axis, threads, tol, max_iter, params)
 
 
@@ -106,19 +106,20 @@ def _function(spec):
 
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, max_iter=1000,
            warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
-    """Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
+    r"""Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, in JAX operations on ``x``'s device; differentiable (reverse
     mode) in ``x``, ``gamma`` and ``weights``. ``gamma`` is a number or one
     step per image, broadcasting to the batch shape ``x.shape[:-ndim]``. Each image stops when its
-    duality gap is at most ``tol * |x|^2 / 2``; ``tol`` and ``max_iter`` are
-    static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
+    duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$; ``tol`` and
+    ``max_iter`` are static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape)). With ``return_info=True`` returns
     ``(z, info)``, an :class:`IterInfo` of JAX arrays. The backward is the C
     kernel's: one unknown per flat region, solved by conjugate gradients to
     relative residual ``deriv_tol``; by default each image's solve stops at
-    the relative error of z that its gap certifies, sqrt(2 gap) / |x|, and
-    at max(1e-10, 100 eps) at the tightest. ``pixel_weights`` (since 0.3), as
-    in :func:`fastprox.torch.tv_iso`: alpha >= 0 broadcasting to x.shape,
+    the relative error of $z$ that its gap certifies,
+    $\sqrt{2\,\mathrm{gap}} / \lVert x \rVert_2$, and at
+    $\max(10^{-10}, 100\,\varepsilon)$ at the tightest. ``pixel_weights`` (since
+    0.3), as in :func:`fastprox.torch.tv_iso`: $\alpha \ge 0$ broadcasting to x.shape,
     differentiable."""
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, pixel_weights)
@@ -126,10 +127,10 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, 
 
 def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=1e-6, max_iter=1000,
              warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
-    """Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`: a
+    r"""Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`: a
     plain dual method, with the dual in the C kernel's form; its derivatives
     are exact region averages. ``edge_weights`` (since 0.3), as in
-    :func:`fastprox.torch.tv_aniso`: beta >= 0 of shape (ndim, ...)
+    :func:`fastprox.torch.tv_aniso`: $\beta \ge 0$ of shape (ndim, ...)
     broadcasting to (ndim, *x.shape), differentiable."""
     return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, edge_weights)

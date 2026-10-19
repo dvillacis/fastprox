@@ -10,7 +10,7 @@ shape (B, C, H, W) or (B, C, D, H, W), each channel separately. These are the
 problems of `fastprox.torch.tv_iso` and `fastprox.torch.tv_aniso` (and of
 `fastprox.jax.tv_iso` / `tv_aniso`), which run on the input's device and
 agree with DeepInverse's denoisers to their convergence (to 1e-12 and 4e-14 on
-test images). [`examples/deepinv_tv.py`](../examples/deepinv_tv.py) checks
+test images). [`examples/deepinv_tv.py`](https://github.com/dvillacis/fastprox/blob/master/examples/deepinv_tv.py) checks
 everything on this page.
 
 ```python
@@ -26,7 +26,7 @@ z = fpt.tv_iso(y, ths, tol=1e-6)                       # fastprox; tv_aniso for 
 | DeepInverse | fastprox | Notes |
 | --- | --- | --- |
 | `ths` (a number, or one per sample) | `gamma` (a number, or a tensor that broadcasts to `y.shape[:-2]`) | one step per sample: `ths` of shape (B,) is `gamma` of shape (B, 1) |
-| `crit`: relative change of x between iterations | `tol`: duality gap at most `tol · ‖y‖² / 2` per image | the gap bounds the error, ‖z − z*‖² ≤ 2 gap; a small change between iterations does not |
+| `crit`: relative change of x between iterations | `tol`: duality gap at most `tol · ‖y‖² / 2` per image | the gap bounds the error, $\lVert z - z^\star \rVert_2^2 \le 2\,\mathrm{gap}$; a small change between iterations does not |
 | `n_it_max` | `max_iter` | |
 | warm restart: the denoiser keeps `x2`, `u2` between calls | `warm_start=info.dual` from the previous call (`return_info=True`) | explicit, so one function serves many problems |
 | autograd through the iterations | implicit differentiation at the solution (`deriv_tol`) | memory does not grow with the iterations |
