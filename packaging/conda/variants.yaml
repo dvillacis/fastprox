@@ -1,0 +1,40 @@
+# The compilers and C standard library of conda-forge's global pinning
+# (conda-forge-pinning-feedstock, recipe/conda_build_config.yaml), for
+# building the recipe outside conda-forge's infrastructure, which supplies
+# them itself. Update with that file.
+c_compiler:
+  - if: linux
+    then: gcc
+  - if: osx
+    then: clang
+  - if: win
+    then: vs2022
+cxx_compiler:
+  - if: linux
+    then: gxx
+  - if: osx
+    then: clangxx
+  - if: win
+    then: vs2022
+c_compiler_version:
+  - if: linux
+    then: "15"
+  - if: osx
+    then: "21"
+cxx_compiler_version:
+  - if: linux
+    then: "15"
+  - if: osx
+    then: "21"
+c_stdlib:
+  - if: linux
+    then: sysroot
+  - if: osx
+    then: macosx_deployment_target
+  - if: win
+    then: vs
+c_stdlib_version:
+  - if: linux
+    then: "2.17"
+  - if: osx
+    then: "11.0"

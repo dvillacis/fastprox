@@ -1,0 +1,37 @@
+# Builds and tests the conda-forge recipe (packaging/conda/recipe.yaml) from
+# this checkout with rattler-build, on the platforms conda-forge builds for,
+# when the recipe or the build changes.
+name: conda
+
+on:
+  pull_request:
+    paths:
+      - packaging/conda/**
+      - CMakeLists.txt
+      - bindings/python/CMakeLists.txt
+      - pyproject.toml
+      - .github/workflows/conda.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conda-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/rattler-build-action@v0.2.39
+        with:
+          recipe-path: packaging/conda/recipe.yaml
+          # conda-forge's compilers and stdlib (its global pinning supplies them there).
+          build-args: --experimental -c conda-forge -m packaging/conda/variants.yaml
+          artifact-name: conda-${{ matrix.os }}
