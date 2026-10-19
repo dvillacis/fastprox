@@ -71,7 +71,12 @@ outputs:
       python:
         version_independent: true  # abi3: one package for CPython 3.12 and later
       script:
-        - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation -Ccmake.define.FASTPROX_STATIC_LIBSTDCXX=OFF
+        env:
+          # Otherwise scikit-build-core may pick Makefiles, and conda-forge's
+          # Linux image has no make.
+          CMAKE_GENERATOR: Ninja
+        content:
+          - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation -Ccmake.define.FASTPROX_STATIC_LIBSTDCXX=OFF
     requirements:
       build:
         - ${{ compiler('c') }}
@@ -92,8 +97,17 @@ outputs:
       - python:
           imports:
             - fastprox
-          python_version: ${{ python_min }}.*
+          python_version:  # abi3: the oldest and the newest supported Python
+            - ${{ python_min }}.*
+            - "*"
           pip_check: true
+      - requirements:
+          run:
+            - abi3audit
+        script:
+          - if: unix
+            then: abi3audit ${SP_DIR}/fastprox/_fastprox.abi3.so -s -v --assume-minimum-abi3 ${{ python_min }}
+            else: abi3audit %SP_DIR%\fastprox\_fastprox.pyd -s -v --assume-minimum-abi3 ${{ python_min }}
       - script:
           - python -c "import numpy as np, fastprox as fp; z = fp.tv1d(np.arange(5.0), 0.5); assert z.shape == (5,), z; assert fp.__version__ == '${{ version }}', fp.__version__"
         requirements:
