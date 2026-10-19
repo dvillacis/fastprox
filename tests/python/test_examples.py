@@ -86,6 +86,12 @@ def test_autodiff_frameworks_learn():
     assert abs(gamma / best - 1) < 0.1           # grid spacing is 7%
 
 
+def test_pyproximal_tv_deblurs():
+    pytest.importorskip("pyproximal")
+    blurred, ours, theirs = _load("pyproximal_tv").main()
+    assert ours > blurred + 4 and abs(ours - theirs) < 0.5
+
+
 def test_every_example_is_listed():
     """examples/README.md's table lists every script: the documentation
     site builds its examples page from it (docs/hooks/include.py)."""

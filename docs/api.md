@@ -928,6 +928,41 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   this repository, `uv sync --group interop` installs both (PyTorch's CPU
   wheels on Linux).
 
+### PyProximal (*since 1.0*)
+
+`fastprox.pyproximal.ProxOp(op, dims=None, *, warm=False, value_tol=1e-6,
+**prox_kwargs)` turns any operator into a `pyproximal.ProxOperator`, so it
+can be used in PyProximal's solvers (proximal gradient, ADMM, primal-dual,
+and others).
+
+```python
+import pyproximal
+from fastprox.pyproximal import ProxOp
+
+g = ProxOp(fp.TVIso(), dims=(64, 64), tol=1e-6, warm=True)
+x = pyproximal.optimization.primal.ProximalGradient(f, g, x0, tau=0.9, epsg=0.02)
+```
+
+- **Shapes.** PyProximal passes flat vectors, and `dims` is the array
+  shape the operator acts on: `(B, n)` is a batch of rows and `(B, H, W)` a
+  batch of images. The value is summed over the batch.
+- **Methods.** `g(x)` is $g(x)$, from `Operator.value`, with a set's
+  indicator taken to `value_tol`. `prox(x, tau)` is
+  $\operatorname{prox}_{\tau g}(x)$. `proxdual(x, tau)` is
+  $\operatorname{prox}_{\tau g^\ast}(x)$, fastprox's `prox_conj`.
+  `tau` must be a positive scalar; PyProximal's arrays of steps, for
+  several right-hand sides, are rejected.
+- **Warm starts.** With `warm=True`, the iterative image operators start
+  each solve from the previous dual.
+- **Keywords.** The other keywords (`axis`, `tol`, `max_iter`, `threads`)
+  go to `prox` and `prox_conj`; `axis` also goes to `value`.
+- **Installation.** PyProximal (LGPL-3.0) is not a dependency: install it
+  yourself, or in this repository use `uv sync --group interop`. The adapter
+  is written against PyProximal's documented interface.
+- **Checks.** `tests/python/test_pyproximal.py` checks the adapter against
+  PyProximal's `L1` and with its `moreau` test, and runs a lasso through
+  `ProximalGradient`. `examples/pyproximal_tv.py` deblurs an image.
+
 ### Device-native image TV (*since 0.3*)
 
 `fastprox.torch.tv_iso`, `tv_aniso` and `fastprox.jax.tv_iso`, `tv_aniso`
