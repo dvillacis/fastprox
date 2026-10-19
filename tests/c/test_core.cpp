@@ -1421,6 +1421,27 @@ static void test_edge_kinks() {
     CHECK(std::fabs(d.data[0]) < 1e-15 && std::fabs(d.data[1]) < 1e-15);
     fp_workspace_free(ws);
     fp_op_free(op);
+
+    // Graph TV on the 4-cycle 0-1-2-3-0 at x = (1, 1, -1, -1): the solver's
+    // flow saturates edges (1, 2) and (3, 0); both kept apart split the cycle.
+    const int64_t cyc[8] = {0, 1, 1, 2, 2, 3, 3, 0};
+    CHECK_OK(fp_op_graph_tv(4, 4, cyc, nullptr, &op));
+    Arr xc({4}, {1.0, 1.0, -1.0, -1.0}), zc({4}), dc({4});
+    CHECK_OK(fp_workspace_create(op, &xc.a, &o, &ws));
+    CHECK_OK(fp_prox(op, 1.0, &xc.a, &zc.a, &o, ws, nullptr));
+    I8 mc({4}, {1}, 4), both({4}, {1}, 4), one({4}, {1}, 4);
+    CHECK_OK(fp_workspace_kinks(ws, 1e-10, &mc.a, &count));
+    CHECK(count == 2 && mc.data == std::vector<int8_t>({0, 1, 0, 1}));
+    both.data = {0, 1, 0, 1};
+    one.data = {0, 1, 0, 0};
+    CHECK_OK(fp_workspace_set_branch(ws, &one.a, 1e-10));
+    CHECK_OK(fp_jvp(op, ws, &xc.a, 0.0, nullptr, &dc.a));
+    CHECK(std::fabs(dc.data[0]) < 1e-12 && std::fabs(dc.data[3]) < 1e-12);
+    CHECK_OK(fp_workspace_set_branch(ws, &both.a, 1e-10));
+    CHECK_OK(fp_jvp(op, ws, &xc.a, 0.0, nullptr, &dc.a));
+    for (int i = 0; i < 4; ++i) CHECK(std::fabs(dc.data[i] - xc.data[i]) < 1e-10);
+    fp_workspace_free(ws);
+    fp_op_free(op);
 }
 
 static void test_kinks() {

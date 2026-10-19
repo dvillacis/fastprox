@@ -480,7 +480,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
         int64_t off[1];
         p.offsets(r, off);
         const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
-        count += op.kink_image(xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.gamma, t,
+        count += op.kink_image(ws.image_struct(r), xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.gamma, t,
                                md ? md + off[0] : scratch.data(), ms, reinterpret_cast<char *>(work.data()));
     }
     return count;

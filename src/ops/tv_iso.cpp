@@ -520,7 +520,7 @@ struct TVIso final : ImageOp<TVIso> {
     // dual is within tol of the sphere, |u_p| >= gamma alpha_p - tol (pixels
     // of zero radius are free, never kinks).
     bool has_kinks() const noexcept override { return true; }
-    int64_t kink_image(const double *, const double *z, const double *u, const int64_t *shape, double gamma,
+    int64_t kink_image(const char *, const double *, const double *z, const double *u, const int64_t *shape, double gamma,
                        double tol, int8_t *mask, const int64_t *ms, char *) const noexcept override {
         const Geom g(k, shape);
         const int64_t N = g.N;

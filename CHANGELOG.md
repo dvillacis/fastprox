@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Kink masks and branch overrides for the box and the nonnegative orthant (entries on a bound), the simplex and the ℓ1 ball (entries at the threshold, on or off the support; for the ℓ1 ball also a row on its sphere, inside or projected) and group ℓ2 (a group at its threshold, zeroed or live), through `fp_workspace_kinks`/`fp_workspace_set_branch` and `ctx.kinks`/`branch=` as for the other operators. Row-level kinks take the side given at the row's or group's first entry. Group ℓ2 now saves its live groups for its derivatives, which are unchanged. Each side matches its one-sided difference (`tests/python/test_kinks.py`).
 - Kink masks and branch overrides for tree TV, whose kinks are edges: masks and sides have the shape of x with the last axis over the edges (`fp_workspace_kinks`/`fp_workspace_set_branch` take that shape). An edge with equal ends and its flow on its bound is joined (−1, the default) or kept apart (+1). The fuzzer now covers tree TV.
+- The same for graph TV, judged on the flow its solver found, which the prox call now saves with the structure (one double per edge and image); on a graph with cycles the flow is not unique. Graph TV on a forest gives tree TV's kinks and derivatives. The fuzzer now covers graph TV.
+
+### Changed
+
+- A cleared branch override of an image operator (anisotropic, graph and tree TV) copies back the prox call's own structure instead of rebuilding it from the saved x and z, so it is the default bit for bit in float32 too.
 
 ## [0.3.0] — 2026-10-19
 

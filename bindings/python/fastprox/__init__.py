@@ -152,9 +152,10 @@ class Context:
         (bit a for such an edge along axis a) and isotropic TV (1 at a pixel
         with no gradient whose dual is on its sphere; no branch overrides).
         Since 0.4 the box, the orthant, the simplex, the l1 ball, group l2
-        and tree TV, whose kinks are its edges: its masks and branches have
-        the shape of x with the last axis of length ``len(edges)`` (1 at an
-        edge with no jump whose flow is on its bound)."""
+        and graph and tree TV, whose kinks are their edges: their masks and
+        branches have the shape of x with the last axis of length
+        ``len(edges)`` (1 at an edge with no jump whose flow is on its
+        bound)."""
         mask = np.empty(_kink_shape(self), np.int8)
         _C.kinks(self.ws, float(tol), mask)
         return mask
@@ -809,9 +810,22 @@ class GraphTV(_ImageOperator):
     gap with the flow as the dual, ``info.iters`` the number of max-flow
     solves; ``info.dual`` (shape (1, *x.shape)) is q with z = x - q. Warm
     starts have no effect. ``jvp`` and ``vjp`` are exact (averages over the
-    regions where z is constant). Parameters: weights."""
+    regions where z is constant). Parameters: weights.
+
+    Kinks (since 0.4) are edges: ``ctx.kinks`` and ``branch`` have the
+    shape of x with the last axis over the edges, in the order of
+    ``edges``. An edge is at a kink when its ends are equal and the
+    solver's flow on it is on its bound (on a graph with cycles the flow is
+    not unique; this is the one behind ``info.gap``). -1 joins its ends (the
+    default), +1 keeps them apart; a region splits only where every edge
+    across the split is kept apart."""
+
 
     _make = staticmethod(_C.graph_tv)
+
+    @property
+    def _kink_sites(self):
+        return len(self.edges)
 
     def __init__(self, n, edges, weights=None):
         e = np.ascontiguousarray(edges, dtype=np.int64)
@@ -850,16 +864,10 @@ class TreeTV(GraphTV):
     orientation; a chain is a tree). By dynamic programming (Kolmogorov, Pock
     and Rolinek), O(n log n) and exact up to rounding; ``tol`` and
     ``max_iter`` are ignored and ``info.iters`` is 1. ``info.gap``,
-    ``info.dual`` and the derivatives are those of :class:`GraphTV`.
-    Kinks (since 0.4) are edges: ``ctx.kinks`` and ``branch`` have the
-    shape of x with the last axis over the edges, -1 joining an edge's ends
-    and +1 keeping them apart. Parameters: weights."""
+    ``info.dual``, the derivatives and the kinks are those of
+    :class:`GraphTV`, with the flow unique on a forest. Parameters: weights."""
 
     _make = staticmethod(_C.tree_tv)
-
-    @property
-    def _kink_sites(self):
-        return len(self.edges)
 
 
 class TVIso(_ImageOperator):

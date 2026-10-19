@@ -551,3 +551,67 @@ def test_tree_tv_restore_is_default(dtype):
     split = op.jvp(ctx, d, branch=np.where(k != 0, 1, 0).astype(np.int8), kink_tol=1e-5)
     assert np.abs(split - before).max() > 0.1
     np.testing.assert_array_equal(op.jvp(ctx, d), before)
+
+
+# ---- graph TV: kinks on the solver's flow (since 0.4) ----------------------
+
+
+def test_graph_tv_cycle_kinks():
+    """x = (1, 1, -1, -1) on the 4-cycle 0-1-2-3-0 at gamma w = 1: z = 0 and
+    the only feasible flow saturates the two edges across {0, 1} | {2, 3},
+    (1, 2) and (3, 0). Splitting needs both kept apart; one alone leaves the
+    region joined through the other."""
+    op = fp.GraphTV(4, np.array([[0, 1], [1, 2], [2, 3], [3, 0]]))
+    x = np.array([1.0, 1.0, -1.0, -1.0])
+    z, ctx = op.prox(x, 1.0, keep=True)
+    np.testing.assert_allclose(z, 0.0, atol=1e-14)
+    assert ctx.kinks(1e-10).tolist() == [0, 1, 0, 1]
+    np.testing.assert_allclose(_one_sided(op, x, x, 1, tol=1e-10), x, atol=1e-10)
+    np.testing.assert_allclose(_one_sided(op, x, -x, -1, tol=1e-10), 0.0, atol=1e-12)
+    one = op.jvp(ctx, x, branch=np.array([0, 1, 0, 0], np.int8), kink_tol=1e-10)
+    np.testing.assert_allclose(one, 0.0, atol=1e-12)
+
+
+def test_graph_tv_matches_tree_tv_on_a_forest():
+    rng = np.random.default_rng(8)
+    n = 120
+    par = rng.integers(0, np.arange(1, n))
+    edges = np.stack([np.arange(1, n), par], 1)
+    g, t = fp.GraphTV(n, edges), fp.TreeTV(n, edges)
+    X = np.round(2 * rng.normal(size=(2, n))) / 2
+    _, cg = g.prox(X, 0.5, keep=True)
+    _, ct = t.prox(X, 0.5, keep=True)
+    kg, kt = cg.kinks(1e-9), ct.kinks(1e-9)
+    np.testing.assert_array_equal(kg, kt)
+    assert (kg != 0).sum() > 10
+    d = rng.normal(size=X.shape)
+    b = np.where(kg != 0, rng.choice([-1, 1], size=kg.shape), 0).astype(np.int8)
+    np.testing.assert_allclose(g.jvp(cg, d, branch=b, kink_tol=1e-9), t.jvp(ct, d, branch=b, kink_tol=1e-9),
+                               atol=1e-10)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_graph_tv_grid_overrides(dtype):
+    """On a 12 x 12 grid with many kinks: overrides change the derivative, the
+    VJP stays the adjoint of the JVP, and clearing gives back the default bit
+    for bit."""
+    rng = np.random.default_rng(9)
+    s = 12
+    idx = np.arange(s * s).reshape(s, s)
+    edges = np.concatenate([np.stack([idx[:, :-1].ravel(), idx[:, 1:].ravel()], 1),
+                            np.stack([idx[:-1].ravel(), idx[1:].ravel()], 1)])
+    op = fp.GraphTV(s * s, edges)
+    X = (np.round(2 * rng.normal(size=(2, s * s))) / 2).astype(dtype)
+    _, ctx = op.prox(X, 0.5, keep=True, tol=1e-12)
+    d = rng.normal(size=X.shape).astype(dtype)
+    g = rng.normal(size=X.shape).astype(dtype)
+    before = op.jvp(ctx, d)
+    k = ctx.kinks(1e-5)
+    assert k.shape == (2, len(edges)) and (k != 0).sum() > 10
+    b = np.where(k != 0, 1, 0).astype(np.int8)
+    jv = op.jvp(ctx, d, branch=b, kink_tol=1e-5)
+    gx, _ = op.vjp(ctx, g, branch=b, kink_tol=1e-5)
+    assert np.abs(jv - before).max() > 0.1
+    lhs, rhs = float((g.astype(float) * jv).sum()), float((gx.astype(float) * d).sum())
+    assert abs(lhs - rhs) <= (1e-4 if dtype == np.float32 else 1e-10) * (1 + abs(lhs))
+    np.testing.assert_array_equal(op.jvp(ctx, d), before)

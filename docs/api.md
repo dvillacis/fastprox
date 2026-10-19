@@ -484,7 +484,7 @@ avoid kinks.
 **Kink masks and branch overrides (*since 0.2*).** For soft thresholding,
 ℓ1 over a box, SCAD and MCP (since 0.3 also ℓ0, ℓq and the log penalty, 1D
 and anisotropic TV, and masks for isotropic TV; since 0.4 the box, the
-orthant, the simplex, the ℓ1 ball, group ℓ2 and tree TV), the kinks of a kept prox call can be read and
+orthant, the simplex, the ℓ1 ball, group ℓ2, graph and tree TV), the kinks of a kept prox call can be read and
 the piece differentiated there chosen, which gives the other elements of the
 B-subdifferential, for example both elements at a biactive entry, or the
 SCD subspaces of each entry:
@@ -514,13 +514,21 @@ SCD subspaces of each entry:
   zeroed group, +1 the projection with τ = 0 or the live shrink, its
   formula taken at x. Each side is the derivative of the one-sided
   difference in a direction that keeps its piece.
-- **Tree TV** (*since 0.4*): its kinks are edges, so `ctx.kinks(tol)` and
-  `branch=` have the shape of x with the last axis over the edges, in the
-  order of `edges`. An edge is at a kink when its ends are equal (within
-  `tol`) and its flow, the sum of x − z over the subtree below it (unique
-  on a forest), is within `tol` of γwₑ; −1 joins its ends (the default)
-  and +1 keeps them apart, with the jump taking the flow's sign. Graph TV
-  has no masks yet: on a graph with cycles the flow is not unique.
+- **Graph and tree TV** (*since 0.4*): their kinks are edges, so
+  `ctx.kinks(tol)` and `branch=` have the shape of x with the last axis
+  over the edges, in the order of `edges`. An edge is at a kink when its
+  ends are equal (within `tol`) and its flow is within `tol` of γwₑ; −1
+  joins its ends (the default) and +1 keeps them apart, with the jump
+  taking the flow's sign. A region splits only where every edge across the
+  split is kept apart (on a cycle, at least two edges). Tree TV's flow is
+  the sum of x − z over the subtree below the edge, unique on a forest;
+  graph TV uses the flow its solver found, saved with the structure (one
+  double per edge and image), since on a graph with cycles the flow is not
+  unique and a kink depends on which one is used.
+- **Isotropic TV** has masks but no branch overrides (`fp_workspace_set_branch`
+  returns `FP_EINVAL`): keeping a pixel with zero gradient apart from its
+  neighbours has infinite curvature γ/‖g_p‖, which its derivative system
+  holds only through the curvature cap.
 - **TV kinks** (*since 0.3*), from the saved solution z and dual: 1D TV
   flags (code 1) the entry i at the tail of an edge with no jump,
   |z_{i+1} − z_i| ≤ `tol`, whose dual Σ_{j≤i}(x_j − z_j) is within `tol` of
