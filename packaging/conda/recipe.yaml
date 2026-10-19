@@ -115,5 +115,6 @@ about:
     with Python bindings (fastprox) and PyTorch, JAX and PyProximal adapters.
 
 extra:
+  feedstock-name: fastprox  # the top-level name differs from the outputs'
   recipe-maintainers:
     - dvillacis
