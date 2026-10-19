@@ -73,7 +73,7 @@ class EIBFS {
         mark_ = reinterpret_cast<uint8_t *>(c);
         c += rnd(n);
         side_ = reinterpret_cast<uint8_t *>(c);
-        for (Index p = 0; p < g.n; ++p) side_[p] = kFree;
+        for (Index p = 0; p < g.n; ++p) tree_[p] = side_[p] = kFree;
     }
 
     // The problem: set every edge and terminal, then start().
@@ -274,9 +274,12 @@ class EIBFS {
             return;
         }
         const Index first = g_.first[v], end = g_.first[v + 1], dv = d_[v];
+        // Residual arcs are tested first throughout: with a node set, the
+        // nodes outside it are reached only by arcs of zero residual, and
+        // their state (stale from earlier solves) is never read.
         for (Index a = cur_[v]; a < end; ++a) {
             const Index u = g_.head[a];
-            if (tree_[u] == tag(x) && d_[u] == dv - 1 && up_cap(x, a) > 0) {
+            if (up_cap(x, a) > 0 && tree_[u] == tag(x) && d_[u] == dv - 1) {
                 par_[v] = a;
                 cur_[v] = a;
                 return;
@@ -289,14 +292,16 @@ class EIBFS {
         Index best = -1, ba = -1;
         for (Index a = first; a < end && !(ba >= 0 && best == dv); ++a) {
             const Index u = g_.head[a];
-            if (tree_[u] == tag(x) && up_cap(x, a) > 0 && d_[u] <= lim && (ba < 0 || d_[u] < best)) {
+            if (up_cap(x, a) > 0 && tree_[u] == tag(x) && d_[u] <= lim && (ba < 0 || d_[u] < best)) {
                 best = d_[u];
                 ba = a;
             }
         }
-        for (Index a = first; a < end; ++a) {  // the children become orphans
-            const Index w = g_.head[a];
-            if (tree_[w] == tag(x) && par_[w] == g_.sister[a]) orphan(x, w);
+        // The children become orphans. A child's arc to v is residual, or it
+        // was saturated by an augmentation that already made it an orphan.
+        for (Index a = first; a < end; ++a) {
+            const Index w = g_.head[a], b = g_.sister[a];
+            if ((x == kS ? r_[a] : r_[b]) > 0 && tree_[w] == tag(x) && par_[w] == b) orphan(x, w);
         }
         if (ba >= 0) {
             par_[v] = ba;

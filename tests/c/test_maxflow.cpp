@@ -564,6 +564,43 @@ static void test_subset() {
         CHECK(same);
         CHECK(untouched);
     }
+    // After a full solve every node has forest state; cutting the edges
+    // between two halves and solving one must leave the other alone (graph
+    // TV's finished parts) and agree with a fresh solve of that half.
+    for (int rep = 0; rep < 8; ++rep) {
+        const std::vector<int> sh = {30, 40};
+        Problem pb = grid_problem(sh, rep % 2 ? 8 : 4, blocky(1200, 6, true), 3.0, 1.0);
+        Graph g;
+        build<double>(g, pb);
+        Mem mem(MF<double>::bytes(g)), mem2(MF<double>::bytes(g));
+        MF<double> mf(g, mem.data());
+        load(mf, pb);
+        mf.solve();
+        std::vector<char> in(pb.n);
+        for (Index p = 0; p < pb.n; ++p) in[p] = (p % 40) < 20 + rep;  // left columns
+        for (Index e = 0; e < g.m; ++e)
+            if (in[pb.u[e]] != in[pb.v[e]]) mf.set_edge(e, 0.0, 0.0);
+        for (Index p = 0; p < pb.n; ++p)
+            if (in[p]) mf.add_terminal(p, double(irand(-3, 3)));
+        const Problem rp = residual_problem(g, mf, pb);
+        std::vector<int32_t> nodes;
+        for (Index p = 0; p < pb.n; ++p)
+            if (in[p]) nodes.push_back(p);
+        mf.solve(nodes.data(), int64_t(nodes.size()));
+        MF<double> fresh(g, mem2.data());
+        load(fresh, rp);
+        fresh.solve();
+        bool same = true, untouched = true;
+        for (Index p = 0; p < pb.n; ++p) {
+            if (in[p]) same &= mf.tree(p) == fresh.tree(p);
+            else untouched &= mf.terminal(p) == rp.term[p];
+        }
+        for (Index e = 0; e < g.m; ++e)
+            if (!in[pb.u[e]] && !in[pb.v[e]])
+                untouched &= mf.residual(g.arc[e]) == rp.cuv[e] && mf.residual(g.sister[g.arc[e]]) == rp.cvu[e];
+        CHECK(same);
+        CHECK(untouched);
+    }
 }
 #endif
 
