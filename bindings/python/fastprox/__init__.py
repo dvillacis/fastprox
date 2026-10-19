@@ -150,9 +150,12 @@ class Context:
         to ``jvp``/``vjp`` as ``branch``. Since 0.3 also 1D TV (1 at the tail
         of an edge whose dual is on its bound with no jump), anisotropic TV
         (bit a for such an edge along axis a) and isotropic TV (1 at a pixel
-        with no gradient whose dual is on its sphere); their branch
-        overrides are not available yet."""
-        mask = np.empty(self.shape, np.int8)
+        with no gradient whose dual is on its sphere; no branch overrides).
+        Since 0.4 the box, the orthant, the simplex, the l1 ball, group l2
+        and tree TV, whose kinks are its edges: its masks and branches have
+        the shape of x with the last axis of length ``len(edges)`` (1 at an
+        edge with no jump whose flow is on its bound)."""
+        mask = np.empty(_kink_shape(self), np.int8)
         _C.kinks(self.ws, float(tol), mask)
         return mask
 
@@ -165,8 +168,9 @@ class _branch:
         self.side = None
         if branch is not None:
             side = np.asarray(branch)
-            if side.shape != ctx.shape:
-                side = np.broadcast_to(side, ctx.shape)
+            shape = _kink_shape(ctx)
+            if side.shape != shape:
+                side = np.broadcast_to(side, shape)
             self.side = np.ascontiguousarray(side, dtype=np.int8)
             if not np.array_equal(self.side, side):
                 raise ValueError("branch entries must be -1, 0 or 1")
@@ -180,6 +184,13 @@ class _branch:
         if self.side is not None:
             _C.set_branch(self.ws, None, 0.0)
         return False
+
+
+def _kink_shape(ctx):
+    """Shape of the kink masks and branches: x's, or for tree TV with the
+    last axis over the edges."""
+    sites = getattr(ctx.op, "_kink_sites", None)
+    return ctx.shape if sites is None else tuple(ctx.shape[:-1]) + (sites,)
 
 
 def _kink_tol(tol):
@@ -840,9 +851,15 @@ class TreeTV(GraphTV):
     and Rolinek), O(n log n) and exact up to rounding; ``tol`` and
     ``max_iter`` are ignored and ``info.iters`` is 1. ``info.gap``,
     ``info.dual`` and the derivatives are those of :class:`GraphTV`.
-    Parameters: weights."""
+    Kinks (since 0.4) are edges: ``ctx.kinks`` and ``branch`` have the
+    shape of x with the last axis over the edges, -1 joining an edge's ends
+    and +1 keeping them apart. Parameters: weights."""
 
     _make = staticmethod(_C.tree_tv)
+
+    @property
+    def _kink_sites(self):
+        return len(self.edges)
 
 
 class TVIso(_ImageOperator):

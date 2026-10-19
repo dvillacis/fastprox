@@ -968,7 +968,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     // bound are free, never kinks).
     bool has_kinks() const noexcept override { return true; }
     int64_t kink_image(const double *, const double *z, const double *q, const int64_t *shape, double gamma,
-                       double tol, int8_t *mask, const int64_t *ms) const noexcept override {
+                       double tol, int8_t *mask, const int64_t *ms, char *) const noexcept override {
         const Geom g(k, shape);
         const int64_t N = g.N;
         int64_t count = 0;

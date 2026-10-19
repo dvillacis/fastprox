@@ -82,6 +82,7 @@ struct Case {
     std::vector<double> params[3];
     std::vector<int64_t> groups;
     std::vector<float> fparams;  // float32 copy of params[1] (spatial weights)
+    int64_t sites = -1;          // kinks on m edges (tree TV): masks of shape (..., m)
 };
 
 fp_array vec(std::vector<double> &v) {
@@ -119,7 +120,7 @@ fp_array spatial(Bytes &b, Case &c, int k, bool edges, int xnd, const int64_t *x
 // Builds an operator from the bytes; params are sized for axis length n of
 // an array with xnd axes of extents xs.
 fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
-    const int kind = b.u8() % 33;
+    const int kind = b.u8() % 34;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -291,6 +292,25 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             a0 = vec(c.params[0]);
             return fp_op_tv1d_ball(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
         }
+        case 33: {  // tree TV: a random forest on the last axis, some weights zero
+            const int64_t N = xnd ? xs[xnd - 1] : 1;
+            c.groups.clear();
+            for (int64_t i = 1; i < N; ++i)
+                if (b.u8() % 4) {
+                    const int64_t j = b.u8() % i;
+                    const bool flip = b.u8() % 2;
+                    c.groups.push_back(flip ? j : i);
+                    c.groups.push_back(flip ? i : j);
+                }
+            const int64_t m = static_cast<int64_t>(c.groups.size() / 2);
+            fill(c.params[0], b.u8() % 2 ? 1 : m);
+            if (b.u8() % 4 == 0)
+                for (auto &w : c.params[0])
+                    if (b.u8() % 3 == 0) w = 0.0;
+            a0 = vec(c.params[0]);
+            c.sites = m;
+            return fp_op_tree_tv(N, m, c.groups.data(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
         case 29: {
             fill(c.params[0], pick == 1 ? 1 : n - 1);
             if (b.u8() % 4 == 0)
@@ -450,13 +470,16 @@ void run(const uint8_t *data, size_t size) {
             // other operator, or a failed prox, answers FP_EINVAL).
             std::vector<int8_t> mask, side;
             if (b.u8() % 2) {
-                int64_t numel = 1;
-                for (int d = 0; d < x.ndim; ++d) numel *= x.shape[d];
+                int64_t ms_shape[3], numel = 1;
+                for (int d = 0; d < x.ndim; ++d) {
+                    ms_shape[d] = c.sites >= 0 && d == x.ndim - 1 ? c.sites : x.shape[d];
+                    numel *= ms_shape[d];
+                }
                 mask.assign(static_cast<size_t>(numel), 0);
                 side.resize(mask.size());
                 for (auto &v : side) v = static_cast<int8_t>(b.u8() % 3) - 1;
-                fp_array ma{mask.data(), FP_I8, x.ndim, x.shape, nullptr, FP_DEVICE_CPU};
-                fp_array sa{side.data(), FP_I8, x.ndim, x.shape, nullptr, FP_DEVICE_CPU};
+                fp_array ma{mask.data(), FP_I8, x.ndim, ms_shape, nullptr, FP_DEVICE_CPU};
+                fp_array sa{side.data(), FP_I8, x.ndim, ms_shape, nullptr, FP_DEVICE_CPU};
                 const double tol = b.u8() % 2 ? 0.0 : std::fabs(b.value());
                 int64_t count = 0;
                 const fp_status ks = fp_workspace_kinks(ws, tol, &ma, &count);

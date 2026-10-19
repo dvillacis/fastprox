@@ -1384,6 +1384,45 @@ struct I8 {  // int8 array with an fp_array view; strides in elements
     }
 };
 
+// Tree TV's kinks are edges (since 0.4): masks and sides of shape (..., m).
+// x = (2, -1, 5) on the chain 0-1-2, gamma = 1: z = (1, 1, 4) with the flow
+// on edge (0, 1) at its bound.
+static void test_edge_kinks() {
+    const int64_t edges[4] = {0, 1, 1, 2};
+    fp_op *op;
+    CHECK_OK(fp_op_tree_tv(3, 2, edges, nullptr, &op));
+    Arr x({2, 3}, {2.0, -1.0, 5.0, 3.0, 0.0, -3.0}), z({2, 3}), d({2, 3});
+    Arr dx({2, 3}, {1.0, -1.0, 0.0, 1.0, -1.0, 0.0});
+    fp_options o = opts(-1, 0, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+    CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+    I8 m({2, 2}, {2, 1}, 4), wrong({2, 3}, {3, 1}, 6);
+    int64_t count = -1;
+    CHECK_OK(fp_workspace_kinks(ws, 1e-12, &m.a, &count));
+    CHECK(count == 1 && m.data == std::vector<int8_t>({1, 0, 0, 0}));
+    CHECK(fp_workspace_kinks(ws, 1e-12, &wrong.a, &count) == FP_ESHAPE);
+    CHECK(fp_workspace_set_branch(ws, &wrong.a, 1e-12) == FP_ESHAPE);
+    // Default: joined, so the split direction has no effect on nodes 0 and 1.
+    CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &d.a));
+    CHECK(std::fabs(d.data[0]) < 1e-15 && std::fabs(d.data[1]) < 1e-15);
+    I8 up({2, 2}, {2, 1}, 4);
+    up.data[0] = 1;
+    CHECK_OK(fp_workspace_set_branch(ws, &up.a, 1e-12));
+    CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &d.a));
+    CHECK(std::fabs(d.data[0] - 1.0) < 1e-12 && std::fabs(d.data[1] + 1.0) < 1e-12);
+    // The VJP follows the override (the Jacobian is symmetric here).
+    double gg = 0.0;
+    Arr gp({1}), gx({2, 3});
+    CHECK_OK(fp_vjp(op, ws, &dx.a, &gx.a, &gg, &gp.a));
+    CHECK(std::fabs(gx.data[0] - 1.0) < 1e-12 && std::fabs(gx.data[1] + 1.0) < 1e-12);
+    CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+    CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &d.a));
+    CHECK(std::fabs(d.data[0]) < 1e-15 && std::fabs(d.data[1]) < 1e-15);
+    fp_workspace_free(ws);
+    fp_op_free(op);
+}
+
 static void test_kinks() {
     // Soft thresholding at gamma lambda = 0.4: entries on +-0.4, near it, and away.
     fp_op *op;
@@ -2098,6 +2137,7 @@ int main() {
     test_tree_tv();
     test_nonconvex();
     test_kinks();
+    test_edge_kinks();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

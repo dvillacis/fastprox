@@ -155,6 +155,55 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
         return off;
     }
     size_t image_bytes(const int64_t *) const noexcept override { return layout(nullptr, nullptr) + 64; }
+    static char *aligned(char *p) noexcept { return p + ((64 - reinterpret_cast<uintptr_t>(p) % 64) % 64); }
+
+    // ---- kinks (since 0.4) ------------------------------------------------------
+
+    // The flow on every edge, net from eu to ev: the flow from a child up to
+    // its parent is the sum of x - z over the child's subtree (z = x - div f),
+    // unique on a forest. acc: n doubles by position.
+    void flows(const double *x, const double *z, double *acc, double *f) const noexcept {
+        for (int64_t j = 0; j < n; ++j) acc[j] = x[order[j]] - z[order[j]];
+        for (int64_t j = n - 1; j >= 0; --j)
+            if (up[j] >= 0) acc[up[j]] += acc[j];
+        for (int64_t e = 0; e < m; ++e) {
+            const int32_t j = below[e];
+            f[e] = eu[e] == order[j] ? acc[j] : -acc[j];
+        }
+    }
+    // Kinks are edges (kink_sites): code 1 at an edge with no jump whose flow
+    // is within tol of its capacity gamma w_e > 0; overrides join it (-1) or
+    // keep it apart (+1), rebuilding the saved regions from x and z.
+    int64_t kink_sites() const noexcept override { return m; }
+    bool has_kinks() const noexcept override { return true; }
+    bool has_branches() const noexcept override { return true; }
+    int64_t kink_image(const double *x, const double *z, const double *, const int64_t *, double gamma, double tol,
+                       int8_t *mask, const int64_t *ms, char *work) const noexcept override {
+        Work wk;
+        layout(&wk, aligned(work));
+        const double *f = wk.s;
+        flows(x, z, wk.zv, wk.s);  // by position, then one flow per edge (m < n)
+        int64_t count = 0;
+        for (int64_t e = 0; e < m; ++e) {
+            const double cap = gamma * we(e);
+            const int8_t c = cap > 0.0 && std::fabs(z[eu[e]] - z[ev[e]]) <= tol && std::fabs(f[e]) >= cap - tol;
+            mask[e * ms[0]] = c;
+            count += c;
+        }
+        return count;
+    }
+    void branch_image(char *save, const double *x, const double *z, const double *, const int64_t *shape,
+                      double gamma, double tol, const int8_t *side, char *work) const noexcept override {
+        Work wk;
+        layout(&wk, aligned(work));
+        ImageCall c;
+        c.shape = shape;
+        c.numel = n;
+        c.gamma = gamma;
+        c.save = save;
+        flows(x, z, wk.zv, wk.s);  // positions buffer, then one flow per edge (m < n)
+        structure(x, z, wk.lo, wk.hmax, c, side, tol, wk.s);
+    }
 
     // ---- pairing heaps --------------------------------------------------------
 
@@ -216,8 +265,7 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
     template <class T>
     int prox_img(const T *x, T *z, ImageCall &c) const noexcept {
         Work wk;
-        char *base = c.work + ((64 - reinterpret_cast<uintptr_t>(c.work) % 64) % 64);
-        layout(&wk, base);
+        layout(&wk, aligned(c.work));
         c.gap = 0.0;
         c.iters = 1;
         c.converged = true;
