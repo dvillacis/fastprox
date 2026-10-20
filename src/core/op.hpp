@@ -19,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <type_traits>
+#include <vector>
 
 // Target of min_nonan / max_nonan (see there).
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -186,6 +187,11 @@ struct fp_op {
     // given shape (image operators). The indicator of a set is 0 when x lies
     // in it up to atol = tol * max(1, max |x_i|) and INFINITY otherwise. scr has
 // value_doubles(n) doubles.
+    // Spectral use (since 1.1, fp_op_spectral_check): kSpectralSvd when the
+    // map is absolutely symmetric (permutation and sign invariant, so it can
+    // act on singular values), kSpectralEig when it is permutation invariant
+    // (eigenvalues); both bits for the former.
+    virtual int spectral() const noexcept { return 0; }
     virtual bool has_value() const noexcept { return false; }
     virtual int64_t value_doubles(int64_t n) const noexcept { return n; }  // scr's length
     virtual double value_row(const double *, int64_t, double, double *) const noexcept { return 0.0; }
@@ -252,6 +258,15 @@ namespace fp {
 // Per-entry evaluation of an elementwise operator D: the tie-aware form
 // (D::kTies, nonconvex maps) takes the tie rule and reports a tie; the plain
 // form ignores both.
+// Bits of fp_op::spectral(): absolutely symmetric maps act on both kinds.
+constexpr int kSpectralEig = 1, kSpectralSvd = 2, kSpectralBoth = kSpectralEig | kSpectralSvd;
+// Spectral use needs the same map for every entry: no weights, or equal ones.
+inline bool uniform(const std::vector<double> &w) noexcept {
+    for (double v : w)
+        if (v != w[0]) return false;
+    return true;
+}
+
 // atol of a set's indicator for the row x (see fp_op::value_row).
 inline double value_atol(const double *x, int64_t n, double tol) noexcept {
     double m = 1.0;

@@ -108,6 +108,11 @@ struct fp_workspace {
     fp::Buffer<double> struct_default;
     bool override_on = false;
 
+    // Scratch of fp_spectral_jvp (since 1.1), per thread: sized by its first
+    // call, so that workspaces of operators never used on a spectrum do not
+    // carry it.
+    mutable fp::Buffer<double> spectral;
+
     // State of the last prox call.
     bool valid = false;
     bool conj = false;

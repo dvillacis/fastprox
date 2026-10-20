@@ -468,6 +468,39 @@ FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws,
  * ||z - x||^2 / (2 gamma). */
 FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out);
 
+/* ------------------------------------------------------------------------
+ * Spectral operators (since 1.1): an operator applied to the singular values
+ * (FP_SPECTRAL_SVD) or the eigenvalues (FP_SPECTRAL_EIG) of each matrix of a
+ * batch. The caller computes the decomposition, X = U diag(s) V^T (thin SVD,
+ * k = min(m, n)) or X = Q diag(s) Q^T, and the matrix products; the prox is
+ * fp_prox on s, shape (..., k) along the last axis, giving z, and the prox of
+ * the matrix is U diag(z) V^T or Q diag(z) Q^T.
+ * ---------------------------------------------------------------------- */
+typedef enum { FP_SPECTRAL_SVD = 0, FP_SPECTRAL_EIG = 1 } fp_spectral_kind;
+
+/* FP_OK when op can act on a spectrum of this kind: absolutely symmetric
+ * (invariant under permutations and sign changes) for the SVD kind,
+ * permutation invariant for the EIG kind, with equal weights where it has
+ * weights; FP_EINVAL otherwise. */
+FP_API fp_status fp_op_spectral_check(const fp_op *op, fp_spectral_kind kind);
+
+/* The k x k core of the derivative of the spectral map, after
+ * fp_prox(op, gamma, s -> z) with keep_structure on ws (s of shape (..., k),
+ * axis -1, not fp_prox_conj). From A (..., k, k), A = U^T H V or Q^T H Q, it
+ * writes B (..., k, k) and, for the SVD kind, r (..., k; may be NULL), so
+ * that the derivative in the direction H is U B V^T + (I - U U^T) H V diag(r)
+ * V^T for m >= n (U diag(r) U^T H (I - V V^T) for m < n), or Q B Q^T. dgamma
+ * and dparams act as in fp_jvp. The map is self-adjoint: with a cotangent G,
+ * A = U^T G V gives the VJP, and the gradients in gamma and the parameters
+ * are fp_vjp on diag(A). s and z are those of the prox call; s >= 0 for the
+ * SVD kind. b and r must not overlap a, s or z. With ws, it allocates only
+ * on its first call (scratch of about 8k doubles per thread, kept in ws). */
+FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
+                                 fp_spectral_kind kind, const fp_array *s,
+                                 const fp_array *z, const fp_array *a,
+                                 double dgamma, const fp_array *dparams,
+                                 fp_array *b, fp_array *r);
+
 FP_API const char *fp_strerror(fp_status s);
 FP_API int         fp_abi_version(void);
 FP_API const char *fp_version_string(void);

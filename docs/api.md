@@ -735,6 +735,48 @@ With the step $\gamma$, $z = \operatorname{prox}_{\gamma g}(x)$ minimises
 $g(y) + \lVert y - x \rVert_2^2 / (2\gamma)$. `tests/python/test_value.py`
 checks every operator's value against its prox this way.
 
+### Spectral operators (*since 1.1*)
+
+An operator on the singular values or eigenvalues of each matrix of a batch:
+$g(X) = h(s)$ for $X = U \operatorname{diag}(s) V^\top$ (thin SVD,
+$k = \min(m, n)$) or $X = Q \operatorname{diag}(s) Q^\top$, with
+$\operatorname{prox}_{\gamma g}(X) = U \operatorname{diag}(z) V^\top$ and
+$z = \operatorname{prox}_{\gamma h}(s)$. The caller computes the
+decomposition and the matrix products, so the library needs no LAPACK or
+BLAS; the prox is `fp_prox` on $s$, of shape `(..., k)` along the last axis.
+`fp_op_spectral_check(op, kind)` tells whether `op` qualifies:
+
+| `kind` | Needs | Operators |
+| --- | --- | --- |
+| `FP_SPECTRAL_SVD` | absolutely symmetric | soft thresholding (the nuclear norm), elastic net, Huber, $\ell_0$, $\ell_q$, SCAD, MCP, log penalty; $\ell_1$ ball (nuclear-norm ball), $\ell_\infty$ prox (spectral norm), box $[-c, c]$ (spectral-norm ball), $\ell_2$ ball (Frobenius ball) |
+| `FP_SPECTRAL_EIG` | permutation invariant | all of the above, and the nonnegative orthant (PSD cone), any box (eigenvalue bounds), simplex (spectraplex), log barrier ($-\lambda \log\det$) |
+
+Weighted operators qualify only with equal weights.
+
+`fp_spectral_jvp(op, ws, kind, s, z, a, dgamma, dparams, b, r)` gives the
+derivative, after `fp_prox(op, gamma, s -> z)` with `keep_structure`. From
+$A = U^\top H V$ (or $Q^\top H Q$), shape `(..., k, k)`, it writes $B$ and,
+for singular values, $r$ (`(..., k)`, may be NULL), so that the derivative in
+the direction $H$ is
+
+$$U B V^\top + (I - U U^\top) H V \operatorname{diag}(r) V^\top \quad (m \ge n),
+\qquad U \operatorname{diag}(r) U^\top H (I - V V^\top) \quad (m < n),$$
+
+or $Q B Q^\top$ for eigenvalues. $B$ holds the divided differences of the
+prox on the spectrum (Ding, Sun, Sun and Toh, *Spectral operators of
+matrices*, 2018, Theorem 3.3). Where two values coincide or one is zero, it
+holds their limits, taken from the Jacobian of the prox on $s$: exact where
+singular values repeat, where autograd through an SVD returns NaN or a wrong
+gradient. Values within $\varepsilon^{1/3} \max_l \lvert s_l \rvert$ of each
+other count as tied (docs/spec.md, "Spectral operators").
+
+- **The VJP.** The map is self-adjoint, so a cotangent $G$ goes through the
+  same call with $A = U^\top G V$. The gradients in $\gamma$ and the
+  parameters are `fp_vjp` on $\operatorname{diag}(A)$.
+- **Cost.** $O(k^2)$ per matrix and one JVP on the spectrum per row; the
+  first call on a workspace sizes about $8k$ doubles of scratch per thread,
+  and later calls allocate nothing.
+
 ### Conjugates
 
 `fp_prox_conj(op, σ, y, out, ...)` computes
@@ -987,6 +1029,37 @@ x = pyproximal.optimization.primal.ProximalGradient(f, g, x0, tau=0.9, epsg=0.02
 - **Checks.** `tests/python/test_pyproximal.py` checks the adapter against
   PyProximal's `L1` and with its `moreau` test, and runs a lasso through
   `ProximalGradient`. `examples/pyproximal_tv.py` deblurs an image.
+
+### Spectral operators in Python (*since 1.1*)
+
+`fp.Spectral(op, kind="svd")` applies an operator to the singular values of
+each matrix in the last two axes; `kind="eigh"` applies it to the
+eigenvalues of symmetric matrices, an input that is not symmetric being
+replaced by $(X + X^\top)/2$. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)`
+and `fp.PSD()` are shorthands.
+
+```python
+op = fp.NuclearNorm(0.5)                 # = fp.Spectral(fp.Soft(0.5))
+Z, ctx = op.prox(X, gamma, keep=True)    # X: (..., m, n)
+dZ = op.jvp(ctx, dX)
+gX, grads = op.vjp(ctx, G)               # grads.gamma, grads.weights
+op.value(X)                              # lam * sum of singular values
+```
+
+- **Decomposition.** `prox` calls `numpy.linalg.svd` (thin) or `eigh` and
+  NumPy's matrix products. `prox_from(U, s, Vh, gamma)` takes a decomposition
+  you already have. It may hold only the leading triplets when the others
+  map to zero, as for singular value thresholding below $\gamma\lambda$, but
+  then `jvp` and `vjp` raise: derivatives need the full thin decomposition.
+- **Batches.** Any leading axes, float32 or float64, with `threads` as for
+  the other operators. The results do not depend on the thread count.
+- **Checks.** `tests/python/test_spectral.py` compares the prox with
+  singular value thresholding, PSD projection and clipping, and checks
+  optimality through `value`. The derivatives are checked against finite
+  differences, including matrices with repeated and zero singular values,
+  and against the closed-form divergence of Candès, Sing-Long and Trzasko
+  (2013). Adjointness and the $\gamma$ and parameter gradients are checked
+  too, as is the contrast with autograd through `torch.linalg.svd`.
 
 ### Device-native image TV (*since 0.3*)
 

@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Spectral operators: any absolutely symmetric operator on the singular values of a batch of matrices, and any permutation-invariant one on the eigenvalues of symmetric matrices. Examples: the nuclear norm, its ball, the spectral norm and its ball, nonconvex low-rank penalties (SCAD, MCP, $\ell_q$, $\ell_0$, log), the PSD cone, the spectraplex, $-\log\det$.
+  - **C:** `fp_op_spectral_check` says whether an operator qualifies. `fp_spectral_jvp` gives the $k \times k$ core of the derivative from $A = U^\top H V$, after `fp_prox` on the spectrum; the caller keeps the decomposition and the matrix products, so the core still needs no LAPACK or BLAS. Ties and zero singular values take their exact limits from the Jacobian of the prox on the spectrum, through one extra JVP per row; near ties take the average of the two limits within $\varepsilon^{1/3}$ of the scale.
+  - **Python:** `fp.Spectral(op, kind="svd" | "eigh")`, with `NuclearNorm`, `SpectralNormBall` and `PSD`. `prox`, `prox_from`, `jvp`, `vjp` and `value` use NumPy's `svd`/`eigh`.
+  - **Tests:** finite differences on matrices with repeated and zero singular values, where autograd through `torch.linalg.svd` gives NaN or a gradient 28–35% off, and Candès et al.'s closed-form divergence.
+  - The design and its sources are in docs/spec.md, "Spectral operators".
+
 ## [1.0.0rc1] — 2026-10-20
 
 The release candidate for 1.0, on PyPI as a pre-release (`pip install --pre fastprox`). The C ABI is now frozen: until 2.0 it only grows, and CI checks that against the last release. Its ABI is that of 0.5.0, unchanged, under a new major version. The operators and the Python API are those of 0.5.0.

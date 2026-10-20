@@ -180,6 +180,23 @@ double vjp(const Op &op, const Workspace &ws, const InArr &g, OutArr &gx,
     return gg;
 }
 
+// B (and r for the SVD kind, if given) from A at the spectrum saved in ws.
+void spectral_jvp(const Op &op, const Workspace &ws, int kind, const InArr &s, const InArr &z,
+                  const InArr &a, double dgamma, const std::optional<Params> &dparams, OutArr &b,
+                  std::optional<OutArr> r) {
+    const fp_array sa = view(s), za = view(z), aa = view(a);
+    const ParamView dp(dparams);
+    fp_array ba = view(b), ra{};
+    if (r) ra = view(*r);
+    fp_status st;
+    {
+        nb::gil_scoped_release release;
+        st = fp_spectral_jvp(op.p, ws.p, static_cast<fp_spectral_kind>(kind), &sa, &za, &aa, dgamma, dp.get(),
+                             &ba, r ? &ra : nullptr);
+    }
+    check(st);
+}
+
 }  // namespace
 
 NB_MODULE(_fastprox, m) {
@@ -392,6 +409,11 @@ NB_MODULE(_fastprox, m) {
           nb::keep_alive<0, 1>());
     m.def("jvp", &jvp, "op"_a, "ws"_a, "dx"_a.none(), "dgamma"_a, "dparams"_a.none(), "dout"_a);
     m.def("vjp", &vjp, "op"_a, "ws"_a, "g"_a, "gx"_a, "gparams"_a.none());
+    m.def("spectral_check", [](const Op &op, int kind) {
+        return fp_op_spectral_check(op.p, static_cast<fp_spectral_kind>(kind)) == FP_OK;
+    });
+    m.def("spectral_jvp", &spectral_jvp, "op"_a, "ws"_a, "kind"_a, "s"_a, "z"_a, "a"_a, "dgamma"_a,
+          "dparams"_a.none(), "b"_a, "r"_a.none());
 
     m.def("abi_version", &fp_abi_version);
     m.def("version", &fp_version_string);
