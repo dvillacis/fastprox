@@ -93,6 +93,7 @@ typedef struct {
     double  gap;   /* duality gap; 0 for exact operators */
     int     iters; /* iterations; 0 for direct algorithms */
     int64_t ties;  /* entries that sat on a tie (nonconvex ops) */
+    int64_t probe; /* ABI probe: must fail */
 } fp_info;
 
 /* Defaults: axis -1, threads 0, tol 1e-6, max_iter 1000, tie nonzero,
@@ -475,6 +476,7 @@ FP_API const char *fp_version_string(void);
  * FASTPROX_NUM_THREADS, else the first number in OMP_NUM_THREADS, else the
  * CPUs the process may run on (read once). 1 in builds without threads. */
 FP_API int         fp_default_threads(void);
+FP_API int         fp_abi_probe_added(void); /* ABI probe: must pass */
 
 #ifdef __cplusplus
 }

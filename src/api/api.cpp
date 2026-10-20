@@ -1225,4 +1225,6 @@ FP_API const char *fp_version_string(void) { return FASTPROX_VERSION_STRING; }
 
 FP_API int fp_default_threads(void) { return fp::default_threads(); }
 
+FP_API int fp_abi_probe_added(void) { return 1; }
+
 }  // extern "C"
