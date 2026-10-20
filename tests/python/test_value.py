@@ -1,4 +1,4 @@
-"""Operator.value (fp_value, since 1.0): g(x) per row or image.
+"""Operator.value (fp_value, since 0.5): g(x) per row or image.
 
 The main check ties each value to its prox: z = prox_{gamma g}(x) minimises
     Phi(y) = g(y) + ||y - x||^2 / (2 gamma),

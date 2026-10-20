@@ -138,7 +138,10 @@ text is approved.
   - [x] Release 0.5.0, the first with that option: the version, a TestPyPI dry run, the `v0.5.0` tag and a GitHub release. It also carries the rest of the 1.0 work so far (`fp_value`, the PyProximal adapter, the `fp_op_log_penalty` rename); a minor version, since the rename breaks the C API — Released (2026-10-19): `v0.5.0` on d897bd6, on PyPI with the same five wheels as 0.4.0 and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The tag's tarball (sha256 `920e2685e9eff1dc9c465bfa54defb82fc2414a835c53c6e194abc70f8aec429`) is the staged recipe's source. The docs deploy on the release was refused, since the `github-pages` environment admits only master, so the site was deployed from master (the same commit) by hand
   - [ ] The pull request to conda-forge/staged-recipes, with the release tarball as the source; its text is to be approved before posting
 - [ ] BenchOpt solvers for TV-1D and TV-2D, and a new simplex-projection benchmark
-- [ ] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
+- [~] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
+  - [x] The check (2026-10-20): the `abi` CI job compares the library, built with debug information, against the last release (rc tags excluded; 0.5.0 until 1.0 is out) with `abidiff --no-added-syms`, on the types of `fastprox.h`; publishing waits for it. CMake requires `FP_ABI_VERSION` to equal the major version, which is the soname's. The policy is written in docs/api.md ("ABI stability"). Probed with a throwaway commit (#64): an added function passed, and a field added to `fp_info` failed the job (size 192 → 256 bits, through `fp_prox`)
+  - [ ] 1.0.0rc1: the version (`FP_VERSION_MAJOR` and `FP_ABI_VERSION` 1, soname `libfastprox.so.1`), a TestPyPI dry run, the tag and a GitHub release
+  - [ ] At 1.0.0, in the conda-forge feedstock: `run_exports` from `x.x` to `x`, as the ABI then holds for every 1.x
 
 ## 1.x — GPU backend
 

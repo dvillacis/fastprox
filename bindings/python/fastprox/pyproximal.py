@@ -1,4 +1,4 @@
-r"""PyProximal adapter (since 1.0): a fastprox operator as a
+r"""PyProximal adapter (since 0.5): a fastprox operator as a
 ``pyproximal.ProxOperator``, for PyProximal's solvers (proximal gradient,
 ADMM, primal-dual, ...).
 

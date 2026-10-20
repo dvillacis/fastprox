@@ -1,4 +1,4 @@
-"""fastprox.pyproximal: fastprox operators inside PyProximal (since 1.0)."""
+"""fastprox.pyproximal: fastprox operators inside PyProximal (since 0.5)."""
 
 import numpy as np
 import pytest

@@ -80,6 +80,34 @@ jobs:
               --suppressions=tests/valgrind/fork.supp "$t"
           done
 
+  # The C ABI against the last release (rc tags excluded): functions may be
+  # added, nothing may change or go. libabigail compares the two libraries'
+  # DWARF, limited to the types of the public header.
+  abi:
+    name: ABI against the last release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: sudo apt-get update && sudo apt-get install -y abigail-tools
+      - name: Baseline
+        run: |
+          # From HEAD^, so a run on a release tag compares with the one before.
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*rc*' HEAD^)
+          echo "Baseline: $base"
+          git worktree add ../base "$base"
+      - name: Build both
+        run: |
+          for d in ../base .; do
+            cmake -S $d -B $d/build/abi -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFASTPROX_BUILD_TESTS=OFF
+            cmake --build $d/build/abi
+          done
+      - name: abidiff
+        run: >
+          abidiff --no-added-syms --ignore-soname
+          --headers-dir1 ../base/include --headers-dir2 include
+          ../base/build/abi/libfastprox.so build/abi/libfastprox.so
+
   python:
     name: Python ${{ matrix.python }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -150,7 +178,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'workflow_dispatch' && inputs.publish
-    needs: [c, sanitizers, tsan, valgrind, python, wheels, sdist]
+    needs: [c, sanitizers, tsan, valgrind, abi, python, wheels, sdist]
     runs-on: ubuntu-latest
     environment: { name: testpypi, url: "https://test.pypi.org/p/fastprox" }
     permissions: { id-token: write }
@@ -163,7 +191,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [c, sanitizers, tsan, valgrind, python, wheels, sdist]
+    needs: [c, sanitizers, tsan, valgrind, abi, python, wheels, sdist]
     runs-on: ubuntu-latest
     environment: { name: pypi, url: "https://pypi.org/p/fastprox" }
     permissions: { id-token: write }

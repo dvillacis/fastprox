@@ -455,7 +455,7 @@ FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws,
                         const fp_array *g, fp_array *gx, double *ggamma,
                         fp_array *gparams);
 
-/* The value g(x) (since 1.0): one value per row along opt->axis, or per image
+/* The value g(x) (since 0.5): one value per row along opt->axis, or per image
  * for the image operators, written to out (FP_F64, x's shape without the
  * axis or without the image axes; ndim 0 for a single row or image). A
  * row or image with a NaN gives NaN. The indicator of a set (the

@@ -216,7 +216,7 @@ struct Base : ImageOp<D> {
         *v.nreg = nr;
     }
 
-    // sum_e w_e |x_u - x_v| (since 1.0).
+    // sum_e w_e |x_u - x_v| (since 0.5).
     bool has_value() const noexcept override { return true; }
     double value_image(const double *x, const int64_t *, double) const noexcept override {
         double s = 0.0;

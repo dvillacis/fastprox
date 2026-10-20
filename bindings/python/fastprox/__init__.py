@@ -270,7 +270,7 @@ class Operator:
         return self._run(x, gamma, axis, out, threads, keep, ctx, copy, conj=False)
 
     def value(self, x, *, axis=-1, tol=1e-6):
-        r"""The value $g(x)$ (since 1.0): one per row along ``axis`` (per image
+        r"""The value $g(x)$ (since 0.5): one per row along ``axis`` (per image
         for the image operators), a float for a single row or else an array
         of the batch shape. The indicator of a set is 0 when $x$ lies in it,
         each constraint violated by at most

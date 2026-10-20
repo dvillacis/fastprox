@@ -1,4 +1,4 @@
-"""fastprox operators inside PyProximal's solvers (1.0).
+"""fastprox operators inside PyProximal's solvers (since 0.5).
 
 ``fastprox.pyproximal.ProxOp`` makes any operator a ``pyproximal.ProxOperator``.
 Here isotropic TV deblurs an image with PyProximal's accelerated proximal

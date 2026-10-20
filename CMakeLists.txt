@@ -43,6 +43,14 @@ if(NOT _fp_header_version STREQUAL PROJECT_VERSION)
   message(FATAL_ERROR "fastprox.h declares version ${_fp_header_version}, "
                       "CMakeLists.txt ${PROJECT_VERSION}")
 endif()
+# The ABI version is the major version, which is also the soname's
+# (libfastprox.so.1 for every 1.x): only a release that breaks the ABI bumps it.
+file(STRINGS include/fastprox.h _fp_abi_line REGEX "#define FP_ABI_VERSION ")
+string(REGEX REPLACE ".*FP_ABI_VERSION ([0-9]+).*" "\\1" _fp_abi_version "${_fp_abi_line}")
+if(NOT _fp_abi_version STREQUAL PROJECT_VERSION_MAJOR)
+  message(FATAL_ERROR "fastprox.h declares ABI version ${_fp_abi_version}, "
+                      "but the major version is ${PROJECT_VERSION_MAJOR}")
+endif()
 
 # The Python extension links the core statically.
 if(FASTPROX_PYTHON)

@@ -427,7 +427,7 @@ void run(const uint8_t *data, size_t size) {
     if (!valid_status(s1) || s1 != s4) fail("prox status");
     const bool written = s1 == FP_OK || s1 == FP_ENOTCONV;  // ENOTCONV still writes the iterate
 
-    // The value (since 1.0), into x's shape without the axis: a row
+    // The value (since 0.5), into x's shape without the axis: a row
     // operator's batch shape (an image operator usually answers FP_ESHAPE).
     {
         const int ax = ndim ? (axis + ndim) % ndim : 0;
