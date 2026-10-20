@@ -181,7 +181,7 @@ struct fp_op {
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
 
-    // The value g(x) (since 1.0, fp_value), in double: of one row of length n
+    // The value g(x) (since 0.5, fp_value), in double: of one row of length n
     // (elementwise and row operators) or one image of the
     // given shape (image operators). The indicator of a set is 0 when x lies
     // in it up to atol = tol * max(1, max |x_i|) and INFINITY otherwise. scr has

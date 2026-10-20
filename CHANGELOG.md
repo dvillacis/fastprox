@@ -5,7 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- An ABI check in CI: the `abi` job compares the C library with the last release using `abidiff` (libabigail), on the types of `fastprox.h`, and fails on any change but an addition. Publishing to PyPI waits for it. CMake now requires `FP_ABI_VERSION` to equal the major version, which is also the soname's. The policy for 1.x is in docs/api.md, "ABI stability".
+
 ### Fixed
+
+- `fp_value`, `Operator.value` and the PyProximal adapter were documented as "since 1.0"; they shipped in 0.5.
 
 - The conda recipe builds the Python package with Ninja. scikit-build-core had picked Makefiles, which conda-forge's Linux image lacks (the GitHub runners have make). Its tests now import the package on the oldest and the newest supported Python, and check the extension with `abi3audit`, as conda-forge's linter suggests.
 

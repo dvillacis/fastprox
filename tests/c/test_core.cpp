@@ -1387,7 +1387,7 @@ struct I8 {  // int8 array with an fp_array view; strides in elements
 // Tree TV's kinks are edges (since 0.4): masks and sides of shape (..., m).
 // x = (2, -1, 5) on the chain 0-1-2, gamma = 1: z = (1, 1, 4) with the flow
 // on edge (0, 1) at its bound.
-// fp_value (since 1.0): one value per row or image, sets as indicators.
+// fp_value (since 0.5): one value per row or image, sets as indicators.
 static void test_value() {
     fp_op *op;
     CHECK_OK(fp_op_soft(0.5, nullptr, &op));

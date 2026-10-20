@@ -714,7 +714,7 @@ double residual; int iters;
 fp_workspace_deriv_info(ws, &residual, &iters);  /* worst over the batch, last call */
 ```
 
-### Values (*since 1.0*)
+### Values (*since 0.5*)
 
 `fp_value(op, x, opt, out)` writes $g(x)$ into `out` (`FP_F64`), one
 value per row along `opt->axis`, or one per image for the image operators
@@ -781,7 +781,32 @@ cmake --build build && cmake --install build --prefix /usr/local
 Then `find_package(fastprox)` and link `fastprox::fastprox`, or use
 `pkg-config --cflags --libs fastprox`. Options: `FASTPROX_THREADS`,
 `BUILD_SHARED_LIBS`, `FASTPROX_BUILD_TESTS`, `FASTPROX_SANITIZE`,
-`FASTPROX_FUZZ`.
+`FASTPROX_FUZZ`, `FASTPROX_STATIC_LIBSTDCXX` (on by default: libstdc++ and
+libgcc linked statically on Linux with GCC).
+
+### ABI stability (*from 1.0*)
+
+From 1.0 to 2.0 the C ABI only grows. A program built against 1.x runs
+with any later 1.y library without being rebuilt:
+
+- No function changes its signature or goes away.
+- The layouts of `fp_array`, `fp_options` and `fp_info` stay as they are,
+  and no enumerator changes its value. New options come as new functions,
+  as the workspace setters did.
+- New functions, operators and enumerators may be added, such as new
+  `fp_device` values for the GPU backend. A program that uses one needs
+  the release that added it: check `FP_VERSION_MINOR` when building, or
+  `fp_version_string()` at run time.
+
+`FP_ABI_VERSION` and `fp_abi_version()` give the major version, which is
+also the soname's (`libfastprox.so.1`). Only a release that breaks the ABI
+bumps it. Before 1.0 a minor version could break the ABI (0.5 renamed
+`fp_op_log` to `fp_op_log_penalty`).
+
+CI holds this: the `abi` job builds the library with debug information
+and compares it with the last release using `abidiff` from libabigail.
+It fails on any change but an addition, judged on the types of
+`fastprox.h`.
 
 ## Python
 
@@ -802,7 +827,7 @@ z, ctx = op.prox(x, 0.5, keep=True)             # ctx: saved structure
 dz = op.jvp(ctx, dx=np.ones_like(x), dgamma=0.0, dparams={"weights": 1.0})
 gx, grads = op.vjp(ctx, g=np.ones_like(x))      # grads.gamma, grads.weights, grads.params
 y = op.prox_conj(x, sigma=2.0)                  # Moreau identity
-g = op.value(z)                                 # g(z) per row (since 1.0)
+g = op.value(z)                                 # g(z) per row (since 0.5)
 
 # Nonconvex maps (since 0.2): ties at thresholds follow tie= and are counted.
 zq = fp.lq(x, lam=0.1, q=0.5, gamma=1.0, tie="nonzero")
@@ -928,7 +953,7 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   this repository, `uv sync --group interop` installs both (PyTorch's CPU
   wheels on Linux).
 
-### PyProximal (*since 1.0*)
+### PyProximal (*since 0.5*)
 
 `fastprox.pyproximal.ProxOp(op, dims=None, *, warm=False, value_tol=1e-6,
 **prox_kwargs)` turns any operator into a `pyproximal.ProxOperator`, so it

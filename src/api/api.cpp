@@ -420,7 +420,7 @@ fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool b
 }
 
 // g(x) per row (along the axis) or per image (the last image_ndim axes), one
-// value per batch entry in out (since 1.0). Rows run in C order over the
+// value per batch entry in out (since 0.5). Rows run in C order over the
 // batch axes, so row r writes out at the C-order index r of its shape.
 template <class T>
 void value_driver(const fp_op &op, const Arr &x, int axis, double tol, const Arr &out) {
