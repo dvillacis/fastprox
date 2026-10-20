@@ -46,6 +46,9 @@ with Python bindings, PyTorch and JAX wrappers, and image TV that runs on GPUs.
 pip install fastprox
 ```
 
+The 1.0 release candidate, whose C ABI holds for every 1.x:
+`pip install --pre fastprox`.
+
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS
 (arm64 from 11.0, x86_64 from 10.15) and Windows (amd64). The PyTorch and JAX
 wrappers use PyTorch and JAX when they are installed, and never require them.

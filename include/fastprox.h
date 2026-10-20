@@ -19,10 +19,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FP_VERSION_MAJOR 0
-#define FP_VERSION_MINOR 5
+#define FP_VERSION_MAJOR 1
+#define FP_VERSION_MINOR 0
 #define FP_VERSION_PATCH 0
-#define FP_ABI_VERSION 0 /* bumped only when the ABI breaks */
+#define FP_ABI_VERSION 1 /* bumped only when the ABI breaks */
 
 #define FP_MAX_NDIM 32
 

@@ -5,14 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0rc1] — 2026-10-20
+
+The release candidate for 1.0, on PyPI as a pre-release (`pip install --pre fastprox`). The C ABI is now frozen: until 2.0 it only grows, and CI checks that against the last release. Its ABI is that of 0.5.0, unchanged, under a new major version. The operators and the Python API are those of 0.5.0.
+
 ### Added
 
 - An ABI check in CI: the `abi` job compares the C library with the last release using `abidiff` (libabigail), on the types of `fastprox.h`, and fails on any change but an addition. Publishing to PyPI waits for it. CMake now requires `FP_ABI_VERSION` to equal the major version, which is also the soname's. The policy for 1.x is in docs/api.md, "ABI stability".
 
+### Changed
+
+- The major version is 1, and with it `FP_ABI_VERSION` (`fp_abi_version()` returns 1) and the soname: `libfastprox.so.1` on Linux, `libfastprox.1.dylib` on macOS. Programs built against 0.x need rebuilding once, as for any 0.x minor version; no declaration changed since 0.5.0.
+
 ### Fixed
 
 - `fp_value`, `Operator.value` and the PyProximal adapter were documented as "since 1.0"; they shipped in 0.5.
-
 - The conda recipe builds the Python package with Ninja. scikit-build-core had picked Makefiles, which conda-forge's Linux image lacks (the GitHub runners have make). Its tests now import the package on the oldest and the newest supported Python, and check the extension with `abi3audit`, as conda-forge's linter suggests.
 
 ## [0.5.0] — 2026-10-19
