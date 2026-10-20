@@ -7,7 +7,7 @@ logged at the end of this file.
 
 Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
-## 0.1 — core and 1D (in progress)
+## 0.1 — core and 1D
 
 **Done**
 
@@ -136,7 +136,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 - [x] PyProximal adapter (`ProxOperator` subclass) — Done (2026-10-19): `fastprox.pyproximal.ProxOp`, checked against PyProximal's `L1`, its `moreau` test and a lasso through `ProximalGradient`, and shown in `examples/pyproximal_tv.py` (same PSNR as `pyproximal.TV`, about 6× faster). The adapter needs $g(x)$, which fastprox could not compute, so `fp_value` (C) and `Operator.value` (Python) came first, for every operator. PyProximal is LGPL-3.0, so the adapter is written from its documentation (subclassing is use of its interface), with PyProximal as an optional dependency
 - [~] conda-forge packages for the C library and the Python package — Progress (2026-10-19): the recipe is `packaging/conda/recipe.yaml`, built in CI by the `conda` workflow. It has two outputs from one source: `libfastprox`, with `run_exports` pinned to the minor version before 1.0, and `fastprox`, an abi3 build for CPython 3.12 and later. libstdc++ is not linked statically there (`FASTPROX_STATIC_LIBSTDCXX=OFF`), so the submission waits for the first release with that option
   - [x] Release 0.5.0, the first with that option: the version, a TestPyPI dry run, the `v0.5.0` tag and a GitHub release. It also carries the rest of the 1.0 work so far (`fp_value`, the PyProximal adapter, the `fp_op_log_penalty` rename); a minor version, since the rename breaks the C API — Released (2026-10-19): `v0.5.0` on d897bd6, on PyPI with the same five wheels as 0.4.0 and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The tag's tarball (sha256 `920e2685e9eff1dc9c465bfa54defb82fc2414a835c53c6e194abc70f8aec429`) is the staged recipe's source. The docs deploy on the release was refused, since the `github-pages` environment admits only master, so the site was deployed from master (the same commit) by hand
-  - [ ] The pull request to conda-forge/staged-recipes, with the release tarball as the source; its text is to be approved before posting
+  - [~] The pull request to conda-forge/staged-recipes, with the release tarball as the source; its text is to be approved before posting — Posted (2026-10-19): conda-forge/staged-recipes#35260, `libfastprox` and `fastprox` 0.5.0 from the `v0.5.0` tarball. Linux failed at first (no make in conda-forge's image; the recipe now uses Ninja there, #63), macOS on conda-forge's SDK download (fixed upstream). All green and in review with the Python-C team since 2026-10-20. Once merged, conda-forge creates `fastprox-feedstock`, and its bot opens a PR for each new release
 - [~] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
   - [x] The check (2026-10-20): the `abi` CI job compares the library, built with debug information, against the last release (rc tags excluded; 0.5.0 until 1.0 is out) with `abidiff --no-added-syms`, on the types of `fastprox.h`; publishing waits for it. CMake requires `FP_ABI_VERSION` to equal the major version, which is the soname's. The policy is written in docs/api.md ("ABI stability"). Probed with a throwaway commit (#64): an added function passed, and a field added to `fp_info` failed the job (size 192 → 256 bits, through `fp_prox`)
   - [x] 1.0.0rc1: the version (`FP_VERSION_MAJOR` and `FP_ABI_VERSION` 1, soname `libfastprox.so.1`), a TestPyPI dry run, the tag and a GitHub release — Released (2026-10-20): `v1.0.0rc1` on cda044a, on PyPI as a pre-release (`pip install --pre fastprox`; plain `pip install` still gets 0.5.0) with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The `abi` job passed against v0.5.0
@@ -150,6 +150,12 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 - [ ] Determinism on the device: fixed-order reductions, the same output run to run on one device and build
 - [ ] Packaging: CUDA builds as a separate package rather than in the main wheel, and through conda-forge
 
+## 1.x — candidates
+
+Additions the frozen ABI allows, not yet scheduled.
+
+- [ ] Spectral prox maps on matrices: the nuclear norm, the spectral-norm ball, projection onto positive semidefinite matrices, and any elementwise operator applied to the singular values or eigenvalues (moved from version 2 on 2026-10-20). The caller supplies the decomposition (NumPy, PyTorch or JAX `svd`/`eigh`, on the CPU or the GPU), so the C core stays free of LAPACK and BLAS (spec Section 8). The core applies an existing scalar prox to the spectrum and gives the JVP and VJP of the spectral map by the Daleckii–Krein divided differences: repeated singular values and values at a kink, where autograd through an SVD returns infinite or wrong gradients, are handled exactly. The Python API gets `fp.Spectral(op)` and `fp.NuclearNorm(lam)`, and PyTorch and JAX wrappers as for image TV. Open: whether the core returns the reassembled matrix or only the new spectrum and its derivative operator, and the C functions this adds
+
 ## After 1.0
 
 - [ ] Isotropic TV at γ ≥ 1 to 1e-10 (deferred from 0.2 on 2026-10-17): most 2D test images need over 100 000 restarted FISTA iterations (128² blocks at γ = 1: 116 568). Prototypes showed that the roadmap's candidates do not help: SSNAL took 1.7× FISTA's operator applications, ADMM with an exact DCT step has the same sublinear tail, and barrier Newton-CG took 5.6×; the dual is degenerate. An interior-point method on the SOCP with a sparse direct factorisation (Clarabel as a stand-in) was 5–34× faster in 2D at γ ≥ 1, level at γ = 0.3, and 18× slower on 32³. Building one needs a nested-dissection Cholesky for grid matrices and 34–670 MB of factor at 256²–1024², so it would be opt-in and 2D only
@@ -160,7 +166,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 
 ## Version 2 and later
 
-- [ ] Matrix-valued prox maps (nuclear norm, spectral functions)
+Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 
 ## Decisions and deviations from the spec
 
@@ -211,3 +217,4 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 | 2026-10-19 | Before the freeze, `fp_op_log` became `fp_op_log_penalty`, a break in 0.x so that 1.0 does not carry both names. The documentation site is MkDocs Material on GitHub Pages rather than Sphinx: the docs are already Markdown, and mkdocstrings reads the Python docstrings | `fastprox.h`, ROADMAP 1.0 |
 | 2026-10-19 | `fp_value`, the value $g(x)$, is added to the C API before the freeze. The spec's API has only proxes and derivatives. The PyProximal adapter needs the value for its objective, and so does anyone monitoring a solver. The projections return their indicator, with a tolerance relative to $\max(1, \max_i \lvert x_i \rvert)$, so that their own rounded outputs count as feasible | `fastprox.h`, `src/core/op.hpp`, `tests/python/test_value.py` |
 | 2026-10-20 | The BenchOpt solvers (spec Sections 11 and 12) move from 1.0 to after it, as optional. The TV-1D and TV-2D benchmarks have had no commits since 2024, and their own baselines no longer run with current SciPy and BenchOpt, so a contribution would likely go unreviewed and unseen. The public speed comparison of spec goal 7 is docs/benchmarks.md, against proxTV and Condat's code. |
+| 2026-10-20 | Matrix prox maps (spec Section 2: "no matrix-valued prox maps", deferred to version 2 because they need an SVD) become a 1.x candidate. The caller supplies the SVD or eigendecomposition, from the framework it already uses, so the core still needs no LAPACK, BLAS or Eigen. What fastprox adds is the scalar prox on the spectrum and its exact derivatives, which autograd through an SVD gets wrong at repeated singular values. As new functions, they keep the 1.0 ABI. |
