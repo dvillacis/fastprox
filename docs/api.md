@@ -642,7 +642,7 @@ typedef struct {
     int            ndim;     /* 0 (scalar) to FP_MAX_NDIM */
     const int64_t *shape;
     const int64_t *strides;  /* in elements, may be negative; NULL = C order */
-    fp_device      device;   /* FP_DEVICE_CPU */
+    fp_device      device;   /* FP_DEVICE_CPU; FP_DEVICE_CUDA needs the plugin */
 } fp_array;
 ```
 
@@ -777,6 +777,49 @@ other count as tied (docs/spec.md, "Spectral operators").
   first call on a workspace sizes about $8k$ doubles of scratch per thread,
   and later calls allocate nothing.
 
+### Devices (*since 1.1*)
+
+The GPU backend (docs/spec.md, "GPU backend") comes in stages. Its CUDA kernels
+will live in a separate library, the plugin `libfastprox_cuda`
+(`fastprox_cuda.dll` on Windows). The C library loads it the first time a
+device is queried, from the first of:
+
+1. the path in the environment variable `FASTPROX_CUDA_PLUGIN`, when it is set
+   (an empty value turns the plugin off);
+2. the directory of `libfastprox`, or of the Python extension that links it;
+3. the system's library search path.
+
+A plugin is used only when it comes from the same fastprox version. No plugin
+has kernels yet, so arrays on a device still return `FP_EINVAL`. The functions
+that answer device questions already work on the CPU:
+
+```c
+fp_device_available(FP_DEVICE_CUDA);        /* 1 with the plugin and a device */
+int rpo;
+fp_op_device_check(op, FP_DEVICE_CPU, &rpo); /* FP_OK; rpo = 1: a row uses one thread */
+fp_prox(op, gamma, &x, &z, &opt, ws, NULL);
+fp_info info;
+fp_status s = fp_workspace_info(ws, &info);  /* that call's info; FP_ENOTCONV if it stopped early */
+fp_vjp_device(op, ws, &g, &gx, &ggamma, &gtheta);  /* ggamma: a 0-d array */
+```
+
+- **`fp_op_device_check`** says whether an operator runs on a device. Its
+  `row_parallel_only` flag is 1 when one row never uses more than one thread,
+  so a batch of a few long rows gains nothing from more threads. On the CPU
+  that is every operator with rows except the elementwise maps and
+  anisotropic TV.
+- **`fp_workspace_info`** returns the `fp_info` and status of the last
+  `fp_prox` or `fp_prox_conj` call on the workspace. On a device, it lets a
+  call pass `info = NULL` and not wait for its stream. It returns `FP_EINVAL`
+  before a call and after one that failed.
+- **`fp_vjp_device`** is `fp_vjp` with the step's gradient written to a 0-d
+  float32 or float64 array on the workspace's device.
+- **`fp_workspace_set_stream` and `fp_workspace_get_stream`** take a
+  `cudaStream_t` as `void *`. They are for device workspaces only and return
+  `FP_EINVAL` on the CPU.
+- **`FP_EDEVICE`** is a new status: a device error, from the call itself or
+  from earlier work on the stream.
+
 ### Conjugates
 
 `fp_prox_conj(op, σ, y, out, ...)` computes
@@ -794,6 +837,7 @@ $\sigma = 0$ returns $y$.
 | `FP_ENOMEM` | out of memory |
 | `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
 | `FP_EINTERNAL` | any other internal error |
+| `FP_EDEVICE` | (*since 1.1*) a device error, from the call or from earlier work on its stream |
 
 No function prints, aborts or keeps global error state. NaN in the input
 gives NaN in the affected output: the entry for elementwise operators, the

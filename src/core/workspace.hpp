@@ -113,6 +113,17 @@ struct fp_workspace {
     // carry it.
     mutable fp::Buffer<double> spectral;
 
+    // Device and stream (since 1.1): FP_DEVICE_CPU until the CUDA plugin
+    // creates workspaces.
+    fp_device device = FP_DEVICE_CPU;
+    void *stream = nullptr;
+
+    // fp_info and status of the last prox call (fp_workspace_info), whether or
+    // not it kept its structure.
+    fp_info info = {0.0, 0, 0};
+    fp_status info_status = FP_OK;
+    bool info_valid = false;
+
     // State of the last prox call.
     bool valid = false;
     bool conj = false;

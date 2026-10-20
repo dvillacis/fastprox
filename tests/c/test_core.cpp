@@ -2425,6 +2425,91 @@ static void test_float32() {
     fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- devices (since 1.1)
+// The device API on the CPU; tests/c/test_device.cpp covers the plugin loader.
+static void test_device_api() {
+    CHECK(fp_device_available(FP_DEVICE_CPU) == 1);
+    CHECK(fp_device_available(static_cast<fp_device>(10)) == 0);
+    CHECK(std::strcmp(fp_strerror(FP_EDEVICE), "device error") == 0);
+
+    // Row parallelism on the CPU: elementwise maps and anisotropic TV split a row.
+    fp_op *soft, *tv1, *aniso, *iso;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &soft));
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv1));
+    CHECK_OK(fp_op_tv_aniso(2, nullptr, &aniso));
+    CHECK_OK(fp_op_tv_iso(2, nullptr, &iso));
+    const std::pair<fp_op *, int> rows[] = {{soft, 0}, {tv1, 1}, {aniso, 0}, {iso, 1}};
+    for (const auto &c : rows) {
+        int rpo = -1;
+        CHECK_OK(fp_op_device_check(c.first, FP_DEVICE_CPU, &rpo));
+        CHECK(rpo == c.second);
+        CHECK_OK(fp_op_device_check(c.first, FP_DEVICE_CPU, nullptr));
+        CHECK(fp_op_device_check(c.first, static_cast<fp_device>(10), &rpo) == FP_EINVAL);
+        if (!fp_device_available(FP_DEVICE_CUDA))
+            CHECK(fp_op_device_check(c.first, FP_DEVICE_CUDA, &rpo) == FP_EINVAL);
+    }
+    CHECK(fp_op_device_check(nullptr, FP_DEVICE_CPU, nullptr) == FP_EINVAL);
+
+    // fp_workspace_info: the last call's info and status, with or without info.
+    const int64_t side = 24;
+    Arr x({2, side, side}, randn(2 * side * side)), z({2, side, side}), z2({2, side, side});
+    fp_options o = opts(-1, 1, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(iso, &x.a, &o, &ws));
+    fp_info info{}, got{};
+    CHECK(fp_workspace_info(ws, &got) == FP_EINVAL);
+    void *stream = &got;
+    CHECK(fp_workspace_set_stream(ws, nullptr) == FP_EINVAL);
+    CHECK(fp_workspace_get_stream(ws, &stream) == FP_EINVAL && stream == &got);
+    CHECK_OK(fp_prox(iso, 0.3, &x.a, &z.a, &o, ws, &info));
+    CHECK_OK(fp_workspace_info(ws, &got));
+    CHECK(got.gap == info.gap && got.iters == info.iters && got.ties == info.ties && info.iters > 0);
+    CHECK(fp_workspace_info(ws, nullptr) == FP_EINVAL);
+    CHECK_OK(fp_prox(iso, 0.3, &x.a, &z2.a, &o, ws, nullptr));
+    CHECK_OK(fp_workspace_info(ws, &got));
+    CHECK(got.gap == info.gap && got.iters == info.iters && z2.data == z.data);
+    fp_options few = o;
+    few.max_iter = 1;
+    few.tol = 1e-14;
+    CHECK(fp_prox(iso, 0.3, &x.a, &z2.a, &few, ws, nullptr) == FP_ENOTCONV);
+    CHECK(fp_workspace_info(ws, &got) == FP_ENOTCONV && got.iters == 1);
+    Arr wrong({2, side, side + 1});
+    CHECK(fp_prox(iso, 0.3, &wrong.a, &wrong.a, &o, ws, nullptr) == FP_ESHAPE);
+    CHECK(fp_workspace_info(ws, &got) == FP_EINVAL);
+    fp_workspace_free(ws);
+
+    // fp_vjp_device: the step's gradient in a 0-d array, as fp_vjp's.
+    Arr r({5, 9}, randn(45)), rz({5, 9}), g({5, 9}, randn(45)), gx({5, 9}), gx2({5, 9});
+    CHECK_OK(fp_workspace_create(tv1, &r.a, &o, &ws));
+    CHECK_OK(fp_prox(tv1, 0.4, &r.a, &rz.a, &o, ws, nullptr));
+    CHECK_OK(fp_workspace_info(ws, &got));
+    CHECK(got.gap == 0.0 && got.iters == 0);
+    double gg = 0.0;
+    CHECK_OK(fp_vjp(tv1, ws, &g.a, &gx.a, &gg, nullptr));
+    double d = -1.0;
+    float f = -1.0f;
+    fp_array da{&d, FP_F64, 0, nullptr, nullptr, FP_DEVICE_CPU};
+    fp_array fa{&f, FP_F32, 0, nullptr, nullptr, FP_DEVICE_CPU};
+    CHECK_OK(fp_vjp_device(tv1, ws, &g.a, &gx2.a, &da, nullptr));
+    CHECK(d == gg && gx2.data == gx.data && gg != 0.0);
+    CHECK_OK(fp_vjp_device(tv1, ws, &g.a, &gx2.a, &fa, nullptr));
+    CHECK(f == static_cast<float>(gg));
+    CHECK_OK(fp_vjp_device(tv1, ws, &g.a, &gx2.a, nullptr, nullptr));
+    Arr one({1}, {7.0});
+    CHECK(fp_vjp_device(tv1, ws, &g.a, &gx2.a, &one.a, nullptr) == FP_ESHAPE && one.data[0] == 7.0);
+    fp_array cuda = da;
+    cuda.device = FP_DEVICE_CUDA;
+    CHECK(fp_vjp_device(tv1, ws, &g.a, &gx2.a, &cuda, nullptr) == FP_EINVAL);
+    fp_workspace_free(ws);
+
+    // A device array still gives FP_EINVAL on the CPU path.
+    fp_array xc = r.a;
+    xc.device = FP_DEVICE_CUDA;
+    CHECK(fp_prox(tv1, 0.4, &xc, &rz.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+    CHECK(fp_workspace_create(tv1, &xc, nullptr, &ws) == FP_EINVAL && ws == nullptr);
+    for (fp_op *op : {soft, tv1, aniso, iso}) fp_op_free(op);
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -2440,6 +2525,7 @@ int main() {
     test_edge_kinks();
     test_value();
     test_spectral();
+    test_device_api();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

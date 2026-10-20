@@ -60,6 +60,7 @@ endif()
 add_library(fastprox
   src/api/api.cpp
   src/core/parallel.cpp
+  src/device/plugin.cpp
   src/ops/pointwise.cpp
   src/ops/group.cpp
   src/ops/projections.cpp
@@ -114,6 +115,9 @@ if(FASTPROX_THREADS)
 else()
   target_compile_definitions(fastprox PRIVATE FASTPROX_NO_THREADS)
 endif()
+
+# dlopen for the CUDA plugin (src/device/plugin.cpp); empty where libc has it.
+target_link_libraries(fastprox PRIVATE ${CMAKE_DL_LIBS})
 
 if(FASTPROX_STATIC_LIBSTDCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Keep the host libstdc++ out of the picture (MATLAB, old distributions).

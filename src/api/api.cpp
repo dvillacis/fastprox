@@ -9,6 +9,7 @@
 #include "core/op.hpp"
 #include "core/spectral.hpp"
 #include "core/workspace.hpp"
+#include "device/plugin.hpp"
 #include "ops/ops.hpp"
 
 #include <cmath>
@@ -334,6 +335,21 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     return s;
 }
 
+// prox_impl, keeping the call's fp_info and status in ws for fp_workspace_info.
+fp_status prox_call(const fp_op *op, double step, const fp_array *xa, fp_array *oa, const fp_options *opt,
+                    fp_workspace *ws, fp_info *info, bool conj) {
+    if (!ws) return prox_impl(op, step, xa, oa, opt, ws, info, conj);
+    ws->info_valid = false;
+    fp_info local = {0.0, 0, 0};
+    const fp_status s = prox_impl(op, step, xa, oa, opt, ws, info ? info : &local, conj);
+    if (s == FP_OK || s == FP_ENOTCONV) {
+        ws->info = info ? *info : local;
+        ws->info_status = s;
+        ws->info_valid = true;
+    }
+    return s;
+}
+
 fp_status check_like_ws(const fp_workspace &ws, const Arr &a) noexcept {
     if (a.dtype != ws.dtype) return FP_EDTYPE;
     if (a.ndim != ws.ndim) return FP_ESHAPE;
@@ -466,6 +482,23 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     }
     if (ggamma) *ggamma = tot[P];
     if (gpa && P > 0) return write_exact(gpa, P, tot);
+    return FP_OK;
+}
+
+// fp_vjp with ggamma written to a 0-d array on the workspace's device.
+fp_status vjp_device_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, fp_array *gxa,
+                          fp_array *gga, fp_array *gpa) {
+    Arr t;
+    if (gga) {  // validate before any work
+        if (fp_status s = to_arr(gga, t)) return s;
+        if (gga->ndim != 0) return FP_ESHAPE;
+    }
+    double gg = 0.0;
+    if (fp_status s = vjp_impl(op, ws, ga, gxa, gga ? &gg : nullptr, gpa)) return s;
+    if (gga) {
+        if (t.dtype == FP_F32) *reinterpret_cast<float *>(t.data) = static_cast<float>(gg);
+        else *reinterpret_cast<double *>(t.data) = gg;
+    }
     return FP_OK;
 }
 
@@ -1248,7 +1281,7 @@ FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on) {
 
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x, fp_array *out,
                          const fp_options *opt, fp_workspace *ws, fp_info *info) {
-    return guard([&] { return fp::prox_impl(op, gamma, x, out, opt, ws, info, false); });
+    return guard([&] { return fp::prox_call(op, gamma, x, out, opt, ws, info, false); });
 }
 
 FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out) {
@@ -1257,7 +1290,7 @@ FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *
 
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y, fp_array *out,
                               const fp_options *opt, fp_workspace *ws, fp_info *info) {
-    return guard([&] { return fp::prox_impl(op, sigma, y, out, opt, ws, info, true); });
+    return guard([&] { return fp::prox_call(op, sigma, y, out, opt, ws, info, true); });
 }
 
 FP_API fp_status fp_jvp(const fp_op *op, const fp_workspace *ws, const fp_array *dx,
@@ -1282,6 +1315,47 @@ FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws, fp_spe
     return guard([&] { return fp::spectral_jvp_impl(op, ws, kind, s, z, a, dgamma, dparams, b, r); });
 }
 
+FP_API int fp_device_available(fp_device dev) {
+    if (dev == FP_DEVICE_CPU) return 1;
+    return dev == FP_DEVICE_CUDA && fp::cuda_devices() > 0 ? 1 : 0;
+}
+
+FP_API fp_status fp_op_device_check(const fp_op *op, fp_device dev, int *row_parallel_only) {
+    if (!op) return FP_EINVAL;
+    int rpo = 0;
+    if (dev == FP_DEVICE_CPU) {
+        rpo = op->splits_rows() ? 0 : 1;
+    } else {
+        if (dev != FP_DEVICE_CUDA || fp::cuda_devices() == 0) return FP_EINVAL;
+        if (fp_status s = fp::cuda_plugin()->op_check(op, &rpo)) return s;
+    }
+    if (row_parallel_only) *row_parallel_only = rpo;
+    return FP_OK;
+}
+
+FP_API fp_status fp_workspace_set_stream(fp_workspace *ws, void *stream) {
+    if (!ws || ws->device == FP_DEVICE_CPU) return FP_EINVAL;
+    ws->stream = stream;
+    return FP_OK;
+}
+
+FP_API fp_status fp_workspace_get_stream(const fp_workspace *ws, void **stream) {
+    if (!ws || !stream || ws->device == FP_DEVICE_CPU) return FP_EINVAL;
+    *stream = ws->stream;
+    return FP_OK;
+}
+
+FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info) {
+    if (!ws || !info || !ws->info_valid) return FP_EINVAL;
+    *info = ws->info;
+    return ws->info_status;
+}
+
+FP_API fp_status fp_vjp_device(const fp_op *op, const fp_workspace *ws, const fp_array *g, fp_array *gx,
+                               fp_array *ggamma, fp_array *gparams) {
+    return guard([&] { return fp::vjp_device_impl(op, ws, g, gx, ggamma, gparams); });
+}
+
 FP_API const char *fp_strerror(fp_status s) {
     switch (s) {
         case FP_OK: return "success";
@@ -1292,6 +1366,7 @@ FP_API const char *fp_strerror(fp_status s) {
         case FP_ENOTCONV: return "iteration stopped before reaching the tolerance";
         case FP_EPARAM: return "invalid operator parameter or step";
         case FP_EINTERNAL: return "internal error";
+        case FP_EDEVICE: return "device error";
     }
     return "unknown status";
 }
