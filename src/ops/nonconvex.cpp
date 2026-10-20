@@ -92,6 +92,7 @@ struct L0 final : ElemOp<L0> {
     Vec w;
     L0(double l, Vec ww) : lambda(l), w(std::move(ww)) {}
     const char *name() const noexcept override { return "l0"; }
+    int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     bool axis_params() const noexcept override { return w.size() > 1; }
     fp_status check_n(int64_t n) const noexcept override {
@@ -141,6 +142,7 @@ struct Lq final : ElemOp<Lq> {
     Lq(double l, double qq, Vec ww)
         : lambda(l), q(qq), w(std::move(ww)), form(qq == 0.5 ? 1 : (qq == 2.0 / 3.0 ? 2 : 0)) {}
     const char *name() const noexcept override { return "lq"; }
+    int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     bool axis_params() const noexcept override { return w.size() > 1; }
     fp_status check_n(int64_t n) const noexcept override {
@@ -363,6 +365,7 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
     using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
     Scad(double l, double aa, Vec ww) : P(l, aa, std::move(ww)) {}
     const char *name() const noexcept override { return "scad"; }
+    int spectral() const noexcept override { return uniform(this->w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return 2 + nw(); }  // (lambda, a, w...)
     bool axis_params() const noexcept override { return nw() > 1; }
     fp_status check_n(int64_t n) const noexcept override { return check_len(n); }
@@ -452,6 +455,7 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
     using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
     Mcp(double l, double bb, Vec ww) : P(l, bb, std::move(ww)) {}
     const char *name() const noexcept override { return "mcp"; }
+    int spectral() const noexcept override { return uniform(this->w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return 2 + nw(); }  // (lambda, b, w...)
     bool axis_params() const noexcept override { return nw() > 1; }
     fp_status check_n(int64_t n) const noexcept override { return check_len(n); }
@@ -529,6 +533,7 @@ struct LogPen final : ElemOp<LogPen> {
     double lambda, eps;
     LogPen(double l, double e) : lambda(l), eps(e) {}
     const char *name() const noexcept override { return "log"; }
+    int spectral() const noexcept override { return kSpectralBoth; }
     int64_t nparams() const noexcept override { return 2; }  // (lambda, eps)
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 

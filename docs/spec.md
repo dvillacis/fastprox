@@ -158,15 +158,17 @@ typedef enum { FP_SPECTRAL_SVD = 0, FP_SPECTRAL_EIG = 1 } fp_spectral_kind;
 FP_API fp_status fp_op_spectral_check(const fp_op *op, fp_spectral_kind kind);
 
 /* After fp_prox(op, gamma, s -> z) with keep_structure: B (..., k, k) and,
- * for the SVD kind, r (..., k; may be NULL) from A (..., k, k). Called with
- * a cotangent's A it gives the VJP's B, since the map is self-adjoint. */
+ * for the SVD kind, r (..., k; may be NULL) from A (..., k, k); dgamma and
+ * dparams as in fp_jvp. Called with a cotangent's A it gives the VJP's B,
+ * since the map is self-adjoint. */
 FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
                                  fp_spectral_kind kind, const fp_array *s,
                                  const fp_array *z, const fp_array *a,
-                                 double dgamma, fp_array *b, fp_array *r);
+                                 double dgamma, const fp_array *dparams,
+                                 fp_array *b, fp_array *r);
 ```
 
-The workspace built for the prox on s also holds the spectral scratch, two vectors of length k per thread, so these calls allocate nothing. Rows of B are independent, and the result is bit-identical for any thread count.
+The workspace built for the prox on s also holds the spectral scratch, about 8k doubles per thread. It is sized by the first fp\_spectral\_jvp call and kept, so later calls allocate nothing. Sizing it in fp\_workspace\_create instead would add 16 bytes per entry to the workspace of every qualifying operator, soft thresholding on a long vector included, whether or not it is ever used on a spectrum. Rows of B are independent, and the result is bit-identical for any thread count.
 
 **Python.**
 - **Constructors:** `fp.Spectral(op, kind="svd" | "eigh")` wraps a qualifying operator. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)` and `fp.PSD()` are shorthands.
@@ -182,7 +184,7 @@ The workspace built for the prox on s also holds the spectral scratch, two vecto
 - **Derivatives:**
   - JVP against finite differences on random matrices away from ties.
   - The same on matrices built with repeated and zero singular values, where the map is differentiable whenever f is.
-    - **The autograd contrast:** PyTorch documents that SVD gradients "will only be finite when A does not have repeated singular values". It returns NaN for repeated values above the threshold (checked on 7 × 5 with s = (2, 2, 2, 1.5, 1.5) and soft thresholding at 0.7), and the test shows the contrast.
+    - **The autograd contrast:** PyTorch documents that SVD gradients "will only be finite when A does not have repeated singular values". On 7 × 5 matrices with s = (2, 2, 2, 1.5, 1.5) and soft thresholding at 0.7, it returns NaN where a computed gap is exactly 0. Where rounding leaves the values a few ulps apart, the gradient is finite but 28–35% off (checked on six random draws). The test shows the contrast.
     - **Near ties:** pairs at gaps from 10⁻² down to 10⁻¹² of the scale, against the exact divided difference.
   - **The divergence:** the trace of D, against the closed form of Candès, Sing-Long and Trzasko (2013): |m − n| Σ z\_i/s\_i + Σ f′(s\_i) + 2 Σ\_{i≠j} s\_i z\_i / (s\_i² − s\_j²). Checked before review to 12 digits on 6 × 6 and 9 × 5.
   - Adjointness ⟨G, D(H)⟩ = ⟨D(G), H⟩.

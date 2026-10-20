@@ -1420,6 +1420,252 @@ static void test_value() {
     fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- spectral operators
+// fp_prox on the spectrum s (batch shape `lead`, k values each), then
+// fp_spectral_jvp from A; z, B and r are returned.
+struct Spec {
+    Vec z, b, r;
+    fp_status st = FP_OK;
+};
+static Spec spectral(fp_op *op, fp_spectral_kind kind, std::vector<int64_t> lead, int64_t k, const Vec &s,
+                     const Vec &a, double gamma = 1.0, double dgamma = 0.0, int threads = 0) {
+    std::vector<int64_t> sh = lead, ash = lead;
+    sh.push_back(k);
+    ash.push_back(k);
+    ash.push_back(k);
+    Arr sa(sh, s), za(sh), aa(ash, a), ba(ash), ra(sh);
+    fp_options o = opts(-1, threads, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(op, &sa.a, &o, &ws));
+    CHECK_OK(fp_prox(op, gamma, &sa.a, &za.a, &o, ws, nullptr));
+    Spec out;
+    out.st = fp_spectral_jvp(op, ws, kind, &sa.a, &za.a, &aa.a, dgamma, nullptr, &ba.a,
+                             kind == FP_SPECTRAL_SVD ? &ra.a : nullptr);
+    fp_workspace_free(ws);
+    out.z = za.data;
+    out.b = ba.data;
+    out.r = ra.data;
+    return out;
+}
+
+// B and r of one matrix for a separable f with J = diag(jd), from the
+// formulas: exact ties and zeros only, which take the average of J.
+static void spectral_ref(bool svd, const Vec &s, const Vec &z, const Vec &jd, const Vec &a, Vec &b, Vec &r) {
+    const size_t k = s.size();
+    b.assign(k * k, 0.0);
+    r.assign(k, 0.0);
+    for (size_t i = 0; i < k; ++i) {
+        for (size_t j = 0; j < k; ++j) {
+            const double aij = a[i * k + j], aji = a[j * k + i];
+            if (i == j) {
+                b[i * k + i] = jd[i] * aij;
+                continue;
+            }
+            const double gp = s[i] == s[j] ? 0.5 * (jd[i] + jd[j]) : (z[i] - z[j]) / (s[i] - s[j]);
+            if (!svd) {
+                b[i * k + j] = gp * aij;
+                continue;
+            }
+            const double gm = s[i] + s[j] == 0.0 ? 0.5 * (jd[i] + jd[j]) : (z[i] + z[j]) / (s[i] + s[j]);
+            b[i * k + j] = 0.5 * (gp * (aij + aji) + gm * (aij - aji));
+        }
+        r[i] = s[i] != 0.0 ? z[i] / s[i] : jd[i];
+    }
+}
+
+static double maxdiff(const Vec &u, const Vec &v) {
+    double m = 0.0;
+    for (size_t i = 0; i < u.size(); ++i) m = std::max(m, std::fabs(u[i] - v[i]));
+    return m;
+}
+
+static void test_spectral() {
+    fp_op *soft, *nonneg, *iso, *wsoft, *sym_box, *box, *l1b, *simplex, *barrier;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &soft));
+    CHECK_OK(fp_op_nonneg(&nonneg));
+    CHECK_OK(fp_op_isotonic(nullptr, 1, &iso));
+    Arr w({3}, {1.0, 2.0, 1.0});
+    CHECK_OK(fp_op_soft(0.5, &w.a, &wsoft));
+    CHECK_OK(fp_op_box(-2.0, 2.0, nullptr, nullptr, &sym_box));
+    CHECK_OK(fp_op_box(0.0, 2.0, nullptr, nullptr, &box));
+    CHECK_OK(fp_op_l1_ball(3.0, nullptr, &l1b));
+    CHECK_OK(fp_op_simplex(1.0, &simplex));
+    CHECK_OK(fp_op_log_barrier(0.4, &barrier));
+
+    // Which operators qualify.
+    CHECK_OK(fp_op_spectral_check(soft, FP_SPECTRAL_SVD));
+    CHECK_OK(fp_op_spectral_check(soft, FP_SPECTRAL_EIG));
+    CHECK(fp_op_spectral_check(nonneg, FP_SPECTRAL_SVD) == FP_EINVAL);
+    CHECK_OK(fp_op_spectral_check(nonneg, FP_SPECTRAL_EIG));
+    CHECK(fp_op_spectral_check(iso, FP_SPECTRAL_EIG) == FP_EINVAL);
+    CHECK(fp_op_spectral_check(wsoft, FP_SPECTRAL_EIG) == FP_EINVAL);
+    CHECK_OK(fp_op_spectral_check(sym_box, FP_SPECTRAL_SVD));
+    CHECK(fp_op_spectral_check(box, FP_SPECTRAL_SVD) == FP_EINVAL);
+    CHECK_OK(fp_op_spectral_check(box, FP_SPECTRAL_EIG));
+    CHECK(fp_op_spectral_check(simplex, FP_SPECTRAL_SVD) == FP_EINVAL);
+    CHECK(fp_op_spectral_check(soft, static_cast<fp_spectral_kind>(7)) == FP_EINVAL);
+    CHECK(fp_op_spectral_check(nullptr, FP_SPECTRAL_SVD) == FP_EINVAL);
+
+    // Nuclear norm: distinct values, a tie, a value under the threshold, a zero.
+    {
+        const Vec s = {3.0, 2.0, 2.0, 0.3, 0.0};
+        const Vec a = randn(25);
+        Spec out = spectral(soft, FP_SPECTRAL_SVD, {}, 5, s, a);
+        CHECK_OK(out.st);
+        Vec b, r;
+        spectral_ref(true, s, out.z, {1, 1, 1, 0, 0}, a, b, r);
+        CHECK(maxdiff(out.b, b) < 1e-14);
+        CHECK(maxdiff(out.r, r) < 1e-14);
+        // Eigenvalues of the same map: no G- and no r.
+        out = spectral(soft, FP_SPECTRAL_EIG, {}, 5, s, a);
+        spectral_ref(false, s, out.z, {1, 1, 1, 0, 0}, a, b, r);
+        CHECK_OK(out.st);
+        CHECK(maxdiff(out.b, b) < 1e-14);
+        // dgamma reaches the diagonal only: dz/dgamma = -lambda on the support.
+        out = spectral(soft, FP_SPECTRAL_SVD, {}, 5, s, Vec(25, 0.0), 1.0, 1.0);
+        CHECK(out.b[0] == -0.5 && out.b[6] == -0.5 && out.b[18] == 0.0 && out.b[24] == 0.0);
+        CHECK(out.b[1] == 0.0);
+    }
+    // Near ties of a nonlinear map (-log det): the average of the two
+    // derivatives, against the divided difference at the midpoint.
+    {
+        const double g = 1.0, l = 0.4, x0 = 1.3;
+        auto f = [&](double x) { return 0.5 * (x + std::sqrt(x * x + 4 * g * l)); };
+        auto fd = [&](double x) { return 0.5 * (1 + x / std::sqrt(x * x + 4 * g * l)); };
+        for (double gap : {1e-3, 1e-7, 1e-12, 0.0}) {
+            const Vec s = {x0, x0 + gap, -0.7};
+            Vec a(9, 0.0);
+            a[1] = 1.0;  // A_01
+            Spec out = spectral(barrier, FP_SPECTRAL_EIG, {}, 3, s, a, g);
+            CHECK_OK(out.st);
+            const double exact = gap > 1e-6 ? (f(x0) - f(x0 + gap)) / -gap : fd(x0 + gap / 2);
+            CHECK(std::fabs(out.b[1] - exact) < 1e-11 * exact);
+            CHECK(out.b[3] == 0.0);  // B_10 = G+_10 A_10
+        }
+    }
+    // A row operator (the nuclear-norm ball): tied values on the support take
+    // J_ii - J_ij = 1 from J = I - 1 1^T / |S|; tied values off it 0.
+    {
+        const Vec s = {2.0, 2.0, 1.0, 0.1, 0.1};  // tau = 2/3: z = (4/3, 4/3, 1/3, 0, 0)
+        const Vec a = randn(25);
+        Spec out = spectral(l1b, FP_SPECTRAL_SVD, {}, 5, s, a);
+        CHECK_OK(out.st);
+        CHECK(std::fabs(out.z[0] - 4.0 / 3) < 1e-15 && out.z[3] == 0.0);
+        auto bij = [&](int i, int j, double gp, double gm) {
+            return 0.5 * (gp * (a[i * 5 + j] + a[j * 5 + i]) + gm * (a[i * 5 + j] - a[j * 5 + i]));
+        };
+        CHECK(std::fabs(out.b[1] - bij(0, 1, 1.0, (8.0 / 3) / 4)) < 1e-14);
+        CHECK(std::fabs(out.b[2] - bij(0, 2, 1.0, (5.0 / 3) / 3)) < 1e-14);
+        CHECK(std::fabs(out.b[3 * 5 + 4] - bij(3, 4, 0.0, 0.0)) < 1e-14);
+        CHECK(std::fabs(out.b[0] - (2.0 / 3 * a[0] - a[6] / 3 - a[12] / 3)) < 1e-14);  // (J diag A)_0
+        CHECK(std::fabs(out.r[2] - 1.0 / 3) < 1e-15 && out.r[4] == 0.0);
+    }
+    // The spectraplex: eigenvalues onto the simplex.
+    {
+        const Vec s = {0.5, 0.5, -0.2};  // z = (0.5, 0.5, 0), support {0, 1}
+        Vec a(9, 0.0);
+        a[1] = 1.0;
+        a[2] = 2.0;
+        Spec out = spectral(simplex, FP_SPECTRAL_EIG, {}, 3, s, a);
+        CHECK_OK(out.st);
+        CHECK(std::fabs(out.b[1] - 1.0) < 1e-15);              // J_00 - J_01 = 1
+        CHECK(std::fabs(out.b[2] - 2.0 * 0.5 / 0.7) < 1e-15);  // G+_02 A_02
+    }
+    // Batches and strides: each matrix as if alone; A given transposed.
+    {
+        const int64_t k = 4;
+        const Vec s = {3.0, 1.0, 1.0, 0.2, 2.0, 2.0, 2.0, 2.0, 0.6, 0.6, 0.0, 0.0,
+                       5.0, 4.0, 3.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.3, 0.7, 0.9, 0.7};
+        const Vec a = randn(6 * k * k);
+        Spec all = spectral(soft, FP_SPECTRAL_SVD, {2, 3}, k, s, a);
+        CHECK_OK(all.st);
+        for (int m = 0; m < 6; ++m) {
+            const Vec sm(s.begin() + m * k, s.begin() + (m + 1) * k);
+            const Vec am(a.begin() + m * k * k, a.begin() + (m + 1) * k * k);
+            Spec one = spectral(soft, FP_SPECTRAL_SVD, {}, k, sm, am);
+            CHECK(maxdiff(one.b, Vec(all.b.begin() + m * k * k, all.b.begin() + (m + 1) * k * k)) == 0.0);
+            CHECK(maxdiff(one.r, Vec(all.r.begin() + m * k, all.r.begin() + (m + 1) * k)) == 0.0);
+        }
+        // A through transposed strides equals A^T given contiguously.
+        Vec at(k * k);
+        for (int i = 0; i < k; ++i)
+            for (int j = 0; j < k; ++j) at[i * k + j] = a[j * k + i];
+        const Vec s0(s.begin(), s.begin() + k);
+        Arr sa({k}, s0), za({k}), aa({k, k}, Vec(a.begin(), a.begin() + k * k)), b1({k, k}), b2({k, k});
+        Arr att({k, k}, at);
+        std::swap(aa.strides[0], aa.strides[1]);
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(soft, &sa.a, &o, &ws));
+        CHECK_OK(fp_prox(soft, 1.0, &sa.a, &za.a, &o, ws, nullptr));
+        CHECK_OK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &sa.a, &za.a, &aa.a, 0.0, nullptr, &b1.a, nullptr));
+        CHECK_OK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &sa.a, &za.a, &att.a, 0.0, nullptr, &b2.a, nullptr));
+        CHECK(b1.data == b2.data);
+        // No allocation after the first call.
+        const long before = g_allocs.load();
+        CHECK_OK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &sa.a, &za.a, &att.a, 0.0, nullptr, &b2.a, nullptr));
+#ifndef FP_TSAN
+        CHECK(g_allocs.load() == before);
+#endif
+        // Errors.
+        Arr neg({k}, {1.0, -1.0, 0.5, 0.0}), bad({k + 1, k + 1}), r({k});
+        CHECK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &neg.a, &za.a, &att.a, 0.0, nullptr, &b2.a, nullptr) ==
+              FP_EINVAL);
+        CHECK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &sa.a, &za.a, &bad.a, 0.0, nullptr, &b2.a, nullptr) ==
+              FP_ESHAPE);
+        CHECK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_EIG, &sa.a, &za.a, &att.a, 0.0, nullptr, &b2.a, &r.a) ==
+              FP_EINVAL);
+        CHECK(fp_spectral_jvp(nonneg, ws, FP_SPECTRAL_EIG, &sa.a, &za.a, &att.a, 0.0, nullptr, &b2.a, nullptr) ==
+              FP_EINVAL);
+        CHECK_OK(fp_prox_conj(soft, 1.0, &sa.a, &za.a, &o, ws, nullptr));
+        CHECK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_SVD, &sa.a, &za.a, &att.a, 0.0, nullptr, &b2.a, nullptr) ==
+              FP_EINVAL);
+        fp_workspace_free(ws);
+        // The workspace of a prox along another axis.
+        Arr s2({k, 2}, Vec(2 * k, 1.0)), z2({k, 2});
+        o = opts(0, 0, 1);
+        CHECK_OK(fp_workspace_create(soft, &s2.a, &o, &ws));
+        CHECK_OK(fp_prox(soft, 1.0, &s2.a, &z2.a, &o, ws, nullptr));
+        Arr a2({k, 2, 2}), b3({k, 2, 2});
+        CHECK(fp_spectral_jvp(soft, ws, FP_SPECTRAL_EIG, &s2.a, &z2.a, &a2.a, 0.0, nullptr, &b3.a, nullptr) ==
+              FP_EINVAL);
+        fp_workspace_free(ws);
+    }
+    // A matrix with NaN gives NaN off its diagonal; the others are unaffected.
+    {
+        const Vec s = {1.0, NAN, 0.5, 2.0, 1.0, 0.5};
+        Spec out = spectral(soft, FP_SPECTRAL_SVD, {2}, 3, s, randn(18));
+        CHECK_OK(out.st);
+        CHECK(std::isnan(out.b[1]) && std::isnan(out.r[0]));
+        CHECK(std::isfinite(out.b[9 + 1]) && std::isfinite(out.r[3]));
+    }
+    // Bit-identical for any thread count, float32 close to float64.
+    {
+        const int64_t k = 32, nb = 64;
+        Vec s(static_cast<size_t>(nb * k));
+        for (auto &v : s) v = std::floor(unif(0.0, 8.0)) / 4;  // many ties and zeros
+        const Vec a = randn(nb * k * k);
+        Spec one = spectral(l1b, FP_SPECTRAL_SVD, {nb}, k, s, a, 1.0, 0.0, 1);
+        Spec many = spectral(l1b, FP_SPECTRAL_SVD, {nb}, k, s, a, 1.0, 0.0, 8);
+        CHECK(one.b == many.b && one.r == many.r);
+
+        std::vector<float> sf(s.begin(), s.end()), af(a.begin(), a.end()), zf(s.size()), bf(a.size());
+        int64_t sh[2] = {nb, k}, ash[3] = {nb, k, k};
+        fp_array sa{sf.data(), FP_F32, 2, sh, nullptr, FP_DEVICE_CPU}, za{zf.data(), FP_F32, 2, sh, nullptr, FP_DEVICE_CPU};
+        fp_array aa{af.data(), FP_F32, 3, ash, nullptr, FP_DEVICE_CPU}, ba{bf.data(), FP_F32, 3, ash, nullptr, FP_DEVICE_CPU};
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(l1b, &sa, &o, &ws));
+        CHECK_OK(fp_prox(l1b, 1.0, &sa, &za, &o, ws, nullptr));
+        CHECK_OK(fp_spectral_jvp(l1b, ws, FP_SPECTRAL_SVD, &sa, &za, &aa, 0.0, nullptr, &ba, nullptr));
+        double err = 0.0;
+        for (size_t i = 0; i < bf.size(); ++i) err = std::max(err, std::fabs(bf[i] - one.b[i]));
+        CHECK(err < 1e-4);
+        fp_workspace_free(ws);
+    }
+    for (fp_op *op : {soft, nonneg, iso, wsoft, sym_box, box, l1b, simplex, barrier}) fp_op_free(op);
+}
+
 static void test_edge_kinks() {
     const int64_t edges[4] = {0, 1, 1, 2};
     fp_op *op;
@@ -2193,6 +2439,7 @@ int main() {
     test_kinks();
     test_edge_kinks();
     test_value();
+    test_spectral();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();

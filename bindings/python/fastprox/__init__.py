@@ -43,6 +43,7 @@ __all__ = [
     "prox_l1_box", "project_soc", "group_huber", "group_scad", "group_mcp",
     "TreeL2", "tree_soft_threshold", "sparse_group_soft_threshold", "TV1DBall",
     "project_tv1d_ball", "TV1DL2", "tv1d_l2",
+    "Spectral", "SpectralContext", "NuclearNorm", "SpectralNormBall", "PSD",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -1068,6 +1069,192 @@ class LogPenalty(_Pointwise):
 
     def __init__(self, lam=1.0, eps=1.0):
         super().__init__(_C.log_penalty(float(lam), float(eps)))
+
+
+# ---------------------------------------------------------------------------
+# Spectral operators
+# ---------------------------------------------------------------------------
+
+_SPECTRAL_KINDS = {"svd": 0, "eigh": 1}
+
+
+class SpectralContext:
+    """Structure saved by ``Spectral.prox(..., keep=True)``: the decomposition,
+    the prox of the spectrum, and the inner operator's context."""
+
+    __slots__ = ("op", "u", "s", "vt", "z", "inner", "shape")
+
+    def __init__(self, op, u, s, vt, z, inner, shape):
+        self.op, self.u, self.s, self.vt, self.z, self.inner, self.shape = op, u, s, vt, z, inner, shape
+
+    @property
+    def info(self) -> Info:
+        """The inner prox call's certificate (ties on the spectrum)."""
+        return self.inner.info
+
+
+class Spectral:
+    r"""An operator on the singular values (``kind="svd"``) or the eigenvalues
+    (``kind="eigh"``, symmetric matrices) of each matrix of a batch (since 1.1):
+    $g(X) = h(\sigma(X))$ with $h$ the wrapped operator, so that
+
+    $$\operatorname{prox}_{\gamma g}(X) = U \operatorname{diag}(\operatorname{prox}_{\gamma h}(s)) V^\top
+    \quad \text{for} \quad X = U \operatorname{diag}(s) V^\top.$$
+
+    ``op`` must be absolutely symmetric for singular values (``Soft`` gives the
+    nuclear norm, ``L1Ball`` the nuclear-norm ball, ``LInf`` the spectral
+    norm, a symmetric ``Box`` the spectral-norm ball, and the nonconvex maps
+    low-rank penalties) and permutation invariant for eigenvalues (also
+    ``NonNeg``: the PSD cone, ``Simplex``: the spectraplex, ``LogBarrier``:
+    $-\lambda \log\det$). The decomposition and the matrix products are NumPy's
+    (``numpy.linalg.svd``, ``eigh``); the derivatives come from the C core, exact
+    where singular values repeat or sit on a threshold, where autograd through
+    an SVD fails. An ``eigh`` input that is not symmetric is replaced by
+    $(X + X^\top)/2$.
+    """
+
+    def __init__(self, op: Operator, kind="svd"):
+        if kind not in _SPECTRAL_KINDS:
+            raise ValueError(f"kind must be one of {sorted(_SPECTRAL_KINDS)}")
+        if not isinstance(op, Operator) or isinstance(op, _ImageOperator):
+            raise TypeError("op must be a fastprox operator acting on vectors")
+        if not _C.spectral_check(op._op, _SPECTRAL_KINDS[kind]):
+            what = "absolutely symmetric (singular values)" if kind == "svd" \
+                else "permutation invariant (eigenvalues)"
+            raise ValueError(f"{op!r} is not {what}; weights must be equal")
+        self.op = op
+        self.kind = kind
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.op!r}, kind={self.kind!r})"
+
+    @property
+    def nparams(self) -> int:
+        return self.op.nparams
+
+    def _matrices(self, x, copy):
+        x = _input(x, copy)
+        if x.ndim < 2:
+            raise ValueError("spectral operators act on matrices: the last two axes")
+        if self.kind == "eigh":
+            if x.shape[-1] != x.shape[-2]:
+                raise ValueError("kind='eigh' needs square matrices")
+            x = (x + np.swapaxes(x, -1, -2)) / 2
+        return x
+
+    def _decompose(self, x):
+        if self.kind == "svd":
+            return np.linalg.svd(x, full_matrices=False)
+        s, q = np.linalg.eigh(x)
+        return q, s, np.swapaxes(q, -1, -2)
+
+    # -- forward -----------------------------------------------------------
+    def prox(self, x, gamma=1.0, *, threads=0, keep=False, ctx=None, copy=False):
+        r"""$\operatorname{prox}_{\gamma g}(X)$ of each matrix in the last two axes.
+        With ``keep=True`` returns ``(Z, ctx)``."""
+        x = self._matrices(x, copy)
+        u, s, vt = self._decompose(x)
+        return self._prox_from(u, s, vt, gamma, threads, keep, ctx, x.shape)
+
+    def prox_from(self, u, s, vh, gamma=1.0, *, threads=0, keep=False, ctx=None):
+        r"""The prox from a decomposition the caller has: $U$ (..., m, r), $s$
+        (..., r) and $V^\top$ (..., r, n), as ``numpy.linalg.svd`` returns them
+        with ``full_matrices=False`` (for ``eigh``: $Q$, the eigenvalues and
+        $Q^\top$). It may hold only the leading triplets when the others map
+        to zero, as in singular value thresholding below $\gamma\lambda$;
+        derivatives need the full thin decomposition."""
+        u, s, vh = (_input(a, True) for a in (u, s, vh))
+        return self._prox_from(u, s, vh, gamma, threads, keep, ctx, u.shape[:-1] + vh.shape[-1:])
+
+    def _prox_from(self, u, s, vt, gamma, threads, keep, ctx, shape):
+        s = np.ascontiguousarray(s)
+        if not keep:
+            z = self.op.prox(s, gamma, threads=threads)
+            return (u * z[..., None, :]) @ vt
+        inner = ctx.inner if isinstance(ctx, SpectralContext) and ctx.op is self else None
+        z, inner = self.op.prox(s, gamma, threads=threads, keep=True, ctx=inner)
+        return (u * z[..., None, :]) @ vt, SpectralContext(self, u, s, vt, z, inner, shape)
+
+    def value(self, x, *, tol=1e-6):
+        r"""$g(X) = h(\sigma(X))$ per matrix: a float for one matrix, else an
+        array of the batch shape."""
+        x = self._matrices(x, True)
+        s = np.linalg.svd(x, compute_uv=False) if self.kind == "svd" else np.linalg.eigvalsh(x)
+        return self.op.value(s, tol=tol)
+
+    # -- derivatives -------------------------------------------------------
+    def _check_ctx(self, ctx):
+        if not isinstance(ctx, SpectralContext) or ctx.op is not self:
+            raise ValueError("ctx must come from prox(..., keep=True) on this operator")
+        if ctx.u.shape[-1] != ctx.s.shape[-1] or ctx.shape[-1] != ctx.vt.shape[-1] \
+                or ctx.vt.shape[-2] != ctx.s.shape[-1] or ctx.s.shape[-1] != min(ctx.shape[-2:]):
+            raise ValueError("derivatives need the full thin decomposition")
+
+    def _core(self, ctx, h, dgamma, dparams):
+        """B and r from A = U^T H V, and the derivative they give."""
+        u, vt = ctx.u, ctx.vt
+        if self.kind == "eigh":
+            h = (h + np.swapaxes(h, -1, -2)) / 2
+        a = np.swapaxes(u, -1, -2) @ h @ np.swapaxes(vt, -1, -2)
+        b = np.empty_like(a)
+        m, n = ctx.shape[-2:]
+        r = np.empty_like(ctx.s) if self.kind == "svd" and m != n else None
+        if dparams is not None:
+            dparams = self.op._flatten(dparams)
+        _C.spectral_jvp(self.op._op, ctx.inner.ws, _SPECTRAL_KINDS[self.kind], ctx.s, ctx.z,
+                        np.ascontiguousarray(a), float(dgamma), dparams, b, r)
+        out = u @ b @ vt
+        if r is not None:
+            if m > n:  # (I - U U^T) H V diag(r) V^T
+                out += ((h @ np.swapaxes(vt, -1, -2) - u @ a) * r[..., None, :]) @ vt
+            else:      # U diag(r) U^T H (I - V V^T)
+                out += (u * r[..., None, :]) @ (np.swapaxes(u, -1, -2) @ h - a @ vt)
+        return out, a
+
+    def jvp(self, ctx: SpectralContext, dx, dgamma=0.0, dparams=None):
+        r"""The derivative of $X \mapsto \operatorname{prox}_{\gamma g}(X)$ in the
+        direction ``dx``, plus $d\gamma$ and $d\theta$ (the inner operator's
+        parameters) terms."""
+        self._check_ctx(ctx)
+        dx = _input(dx, True).astype(ctx.s.dtype, copy=False)
+        if dx.shape != ctx.shape:
+            raise ValueError(f"dx must have shape {ctx.shape}")
+        return self._core(ctx, dx, dgamma, dparams)[0]
+
+    def vjp(self, ctx: SpectralContext, g):
+        r"""($J^\top g$, Grads): the map is self-adjoint, and the gradients in
+        $\gamma$ and the inner operator's parameters are those of the spectrum."""
+        self._check_ctx(ctx)
+        g = _input(g, True).astype(ctx.s.dtype, copy=False)
+        if g.shape != ctx.shape:
+            raise ValueError(f"g must have shape {ctx.shape}")
+        gx, a = self._core(ctx, g, 0.0, None)
+        _, grads = self.op.vjp(ctx.inner, np.ascontiguousarray(np.diagonal(a, axis1=-2, axis2=-1)))
+        return gx, grads
+
+
+class NuclearNorm(Spectral):
+    r"""$g(X) = \lambda \lVert X \rVert_* = \lambda \sum_i \sigma_i(X)$: singular
+    value thresholding (since 1.1). Its parameters are those of ``Soft``."""
+
+    def __init__(self, lam=1.0):
+        super().__init__(Soft(lam))
+
+
+class SpectralNormBall(Spectral):
+    r"""The indicator of $\{X : \sigma_{\max}(X) \le r\}$: singular values
+    clipped at $r$ (since 1.1)."""
+
+    def __init__(self, radius=1.0):
+        super().__init__(Box(-radius, radius))
+
+
+class PSD(Spectral):
+    r"""The indicator of the positive semidefinite cone: negative eigenvalues
+    set to zero (since 1.1)."""
+
+    def __init__(self):
+        super().__init__(NonNeg(), "eigh")
 
 
 # ---------------------------------------------------------------------------

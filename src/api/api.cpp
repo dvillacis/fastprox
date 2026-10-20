@@ -7,6 +7,7 @@
 #include "core/driver.hpp"
 #include "core/layout.hpp"
 #include "core/op.hpp"
+#include "core/spectral.hpp"
 #include "core/workspace.hpp"
 #include "ops/ops.hpp"
 
@@ -366,6 +367,70 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
                                    : image_jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
     return ws->dtype == FP_F32 ? jvp_driver<float>(*op, *ws, dxp, dgamma, dp, out)
                                : jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
+}
+
+int spectral_bit(fp_spectral_kind kind) noexcept {
+    return kind == FP_SPECTRAL_SVD ? kSpectralSvd : kind == FP_SPECTRAL_EIG ? kSpectralEig : 0;
+}
+
+// A (..., k, k) array over the batch of ws: its leading axes those of ws.
+fp_status check_square(const fp_workspace &ws, const Arr &a) noexcept {
+    if (a.dtype != ws.dtype) return FP_EDTYPE;
+    if (a.ndim != ws.ndim + 1) return FP_ESHAPE;
+    for (int d = 0; d < ws.ndim; ++d)
+        if (a.shape[d] != ws.shape[d]) return FP_ESHAPE;
+    return a.shape[ws.ndim] == ws.n ? FP_OK : FP_ESHAPE;
+}
+
+// The diagonal of a (..., k, k) array, as a (..., k) view.
+Arr diagonal(const Arr &a) noexcept {
+    Arr d = a;
+    d.ndim = a.ndim - 1;
+    d.strides[d.ndim - 1] = a.strides[d.ndim - 1] + a.strides[d.ndim];
+    return d;
+}
+
+fp_status spectral_jvp_impl(const fp_op *op, const fp_workspace *ws, fp_spectral_kind kind,
+                            const fp_array *sa, const fp_array *za, const fp_array *aa, double dgamma,
+                            const fp_array *dpa, fp_array *ba, fp_array *ra) {
+    if (!op || !ws || !sa || !za || !aa || !ba) return FP_EINVAL;
+    const int bit = spectral_bit(kind);
+    if (!bit || !(op->spectral() & bit)) return FP_EINVAL;
+    if (ws->op != op || !ws->valid || ws->conj || ws->axis != ws->ndim - 1) return FP_EINVAL;
+    const bool svd = kind == FP_SPECTRAL_SVD;
+    if (ra && !svd) return FP_EINVAL;
+    if (!finite(dgamma)) return FP_EPARAM;
+    Arr s, z, a, b, r;
+    if (fp_status e = to_arr(sa, s)) return e;
+    if (fp_status e = to_arr(za, z)) return e;
+    if (fp_status e = to_arr(aa, a)) return e;
+    if (fp_status e = to_arr(ba, b)) return e;
+    if (fp_status e = check_like_ws(*ws, s)) return e;
+    if (fp_status e = check_like_ws(*ws, z)) return e;
+    if (fp_status e = check_square(*ws, a)) return e;
+    if (fp_status e = check_square(*ws, b)) return e;
+    if (ra) {
+        if (fp_status e = to_arr(ra, r)) return e;
+        if (fp_status e = check_like_ws(*ws, r)) return e;
+    }
+    const int64_t P = op->nparams();
+    const double *dp = nullptr;
+    if (dpa && P > 0) {
+        if (fp_status e = read_exact(dpa, P, ws->dparams.data())) return e;
+        dp = ws->dparams.data();
+    }
+    if (ws->numel == 0) return FP_OK;
+
+    // diag(B) = J diag(A) + the gamma and parameter terms: fp_jvp on the diagonals.
+    const Arr da = diagonal(a), db = diagonal(b);
+    fp_status e = ws->dtype == FP_F32 ? jvp_driver<float>(*op, *ws, &da, dgamma, dp, db)
+                                      : jvp_driver<double>(*op, *ws, &da, dgamma, dp, db);
+    if (e) return e;
+    const size_t need = spectral_doubles(ws->n) * static_cast<size_t>(ws->nthreads);
+    if (ws->spectral.size() < need) ws->spectral.resize(need);
+    return ws->dtype == FP_F32
+               ? spectral_driver<float>(*op, *ws, svd, s, z, a, b, ra ? &r : nullptr, ws->spectral.data())
+               : spectral_driver<double>(*op, *ws, svd, s, z, a, b, ra ? &r : nullptr, ws->spectral.data());
 }
 
 fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, fp_array *gxa,
@@ -1203,6 +1268,18 @@ FP_API fp_status fp_jvp(const fp_op *op, const fp_workspace *ws, const fp_array 
 FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws, const fp_array *g, fp_array *gx,
                         double *ggamma, fp_array *gparams) {
     return guard([&] { return fp::vjp_impl(op, ws, g, gx, ggamma, gparams); });
+}
+
+FP_API fp_status fp_op_spectral_check(const fp_op *op, fp_spectral_kind kind) {
+    if (!op) return FP_EINVAL;
+    const int bit = fp::spectral_bit(kind);
+    return bit && (op->spectral() & bit) ? FP_OK : FP_EINVAL;
+}
+
+FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws, fp_spectral_kind kind,
+                                 const fp_array *s, const fp_array *z, const fp_array *a, double dgamma,
+                                 const fp_array *dparams, fp_array *b, fp_array *r) {
+    return guard([&] { return fp::spectral_jvp_impl(op, ws, kind, s, z, a, dgamma, dparams, b, r); });
 }
 
 FP_API const char *fp_strerror(fp_status s) {
