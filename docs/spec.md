@@ -37,7 +37,7 @@ Version 1 is a small, exact and fast library of proximal operators and projectio
 
 - **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl.
 - **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API (Section 13).
-- **No matrix-valued prox maps.** Nuclear norm and spectral functions need an SVD and are deferred to version 2.
+- **No SVD or eigendecomposition in the core.** Matrix prox maps such as the nuclear norm need one, so they come in 1.x with the decomposition supplied by the caller (Section 5, "Spectral operators"). Planned at first for version 2; revised 20 October 2026.
 - **No automatic modelling.** No parser or DSL for composite objectives, unlike ProxImaL.
 
 ## Use cases
@@ -108,6 +108,77 @@ Version 1 ships 20 operators in five groups. Seventeen are exact, by closed form
 
 - **Graph TV precision.** Parametric max-flow is exact for TV with finitely many levels. For real-valued data it returns a solution exact to a user-set precision, the approach of Chambolle and Darbon and of Hochbaum. The number of max-flow calls grows with the logarithm of the value range divided by that precision.
 - **What is deliberately missing.** TGV, Hessian-Schatten norms and nonconvex TV (such as the TV quasinorm) have no exact prox. They are better handled by the user's splitting method on top of the operators above, using a weighted TV or a pointwise nonconvex prox as the inner step.
+
+### Spectral operators (1.x, design)
+
+A spectral operator applies one of the operators above to the singular values or eigenvalues of a matrix. Added in 1.x as new functions, it keeps the 1.0 ABI. The caller computes the decomposition with the framework it already uses (NumPy, PyTorch or JAX, on the CPU or the GPU), and also forms the matrix products. The core does what autograd through a decomposition gets wrong: the prox on the spectrum, and its exact derivatives where singular values repeat or sit on a kink. The core stays free of LAPACK and BLAS (Section 8).
+
+**Two kinds.**
+
+- **Singular values** of X ∈ ℝ^{m×n}, with X = U diag(s) Vᵀ the thin SVD, k = min(m, n), and g(X) = h(s). The prox is prox\_{γg}(X) = U diag(z) Vᵀ with z = prox\_{γh}(s). This holds whenever h is absolutely symmetric: invariant under permutations and sign changes of its argument. By von Neumann's trace inequality this holds for nonconvex h too, provided it is separable with an even scalar penalty.
+- **Eigenvalues** of a symmetric X = Q diag(s) Qᵀ, with g(X) = h(s) and h invariant under permutations. Then prox\_{γg}(X) = Q diag(prox\_{γh}(s)) Qᵀ. An input that is not symmetric is replaced by (X + Xᵀ)/2, and the derivatives are those of that map.
+
+**Which operators qualify.** The core checks each operator against the kind; unweighted forms and scalar parameters are needed for the symmetry:
+
+| Kind | Operators | Gives |
+| --- | --- | --- |
+| Singular values | soft thresholding, elastic net, Huber, ℓ0, ℓq, SCAD, MCP, log | nuclear norm, nonconvex low-rank penalties |
+| | ℓ1 ball; ℓ∞ prox; box with lower = −upper; ℓ2 ball | nuclear-norm ball; spectral norm; spectral-norm ball; Frobenius ball |
+| Eigenvalues | the above, and the nonnegative orthant, box, simplex, log barrier | PSD cone; eigenvalue bounds; spectraplex (PSD with trace r); −log det |
+
+Each operator reports whether it is permutation invariant and whether it is even. Weighted variants qualify only with equal weights. Others, such as isotonic regression and 1D TV, are rejected with FP\_EINVAL.
+
+**Derivatives.** Let z = f(s) be the prox on the spectrum and J its Jacobian, which fp\_jvp already provides. Take the SVD kind with A = Uᵀ H V (k × k), and let A\_s and A\_k be its symmetric and skew parts. The derivative of the spectral map in the direction H is the following (Daleckii and Krein 1965; Lewis and Sendov 2001 and 2005; Candès, Sing-Long and Trzasko 2013 for singular value thresholding):
+
+D(H) = U B Vᵀ + (I − U Uᵀ) H V diag(r) Vᵀ,  B = diag(J diag(A)) + Γ⁺ ∘ A\_s + Γ⁻ ∘ A\_k
+
+- The off-diagonal coefficients are Γ⁺\_ij = (z\_i − z\_j) / (s\_i − s\_j) and Γ⁻\_ij = (z\_i + z\_j) / (s\_i + s\_j), and the diagonals of Γ± are zero.
+- The complement ratio is r\_i = z\_i / s\_i. Its term is present only for m > n; for m < n the roles of U and V swap.
+- The eigenvalue kind has A = Qᵀ H Q, B = diag(J diag(A)) + Γ⁺ ∘ A, D(H) = Q B Qᵀ, and no Γ⁻ or r.
+
+**Ties and zeros, exactly.** The quotients above have no value where s\_i = s\_j (for Γ⁻, s\_i = s\_j = 0; for r, s\_i = 0). Their limits come from J:
+- Γ⁺\_ij → J\_ii − J\_ij;
+- Γ⁻\_ij → J\_ii + J\_ij;
+- r\_i → J\_ii at s\_i = 0.
+
+On a group of equal values, permutation invariance gives J the form a I + b 1 1ᵀ there, so one fp\_jvp with a unit vector per group yields every limit in it. A pair counts as tied when |s\_i − s\_j| ≤ √ε · max\_l |s\_l|, a tolerance relative to the matrix's own scale. Outside that band the quotients are the exact derivative, kinks between s\_i and s\_j included. At a kink of f itself (s\_i on a threshold), J is the one-sided Jacobian of the structure the prox selected, as for every operator (Section 7), and the limits follow from it.
+
+**Adjoint and parameters.** Γ⁺ and Γ⁻ are symmetric, and J is symmetric for every qualifying operator, so the map H ↦ D(H) is self-adjoint in the Frobenius inner product. The VJP of a cotangent G is therefore D(G). The derivatives in γ and the operator's parameters touch only the diagonal: dγ adds the γ-derivative of f to diag(B), and the parameter gradients are fp\_vjp of the operator on diag(Uᵀ G V).
+
+**C API.** The decomposition and the products U B Vᵀ stay with the caller. The core takes the spectrum, its prox and the k × k matrix A, and returns B and r. That costs O(k²) per matrix, plus one O(k) JVP per tie group. The prox on the spectrum is plain fp\_prox on s, shape (..., k), with keep\_structure set.
+
+```c
+typedef enum { FP_SPECTRAL_SVD = 0, FP_SPECTRAL_EIG = 1 } fp_spectral_kind;
+
+/* FP_OK if op can act on a spectrum of this kind, else FP_EINVAL. */
+FP_API fp_status fp_op_spectral_check(const fp_op *op, fp_spectral_kind kind);
+
+/* After fp_prox(op, gamma, s -> z) with keep_structure: B (..., k, k) and,
+ * for the SVD kind, r (..., k; may be NULL) from A (..., k, k). Called with
+ * a cotangent's A it gives the VJP's B, since the map is self-adjoint. */
+FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
+                                 fp_spectral_kind kind, const fp_array *s,
+                                 const fp_array *z, const fp_array *a,
+                                 double dgamma, fp_array *b, fp_array *r);
+```
+
+The workspace built for the prox on s also holds the spectral scratch, two vectors of length k per thread, so these calls allocate nothing. Rows of B are independent, and the result is bit-identical for any thread count.
+
+**Python.**
+- **Constructors:** `fp.Spectral(op, kind="svd" | "eigh")` wraps a qualifying operator. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)` and `fp.PSD()` are shorthands.
+- **`prox`, `jvp`, `vjp` and `value`** take matrices of shape (..., m, n), batched like every other operator. They call `numpy.linalg.svd` or `eigh` and the BLAS products themselves.
+- **`prox_from(U, s, Vh, gamma)`** is for a caller that already has the decomposition.
+- **`fastprox.torch` and `fastprox.jax`** get the same operators, with the decomposition and products in the framework, on the input's device. B is computed on the CPU from A, which costs a k × k round trip until a device path follows, as image TV had in 0.3.
+
+**Tests.**
+- **Prox:** against a reference built from NumPy's SVD, and optimality checked through `value`: g(Z) + ‖Z − X‖²/(2γ) at Z against trial points.
+- **Derivatives:**
+  - JVP against finite differences on random matrices away from ties.
+  - The same on matrices built with repeated and zero singular values, where the map is differentiable whenever f is. Autograd through `torch.linalg.svd` returns NaN there for repeated values above the threshold (checked on 7 × 5 with s = (2, 2, 2, 1.5, 1.5) and soft thresholding at 0.7), and the test shows the contrast.
+  - Adjointness ⟨G, D(H)⟩ = ⟨D(G), H⟩.
+  - Parameter gradients against finite differences.
+- **Shapes and dtypes:** square and rectangular (m < n, m > n), batched, float32 and float64.
+- **Determinism:** the threading test, with bit-identical output for any thread count.
 
 ## Algorithms in detail
 
