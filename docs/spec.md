@@ -37,7 +37,7 @@ Version 1 is a small, exact and fast library of proximal operators and projectio
 
 - **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl.
 - **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API (Section 13).
-- **No matrix-valued prox maps.** Nuclear norm and spectral functions need an SVD and are deferred to version 2.
+- **No SVD or eigendecomposition in the core.** Matrix prox maps such as the nuclear norm need one, so they come in 1.x with the decomposition supplied by the caller (Section 5, "Spectral operators"). Planned at first for version 2; revised 20 October 2026.
 - **No automatic modelling.** No parser or DSL for composite objectives, unlike ProxImaL.
 
 ## Use cases
@@ -108,6 +108,87 @@ Version 1 ships 20 operators in five groups. Seventeen are exact, by closed form
 
 - **Graph TV precision.** Parametric max-flow is exact for TV with finitely many levels. For real-valued data it returns a solution exact to a user-set precision, the approach of Chambolle and Darbon and of Hochbaum. The number of max-flow calls grows with the logarithm of the value range divided by that precision.
 - **What is deliberately missing.** TGV, Hessian-Schatten norms and nonconvex TV (such as the TV quasinorm) have no exact prox. They are better handled by the user's splitting method on top of the operators above, using a weighted TV or a pointwise nonconvex prox as the inner step.
+
+### Spectral operators (1.x, design)
+
+A spectral operator applies one of the operators above to the singular values or eigenvalues of a matrix. Added in 1.x as new functions, it keeps the 1.0 ABI. The caller computes the decomposition with the framework it already uses (NumPy, PyTorch or JAX, on the CPU or the GPU), and also forms the matrix products. The core does what autograd through a decomposition gets wrong: the prox on the spectrum, and its exact derivatives where singular values repeat or sit on a kink. The core stays free of LAPACK and BLAS (Section 8).
+
+**Two kinds.**
+
+- **Singular values** of X ∈ ℝ^{m×n}, with X = U diag(s) Vᵀ the thin SVD, k = min(m, n), and g(X) = h(s). The prox is prox\_{γg}(X) = U diag(z) Vᵀ with z = prox\_{γh}(s). For convex h this needs h to be absolutely symmetric, that is invariant under permutations and sign changes of its argument (Beck, Theorem 7.29).
+- **Eigenvalues** of a symmetric X = Q diag(s) Qᵀ, with g(X) = h(s) and h invariant under permutations. Then prox\_{γg}(X) = Q diag(prox\_{γh}(s)) Qᵀ (Beck, Theorem 7.18). An input that is not symmetric is replaced by (X + Xᵀ)/2, and the derivatives are those of that map.
+- **Nonconvex penalties.** The same formula holds for a separable h with any lower-bounded, even scalar penalty (Lu, Zhu, Xu, Yan and Lin 2015, Theorems 1 and 2). The proof uses von Neumann's trace inequality, and the scalar prox of such a penalty is monotone. Where it is set-valued, equal singular values must get equal values. fastprox's tie rule is a function of the value (Section 4), so it satisfies this.
+
+**Which operators qualify.** The core checks each operator against the kind; unweighted forms and scalar parameters are needed for the symmetry:
+
+| Kind | Operators | Gives |
+| --- | --- | --- |
+| Singular values | soft thresholding, elastic net, Huber, ℓ0, ℓq, SCAD, MCP, log | nuclear norm, nonconvex low-rank penalties |
+| | ℓ1 ball; ℓ∞ prox; box with lower = −upper; ℓ2 ball | nuclear-norm ball; spectral norm; spectral-norm ball; Frobenius ball |
+| Eigenvalues | the above, and the nonnegative orthant, box, simplex, log barrier | PSD cone; eigenvalue bounds; spectraplex (PSD with trace r); −log det |
+
+Each operator reports whether it is permutation invariant and whether it is even. Weighted variants qualify only with equal weights. Others, such as isotonic regression and 1D TV, are rejected with FP\_EINVAL. Not covered are symmetric penalties with no vector prox in fastprox, such as the truncated nuclear norm.
+
+**Derivatives.** Let z = f(s) be the prox on the spectrum and J its Jacobian, which fp\_jvp already provides. Take the SVD kind with A = Uᵀ H V (k × k), and let A\_s and A\_k be its symmetric and skew parts. The derivative of the spectral map in the direction H is Theorem 3.3 of Ding, Sun, Sun and Toh (2018), equation (54), written there for m ≤ n. The map is differentiable at X exactly when f is differentiable at s, and continuously so exactly when f is (their Theorems 3.3 and 3.4). The eigenvalue case is Lewis and Sendov (2001), with Daleckii and Krein (1965) behind both.
+
+D(H) = U B Vᵀ + (I − U Uᵀ) H V diag(r) Vᵀ,  B = diag(J diag(A)) + Γ⁺ ∘ A\_s + Γ⁻ ∘ A\_k
+
+- The off-diagonal coefficients are Γ⁺\_ij = (z\_i − z\_j) / (s\_i − s\_j) and Γ⁻\_ij = (z\_i + z\_j) / (s\_i + s\_j), and the diagonals of Γ± are zero.
+- The complement ratio is r\_i = z\_i / s\_i. Its term is present only for m > n; for m < n the roles of U and V swap.
+- The eigenvalue kind has A = Qᵀ H Q, B = diag(J diag(A)) + Γ⁺ ∘ A, D(H) = Q B Qᵀ, and no Γ⁻ or r.
+
+**Ties and zeros, exactly.** The quotients above have no value where s\_i = s\_j (for Γ⁻, s\_i = s\_j = 0; for r, s\_i = 0). Their limits come from J, as in Ding et al.'s fallback values, equations (49)–(52):
+- Γ⁺\_ij → J\_ii − J\_ij;
+- Γ⁻\_ij → J\_ii and r\_i → J\_ii at zero, since J\_ij = 0 whenever s\_i = 0 and i ≠ j (their Lemma 3.2).
+
+On a group of equal values, permutation invariance gives J the form a I + b 1 1ᵀ there, so one fp\_jvp with a unit vector per group yields every limit in it.
+
+**Near ties, in floating point.** A quotient (z\_i − z\_j)/(s\_i − s\_j) loses about ε·|z| / |s\_i − s\_j| to rounding, while a limit used at a distance δ from a tie is off by O(δ). The average of the two one-sided limits, for instance (f′(s\_i) + f′(s\_j))/2 when f is separable, is off by only O(δ²), and is exact at a tie. So a pair counts as tied when |s\_i − s\_j| ≤ ε^{1/3} · max\_l |s\_l|, and then takes ((J\_ii − J\_ij) + (J\_jj − J\_ji))/2. This is the usual balance between rounding and truncation, as in Golub and Van Loan, Section 2.7.
+
+Checked in rational arithmetic on a smooth nonlinear f, the worst relative error over all gaps is about 2·10⁻¹¹. With a √ε band and one limit it would be about 10⁻⁸. Inside a cluster the coefficients are then equal, so B does not depend on the singular vectors the cluster leaves undetermined; Golub and Van Loan's Section 9.1.5 gives the same advice for functions of matrices with near-multiple eigenvalues. Outside the band the quotients are the exact derivative, kinks between s\_i and s\_j included. At a kink of f itself (s\_i on a threshold), J is the one-sided Jacobian of the structure the prox selected, as for every operator (Section 7), and the limits follow from it.
+
+**Adjoint and parameters.** Γ⁺ and Γ⁻ are symmetric, and J is symmetric for every qualifying operator, so the map H ↦ D(H) is self-adjoint in the Frobenius inner product. The VJP of a cotangent G is therefore D(G). The derivatives in γ and the operator's parameters touch only the diagonal: dγ adds the γ-derivative of f to diag(B), and the parameter gradients are fp\_vjp of the operator on diag(Uᵀ G V).
+
+**C API.** The decomposition and the products U B Vᵀ stay with the caller. The core takes the spectrum, its prox and the k × k matrix A, and returns B and r. That costs O(k²) per matrix, plus one O(k) JVP per tie group. The prox on the spectrum is plain fp\_prox on s, shape (..., k), with keep\_structure set.
+
+```c
+typedef enum { FP_SPECTRAL_SVD = 0, FP_SPECTRAL_EIG = 1 } fp_spectral_kind;
+
+/* FP_OK if op can act on a spectrum of this kind, else FP_EINVAL. */
+FP_API fp_status fp_op_spectral_check(const fp_op *op, fp_spectral_kind kind);
+
+/* After fp_prox(op, gamma, s -> z) with keep_structure: B (..., k, k) and,
+ * for the SVD kind, r (..., k; may be NULL) from A (..., k, k). Called with
+ * a cotangent's A it gives the VJP's B, since the map is self-adjoint. */
+FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
+                                 fp_spectral_kind kind, const fp_array *s,
+                                 const fp_array *z, const fp_array *a,
+                                 double dgamma, fp_array *b, fp_array *r);
+```
+
+The workspace built for the prox on s also holds the spectral scratch, two vectors of length k per thread, so these calls allocate nothing. Rows of B are independent, and the result is bit-identical for any thread count.
+
+**Python.**
+- **Constructors:** `fp.Spectral(op, kind="svd" | "eigh")` wraps a qualifying operator. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)` and `fp.PSD()` are shorthands.
+- **`prox`, `jvp`, `vjp` and `value`** take matrices of shape (..., m, n), batched like every other operator. They call `numpy.linalg.svd` or `eigh` and the BLAS products themselves.
+- **`prox_from(U, s, Vh, gamma)`** is for a caller that already has the decomposition.
+  - **Truncated decompositions:** it may also take only the leading triplets, as large matrix-completion codes compute them (PROPACK in Stella, Themelis and Patrinos 2017). This is valid when the caller knows the omitted values map to zero, as in singular value thresholding below γλ.
+  - **Derivatives** need the full thin decomposition, because Γ± couple every pair.
+- **`fastprox.torch` and `fastprox.jax`** get the same operators, with the decomposition and products in the framework, on the input's device. B is computed on the CPU from A, which costs a k × k round trip until a device path follows, as image TV had in 0.3.
+- **Batches of tiny matrices** are a case to serve well. Total nuclear variation, the nuclear norm of each pixel's Jacobian (3 × 2 for a colour image), is solved through its dual, which projects millions of such matrices onto the spectral-norm ball per iteration. One call covers the whole batch, so the per-call cost is shared. A closed-form 2 × 2 and 3 × 2 SVD in the core could later remove the framework round trip there.
+
+**Tests.**
+- **Prox:** against a reference built from NumPy's SVD, and optimality checked through `value`: g(Z) + ‖Z − X‖²/(2γ) at Z against trial points.
+- **Derivatives:**
+  - JVP against finite differences on random matrices away from ties.
+  - The same on matrices built with repeated and zero singular values, where the map is differentiable whenever f is.
+    - **The autograd contrast:** PyTorch documents that SVD gradients "will only be finite when A does not have repeated singular values". It returns NaN for repeated values above the threshold (checked on 7 × 5 with s = (2, 2, 2, 1.5, 1.5) and soft thresholding at 0.7), and the test shows the contrast.
+    - **Near ties:** pairs at gaps from 10⁻² down to 10⁻¹² of the scale, against the exact divided difference.
+  - **The divergence:** the trace of D, against the closed form of Candès, Sing-Long and Trzasko (2013): |m − n| Σ z\_i/s\_i + Σ f′(s\_i) + 2 Σ\_{i≠j} s\_i z\_i / (s\_i² − s\_j²). Checked before review to 12 digits on 6 × 6 and 9 × 5.
+  - Adjointness ⟨G, D(H)⟩ = ⟨D(G), H⟩.
+  - Parameter gradients against finite differences.
+- **Shapes and dtypes:** square and rectangular (m < n, m > n), batched, float32 and float64.
+- **Determinism:** the threading test, with bit-identical output for any thread count.
 
 ## Algorithms in detail
 
@@ -460,6 +541,18 @@ The papers below are the sources each kernel is implemented from. The first grou
 - Z. Xu, X. Chang, F. Xu and H. Zhang, L1/2 regularization: a thresholding representation theory and a fast solver, IEEE Trans. Neural Networks and Learning Systems 23(7) (2012) 1013–1027 — ℓ1/2 thresholding.
 - W. Cao, J. Sun and Z. Xu, Fast image deconvolution using closed-form thresholding formulas of Lq (q = 1/2, 2/3) regularization, J. Visual Communication and Image Representation 24(1) (2013) 31–41 — ℓ2/3 thresholding.
 - J. Fan and R. Li, Variable selection via nonconcave penalized likelihood and its oracle properties, JASA 96(456) (2001) 1348–1360; C.-H. Zhang, Nearly unbiased variable selection under minimax concave penalty, Annals of Statistics 38(2) (2010) 894–942 — SCAD and MCP.
+
+**Checked for the spectral operators** (2026-10-20; the theorems were read in the papers, or in Beck's book, unless marked)
+
+- A. Beck, *First-Order Methods in Optimization*, SIAM 2017, Theorems 7.18 and 7.29 — the spectral prox formulas for convex symmetric and absolutely symmetric functions.
+- C. Lu, C. Zhu, C. Xu, S. Yan and Z. Lin, [Generalized singular value thresholding](https://arxiv.org/abs/1412.2231), AAAI 2015, Theorems 1 and 2 — the nonconvex case.
+- C. Ding, D. Sun, J. Sun and K.-C. Toh, [Spectral operators of matrices](https://doi.org/10.1007/s10107-017-1162-3), Mathematical Programming 168, 2018, Lemma 3.2, equations (49)–(54) and Theorems 3.3–3.4 as numbered in arXiv 1401.2269v1 — the derivative, its fallback values and when it exists.
+- E. J. Candès, C. A. Sing-Long and J. D. Trzasko, [Unbiased risk estimates for singular value thresholding and spectral estimators](https://arxiv.org/abs/1210.4139), IEEE Trans. Signal Processing 61(19), 2013 — the divergence formula, checked numerically, not in the paper's text.
+- A. S. Lewis and H. S. Sendov, Twice differentiable spectral functions, SIAM J. Matrix Anal. Appl. 23(2), 2001; Nonsmooth analysis of singular values I and II, Set-Valued Analysis 13(3), 2005 — the eigenvalue case. Not opened; cited from reference lists.
+- Ju. L. Daleckiĭ and S. G. Kreĭn, Integration and differentiation of functions of Hermitian operators and applications to the theory of perturbations, AMS Translations (2) 47, 1965 — divided differences of matrix functions. Not opened.
+- G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., 2013, Sections 2.7 and 9.1.5 — rounding against truncation, and clusters of eigenvalues.
+- L. Stella, A. Themelis and P. Patrinos, Forward–backward quasi-Newton methods for nonsmooth optimization problems, Comput. Optim. Appl. 67, 2017, Section 5.4 — nuclear-norm prox with a partial SVD.
+- PyTorch documentation of `torch.linalg.svd` (2.14) — gradients only finite without repeated singular values.
 
 **To check before citing in code**
 
