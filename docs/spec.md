@@ -36,7 +36,7 @@ Version 1 is a small, exact and fast library of proximal operators and projectio
 **Non-goals for version 1:**
 
 - **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl.
-- **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API (Section 13).
+- **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API. Its design is in Section 8, "GPU backend".
 - **No SVD or eigendecomposition in the core.** Matrix prox maps such as the nuclear norm need one, so they come in 1.x with the decomposition supplied by the caller (Section 5, "Spectral operators"). Planned at first for version 2; revised 20 October 2026.
 - **No automatic modelling.** No parser or DSL for composite objectives, unlike ProxImaL.
 
@@ -285,6 +285,135 @@ Calls flow down: a binding converts its array type to a strided descriptor, the 
 - **Compiler baseline:** C++17 for the core and C99 for the public header, tested with GCC, Clang and MSVC. Symbols are hidden by default (`-fvisibility=hidden`), and only the `fp_` API is exported.
 - **Python:** nanobind, built with scikit-build-core over the same CMake project; wheels with cibuildwheel.
 - **Header check in CI:** `fastprox.h` is compiled by a C99 compiler with `-Werror` and by a C++ compiler, so a C++-only construct in the public header fails the build.
+### GPU backend (1.x, design)
+
+CUDA kernels in the C core, behind the device field that `fp_array` has carried since 0.1. They come in 1.x as new enum values and new functions, so the frozen ABI only grows. A program that never passes a device array runs exactly as before, and the CPU library gains no CUDA dependency.
+
+**What the 0.3 device path showed.** The PyTorch and JAX wrappers already run image TV on GPUs in framework tensor operations (Section 12). On a Tesla T4 that path is 6–8× faster than DeepInverse's denoiser at loose accuracy, but only 1.1–1.4× at 1e-3 to 1e-4 (docs/benchmarks.md, 2026-10-19). Two limits come from the framework, not the GPU:
+- **Anisotropic TV without exact 1D steps.** The C kernel reaches a gap of 1e-6 in 59 iterations; the device path's plain dual method takes 624. The C kernel's steps are exact 1D TV proxes of every fibre, which tensor operations cannot express.
+- **A dozen passes over the batch per iteration.** Each framework operation reads and writes the whole image. Fused kernels do an iteration in one or two passes.
+
+The backend therefore starts with what unlocks the rest: a batched exact 1D TV kernel. The exact row operators and the elementwise maps come with it.
+
+**Operators and methods.** In stage order. "Exact" keeps the CPU's accuracy target (Section 10); iterative operators keep its gap certificate.
+
+| Stage | Operators | GPU method | Parallel over |
+| --- | --- | --- | --- |
+| 1 | elementwise maps (soft, elastic net, Huber, box, the nonconvex maps, log barrier) | the CPU's scalar kernels, with the prox, the structure codes and the kink mask fused into one pass | entries |
+| 1 | group norms, ℓ2 ball, radial operators | one warp per row or group, with a fixed reduction tree | rows |
+| 1 | simplex, ℓ1 ball (weighted too) | sort-based (Held, Wolfe and Crowder; Duchi et al.): a bitonic sort in shared memory, then a fixed-tree scan for the threshold. Rows too long for one block are first filtered in fixed chunks (Dai and Chen) | rows |
+| 1 | 1D TV (weighted too), the step of anisotropic TV | taut string, one thread per row, with rows interleaved in the workspace so neighbouring threads read neighbouring addresses | rows |
+| 2 | anisotropic TV, 2D and 3D | the CPU's method: accelerated dual block proximal gradient (Beck, Section 12.5.4; Chambolle and Pock 2015) with the stage-1 1D TV step on every fibre, its restarts, gap and polish | fibres × images |
+| 2 | isotropic TV, 2D and 3D | the CPU's dual FISTA with restarts, an iteration fused into one kernel | pixels |
+| 2 | the image TV derivatives | regions by hooking to the minimum index and pointer jumping, then sort and segmented scan (exact averages for anisotropic TV); conjugate gradients in region space with Jacobi for isotropic TV | pixels, regions |
+| 3 | spectral operators | B and r of `fp_spectral_jvp` on the device, one block per matrix, so the k × k round trip goes away | matrices |
+| 3 | isotonic regression, 1D TV with ℓ2 of differences, the rest | one thread per row; long rows by Kearsley's merge of block solutions | rows |
+
+- **Taut string, not Condat, on the GPU.** Condat's method is the faster path on one CPU core, but its worst case is quadratic (Barbero and Sra 2018, Sections 2.2–2.3, who cap it with taut string as fastprox's CPU path does). A thread that backtracks holds up its warp. Taut string is linear in the worst case.
+- **A few long rows.** There is no practical exact method that splits one 1D TV row across threads. The taut string is a shortest path in a polygon, which is in NC on a PRAM (Goodrich, Shauck and Guha 1992), but nothing practical has come of that. With few rows the kernel still runs, one thread each, but slowly. `fp_op_device_check` (below) reports which operators are row-parallel only, and the Python wrappers keep the C kernel through the host when the batch has fewer rows than the device has threads in flight. The threshold is measured in the stage-1 gate.
+- **The simplex threshold.** τ = (Σ_I y − a) / |I| is summed over the support by a fixed tree in float64. The CPU's running mean sums in input order, so the two agree to rounding, not bit for bit.
+- **Isotropic TV keeps the CPU's iteration.** The same iterates and iteration counts make the device and CPU results comparable within the gap. Other methods were considered (below) and left for measurement.
+- **Images that finish early.** Each image stops on its own gap, as on the CPU. Kernels skip converged images through a per-image flag, so a batch costs launches for its slowest image, not work. Bai, Kolter and Koltun (deep equilibrium models, Appendix E) report the waste when converged samples keep iterating.
+
+**Staying on the CPU.**
+- **Graph TV.** Max-flow is P-complete. Jensen, Jeppesen, Dahl and Dahl (TPAMI 2023) found no generic parallel min-cut method that consistently beats serial ones, and recommend parallel methods only for graphs over 5 M nodes or 5 s of serial time. GPU push-relabel succeeds on grids (Vineet and Narayanan 2008), where image TV already serves, and for one cut rather than graph TV's parametric sequence.
+- **Tree TV.** The message passing of Kolmogorov, Pock and Rolínek is sequential along each tree. Batches of many small trees could later take one thread per tree.
+- Both return FP\_EINVAL for a device array.
+
+**Methods considered and not used.**
+- **Squares-based splitting for isotropic TV** (Chambolle and Pock 2015, Section 4.2). It needs 3–5× fewer iterations than FISTA (their Tables 3–4) and is pixel-parallel, but it minimises TV discretised on squares, which is a different operator from fastprox's forward differences.
+- **Beck's three-block splitting of isotropic TV** (Example 12.23). It keeps the forward-difference TV with closed-form steps, but only the non-accelerated method applies to three blocks. It is a candidate to measure, not a default.
+- **Primal–dual methods for isotropic TV.** Chambolle and Pock (2011, Table 1) report 1.6–2× fewer iterations than dual FISTA to 1e-6 for their adaptive variant, but measured to a reference, since gap stopping favours primal–dual methods. Also a candidate to measure.
+- **Projected Newton for 1D TV** (Yeh, Hu, Ren and Schwing, CVPR 2022). It is the one published GPU 1D TV prox, 37× faster than proxTV on one batch, but iterative. In 2D it runs a few Dykstra steps, which is approximate.
+- **Bisection or Halley's method for the simplex threshold** (as in AdaSplash, Gonçalves, Treviso and Martins 2025). These are iterative, and Condat (2016, Section II) shows bisection's claimed linear bound fails when many entries sit near τ.
+- **Dykstra's method for isotonic regression** (Sander et al. 2023). It does not terminate finitely.
+- **The 3 × 3 SVD of McAdams et al. (2011).** It is float32, with approximate rotations and a fixed four sweeps, so it is too inexact for the spectral derivatives. A one-sided Jacobi SVD per thread, with a fixed rotation order (Golub and Van Loan, Sections 8.5–8.6; accurate by Demmel and Veselić 1992), is the candidate for the closed-form small SVD in the 1.x candidates.
+- **Shared-memory tiles with several inner iterations per global step** (Pock, Unger, Cremers and Bischof 2008). This changes the iterates, and borders lag. It is an optimisation to measure after stage 2.
+- **CUB, Thrust, cuSOLVER and cuBLAS as dependencies.** The core stays free of libraries beyond the CUDA runtime, as it stays free of BLAS on the CPU. CUB's floating-point scans are not run-to-run deterministic by default, and its deterministic levels depend on the architecture and toolkit (CCCL determinism documentation).
+
+**C API.** Additions only:
+
+```c
+typedef enum { FP_DEVICE_CPU = 0, FP_DEVICE_CUDA = 2 } fp_device; /* 2 is DLPack's kDLCUDA; 10 (kDLROCM) reserved */
+/* fp_status gains FP_EDEVICE, appended: a CUDA error, now or from earlier work on the stream */
+
+/* 1 if the CUDA plugin is loaded and a device is present, else 0. */
+FP_API int fp_device_available(fp_device dev);
+/* FP_OK if op runs on dev; FP_EINVAL if not. Sets *row_parallel_only when
+ * one row cannot use more than one thread (1D TV, isotonic regression). */
+FP_API fp_status fp_op_device_check(const fp_op *op, fp_device dev, int *row_parallel_only);
+
+/* A workspace created with a CUDA `like` lives on the calling thread's
+ * current device, as a cuBLAS handle does, and holds all device scratch.
+ * The stream is a cudaStream_t (or hipStream_t) passed as void*; NULL is the
+ * legacy default stream. One workspace per stream. */
+FP_API fp_status fp_workspace_set_stream(fp_workspace *ws, void *stream);
+FP_API fp_status fp_workspace_get_stream(const fp_workspace *ws, void **stream);
+
+/* Results of the last call, valid once the stream has reached its end. */
+FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
+/* fp_vjp with the step's gradient written to a device scalar (0-d array). */
+FP_API fp_status fp_vjp_device(const fp_op *op, const fp_workspace *ws, const fp_array *g,
+                               fp_array *gx, fp_array *ggamma, fp_array *gparams);
+/* One step per matrix or image: gamma has the batch shape (the shape of x
+ * without the operator's axes), on x's device. */
+FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_array *x,
+                               fp_array *out, const fp_options *opt, fp_workspace *ws);
+```
+
+- **Device memory.** All of it is allocated by `cudaMalloc` in `fp_workspace_create`, and freed by `fp_workspace_free`: per-row scratch such as taut string's O(n) arrays, region labels, and the operator's parameters copied to the device. `fp_prox`, `fp_jvp` and `fp_vjp` only launch kernels on the workspace's stream. They never allocate, copy to the host or synchronise, unless the caller asks for a host result (next point). The allocation counter in the tests also counts `cudaMalloc` and `cudaMallocAsync`. Every pointer is checked against the workspace's device with `cudaPointerGetAttributes` on each call; a mismatch returns FP\_EINVAL. Arrays need not be contiguous: strides work as on the CPU, at the cost of uncoalesced reads.
+- **Host results wait; device results do not.** The interfaces that write host memory keep working and make the call wait for its stream: `fp_info` from `fp_prox`, and `ggamma` from `fp_vjp`. The asynchronous forms are `fp_workspace_info`, read after the caller has synchronised, and `fp_vjp_device`. The cuBLAS host pointer mode has the same rule. `gparams` may be a device array in either form.
+- **Errors.** Arguments are checked before any launch, as on the CPU. Each launch is followed by `cudaGetLastError`. A kernel fault that surfaces later is returned as FP\_EDEVICE by the next call on that workspace, or by `fp_workspace_info`. The CUDA runtime reports asynchronous errors the same way (CUDA Programming Guide, Section 2.5.4).
+- **Iterative operators and stopping.** The gap is evaluated on the device at the CPU kernels' period (every fourth iteration for isotropic TV). By default the host reads a pinned per-image flag through an event, which is a wait but a cheap one. On a stream that is being captured into a CUDA graph (`cudaStreamIsCapturing`), the call instead launches the whole `max_iter` schedule. Each kernel then returns at once for images whose flag is set, so the graph is static and the result is the same iterate. CUDA's conditional graph nodes could later replace the empty launches.
+- **Steps per image.** `fp_prox_steps` gives the C API what the 0.3 device path and DeepInverse's denoisers already take: one γ per image (deepinv/deepinv#336). It works on the CPU too. Per-image spatial weights stay with the framework path until an operator can take its weights as an array at call time.
+- **Unchanged.** `fp_op` is immutable and shared across devices and streams, because its device copies live in workspaces. `fp_options.threads` is ignored on a device.
+
+**Determinism and agreement with the CPU.**
+
+| Promise | Holds |
+| --- | --- |
+| Bit-identical run to run | on one device model, toolkit and fastprox build, for any batch size, launch configuration and stream |
+| Not promised | bit-identical across GPU models, or against the CPU |
+| Exact operators against the CPU | within the accuracy target of Section 10, and bit-identical for the elementwise maps built from correctly rounded operations (+, −, ×, ÷, √) only |
+| Iterative operators against the CPU | within the gap tolerance, at the same iteration count for isotropic TV |
+
+- **Fixed geometry.** Grid and block sizes depend only on the shape and the operator. They never depend on the SM count, occupancy queries or the batch's position in a larger call.
+- **No floating-point atomics.** Rows stay independent. Cross-row sums (the gap, vjp parameter gradients, region sums) use fixed-shape trees over `reduction_blocks`, whose shape is set by n alone. Integer atomics are allowed, as in labelling, where only counts and minima use them.
+- **Canonical region labels.** Each region is labelled with its minimum linear index and renumbered by a scan over root flags. That is independent of scheduling (Jaiganesh and Burtscher 2018, ECL-CC; Komura 2015). The flat test is the same expression as on the CPU, so the regions agree whenever the duals do.
+- **Floating-point flags.** Device code builds with `--fmad=false -prec-div=true -prec-sqrt=true -ftz=false` and never with `--use_fast_math`, the device form of the no-`-ffast-math` rule. Contraction is also turned off on the CPU (`-ffp-contract=off` for GCC and Clang, whose defaults differ). Then an elementwise map is the same sequence of correctly rounded operations on both, and matches bit for bit (NVIDIA, Floating Point and IEEE 754 Compliance, Sections 4.4 and 5.3). Maps that call `log` or `pow` (the log barrier, ℓq's Newton steps, the log penalty) agree to a few ulps: CUDA's double `log` is within 1 ulp and `pow` within 2 (CUDA Programming Guide, Section 5.5). Changing the CPU flag moves some CPU results by an ulp, once, in the release that ships stage 1.
+- **float32.** As on the CPU, sums that span a row or an image accumulate in float64. On GPUs with float64 at 1/32 (T4) or 1/64 (L4, L40S, the RTX series) of float32 throughput (CUDA C++ Best Practices Guide, Section 12.1.1), these few reductions cost little. The iterates themselves are float32. Lee and Wright (2008) ran TV denoising in float32 on a GPU with gap stopping to 1e-6 at under 10% more iterations than float64. Their other solver's float32 gap stalled near 1e-4, so the tests check the gap at tight tolerances in both dtypes.
+- **float64.** Fully supported. It is slow on parts with 1/64 rate, and the docs give the rates.
+
+**Build and packaging.**
+- **CMake.** `FASTPROX_CUDA=ON` builds the CUDA sources (`src/cuda/*.cu`, C++17, the same headers and templates) into a separate shared library, `libfastprox_cuda`.
+- **The plugin.** `libfastprox` loads it with `dlopen`/`LoadLibrary` the first time a device array or `fp_device_available` appears, through a private versioned table of entry points. If it is missing, `fp_device_available` returns 0 and device arrays return FP\_EINVAL, as now. The CUDA runtime is linked statically; `libcuda` is never bundled.
+- **Architectures.** SASS for sm\_75 (T4), 80, 86, 89 and 90, plus 100 and 120 where the toolkit has them. PTX for the newest, for later GPUs (NVIDIA, CUDA minor-version compatibility).
+- **PyPI.** The `fastprox` wheels stay CPU-only abi3 wheels. The plugin ships as `fastprox-cuda12` and `fastprox-cuda13` (tagged `py3-none-manylinux_2_28_{x86_64,aarch64}`, no Python code), installed by `pip install fastprox[cuda12]`, as CuPy and JAX split theirs. Wheel variants would let one name serve both (PEP 817, PEP 825), but as of October 2026 only the format PEP is provisional. They are revisited when installers support them. Windows follows Linux.
+- **conda-forge.** A `libfastprox-cuda` output built when `cuda_compiler_version` is not None, depending on `libfastprox` and pinned through `cuda-version`.
+- **Other GPUs.** Kernels use a thin layer for launches, shared memory, warp width and streams. HIP is then mostly a rebuild (`libfastprox_rocm`, FP\_DEVICE\_ROCM = 10), with lane masks for 64-wide wavefronts. Apple GPUs have no float64, and Metal compiles with fast math by default, so a Metal backend would be a separate float32 tier; none is planned. Apple GPUs keep the 0.3 framework path.
+
+**Bindings.**
+- **Python.** nanobind's `ndarray` accepts device arrays and gives their device type and id. Bindings never synchronise. Workspaces are cached per operator, device, stream, shape and dtype.
+- **PyTorch.** The wrappers pass `torch.cuda.current_stream().cuda_stream` and move to `torch.library.custom_op` (`device_types="cuda"`, with `register_autograd`), which `torch.compile` treats as opaque. The tensor-operation path stays for MPS and the CPU.
+- **JAX.**
+  - A small FFI handler library calls only the C API on XLA's stream (`jax.ffi.register_ffi_target`, platform CUDA). It replaces `pure_callback`, which copies to the host.
+  - XLA's FFI headers are header-only and Apache-2.0, so they can be vendored with their notice. The FFI is versioned but still marked experimental.
+  - The backward recomputes the prox, as it does now, since `custom_vjp` residuals must be arrays.
+- **CuPy** arrays work through the same nanobind path, with the stream from `cupy.cuda.get_current_stream()`.
+
+**Tests and CI.**
+- **Every pull request**, free and without a GPU: the plugin compiles with CUDA 12 and 13; its exports are checked; the CPU tests run; and a missing plugin and device arrays fail cleanly.
+- **On a GPU** (`tests/gpu`):
+  - every device operator against its C kernel: exact ones within the accuracy target, the elementwise ones bit for bit, iterative ones within the gap;
+  - the derivatives against the CPU's;
+  - bit-identical repeats at two batch sizes and two stream setups;
+  - a graph-capture test;
+  - the allocation counter;
+  - compute-sanitizer's memcheck, racecheck, initcheck and synccheck, with `--error-exitcode`.
+- **Where.** There is no CUDA device here. The suite runs from a scripted Colab notebook (T4, sm\_75) before each release, and on a paid GitHub GPU runner or a cloud runner when triggered by hand. A persistent self-hosted runner is never attached to the public repository, since pull requests from forks could run code on it.
+- **Gates.**
+  - **Stage 1:** each operator is faster than the C kernel through the host on batches of 64 × 512² entries or rows on a T4, and the row-count threshold for 1D TV is measured.
+  - **Stage 2:** anisotropic TV reaches 1e-6 in the C kernel's iterations, about a tenth of the 0.3 path's. Both image TVs are faster than the 0.3 path at every tolerance from 1e-2 to 1e-6 on `bench/compare_deepinv.py`. Numbers are also taken on one datacenter GPU (A100 or H100, float64 at half rate).
 
 ## API
 
@@ -383,7 +512,7 @@ FP_API int         fp_abi_version(void);
 - **Threads.** `fp_op` is immutable and safe to share. `fp_workspace` is not shared between concurrent calls; it holds one scratch region per OpenMP thread. Results are bit-identical for any value of `threads`.
 - **Errors.** Every function returns `fp_status`; there are no global error states, no printing and no aborts. Invalid parameters (negative γ, q outside (0, 1), a SCAD parameter too small for γ) return FP\_EPARAM before any work.
 - **Derivatives.** `fp_jvp` and `fp_vjp` read the structure saved in the workspace by the last `fp_prox` call with `keep_structure` set. Calling them without it returns FP\_EINVAL.
-- **ABI stability.** Structs passed by pointer carry no hidden fields; new options are added only through new functions or a versioned options struct. The major version changes only when the ABI breaks. The device field of fp\_array is reserved from 0.1 so a GPU backend can be added without an ABI break. Up to 1.0 only FP\_DEVICE\_CPU is accepted and any other value returns FP\_EINVAL. The 1.x GPU backend adds new fp\_device values and a function that reports which operators support a device; an operator given a device it does not implement still returns FP\_EINVAL.
+- **ABI stability.** Structs passed by pointer carry no hidden fields; new options are added only through new functions or a versioned options struct. The major version changes only when the ABI breaks. The device field of fp\_array is reserved from 0.1 so a GPU backend can be added without an ABI break. Up to 1.0 only FP\_DEVICE\_CPU is accepted and any other value returns FP\_EINVAL. The 1.x GPU backend adds new fp\_device values and a function that reports which operators support a device; an operator given a device it does not implement still returns FP\_EINVAL. The stream, the asynchronous results and the steps per image come as new functions (Section 8, "GPU backend"), since `fp_options` cannot grow.
 
 **Python interface (sketch)**
 
@@ -423,7 +552,7 @@ Each requirement below has a measurable target and a named check, so a release c
 | Accuracy of exact operators | optimality residual at most 10 n ε ‖x‖∞, with ε the machine epsilon of the dtype | optimality conditions checked on every test input (Section 11) |
 | Accuracy of iterative operators | duality gap at most tol · ½‖x‖², returned in `fp_info.gap` | gap recomputed independently in tests |
 | Determinism | bit-identical output for any thread count, on the same build and machine | tests run with 1, 2 and 8 threads and compare bytes |
-| Determinism on GPUs | the same output on repeated runs on one device, build and library version; not bit-identical to the CPU, but within the gap tolerance of it | repeated runs compared byte for byte; GPU against C kernel within the gap |
+| Determinism on GPUs | the same output on repeated runs on one device model, toolkit and build, for any batch size and launch configuration; not bit-identical to the CPU, but within its accuracy target or gap tolerance, and bit-identical for the elementwise maps built from correctly rounded operations (Section 8, "GPU backend") | repeated runs compared byte for byte; GPU against C kernel within the target or the gap |
 | Dtypes | float32 and float64; float32 accumulates sums in float64 where a sum spans a row | float32 results compared with float64 within the dtype's tolerance |
 | Special values | NaN in the input gives NaN in the affected output only, never a hang; ±Inf rejected with `FP_EINVAL` for operators where it is undefined | fuzzing with NaN, Inf, denormals, empty and length-1 inputs |
 | Allocation | no allocation inside `fp_prox`, `fp_jvp` or `fp_vjp` after the workspace is created | allocator hook counts calls in tests |
@@ -476,6 +605,8 @@ The library is permissively licensed and written from the papers, because the be
 | C and C++ | `libfastprox` (shared and static), headers, CMake config, pkg-config | CMake | conda-forge feedstock; Linux build links libstdc++ statically |
 | Python | `fastprox` on PyPI and conda-forge | nanobind and scikit-build-core, wheels by cibuildwheel | manylinux\_2\_28 (x86\_64, aarch64), macOS (arm64, x86\_64), Windows (amd64); stable-ABI (abi3) wheels only, requires-python 3.12 or later; no per-version wheels |
 
+The 1.x CUDA backend ships as a separate plugin library and package (`fastprox-cuda12`, `fastprox-cuda13`, `libfastprox-cuda`), so the packages above stay CPU-only (Section 8, "GPU backend").
+
 Julia (`fastprox_jll` through BinaryBuilder), MATLAB (a `.mltbx` toolbox with C mex gateways) and Rust (`fastprox-sys` on crates.io) packages are deferred with their bindings.
 
 - **OpenMP in wheels.** Linux wheels bundle libgomp through auditwheel. macOS wheels bundle libomp through delocate, because Apple Clang does not ship it.
@@ -500,7 +631,7 @@ Release 0.1 is highlighted because it already serves most callers: thresholding,
 - **0.2 — images.** Anisotropic and isotropic TV in 2D and 3D with duality gaps and warm starts, 1D TV with ℓ2 of differences, and the nonconvex pointwise maps, all exposed in the Python package.
 - **0.3 — graph TV.** The max-flow engine, graph TV and tree TV, VJPs for the iterative operators by conjugate gradients, and the PyTorch and JAX wrappers, with a device-native path for image TV that runs on GPUs (Section 12).
 - **1.0 — stable.** ABI freeze, conda-forge packages, documentation, and the PyProximal adapter. After 1.0, only additions that keep the ABI are allowed until 2.0.
-- **1.x — GPU backend.** CUDA kernels in the C core behind the device field, an addition that keeps the frozen ABI. The first operators are those the 0.3 device path shows people running on GPUs: iterative image TV, elementwise maps and batched simplex and ℓ1-ball projections, and exact 1D TV with one thread per row for large batches. Max-flow graph TV stays on the CPU. CUDA builds ship as a separate package and through conda-forge, not in the main wheel.
+- **1.x — GPU backend.** CUDA kernels in the C core behind the device field, an addition that keeps the frozen ABI (design in Section 8). The first operators are those the 0.3 device path shows people running on GPUs: iterative image TV, elementwise maps and batched simplex and ℓ1-ball projections, and exact 1D TV with one thread per row for large batches. Max-flow graph TV stays on the CPU. CUDA builds ship as a separate package and through conda-forge, not in the main wheel.
 - **After 1.0 — other languages.** Julia (ccall), MATLAB (mex, with a gate that the mex files load on Linux next to MATLAB's own libstdc++) and the thin Rust crate, each over the frozen C API, plus a ProximalOperators.jl adapter.
 
 ## Decisions
@@ -555,6 +686,38 @@ The papers below are the sources each kernel is implemented from. The first grou
 - G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., 2013, Sections 2.7 and 9.1.5 — rounding against truncation, and clusters of eigenvalues.
 - L. Stella, A. Themelis and P. Patrinos, Forward–backward quasi-Newton methods for nonsmooth optimization problems, Comput. Optim. Appl. 67, 2017, Section 5.4 — nuclear-norm prox with a partial SVD.
 - PyTorch documentation of `torch.linalg.svd` (2.14) — gradients only finite without repeated singular values.
+
+**Checked for the GPU backend** (2026-10-20; read in full or in the cited sections unless marked; papers in the user's Notability library are marked N)
+
+- A. Chambolle and T. Pock, [A remark on accelerated block coordinate descent for computing the proximity operators of a sum of convex functions](https://doi.org/10.5802/smai-jcm.3), SMAI J. Comput. Math. 1, 2015, Tables 1–4 — chain splitting with exact 1D steps (80 iterations to a gap of 1e-3, 170–190 to 1e-6), and squares splitting, a different discretisation.
+- A. Chambolle and T. Pock, An introduction to continuous optimization for imaging, Acta Numerica 25, 2016, Section 4.8.3 and Example 4.15 (N) — block descent suited to GPUs; FISTA on chains needs 10–20× fewer iterations than plain FISTA.
+- A. Beck, *First-Order Methods in Optimization*, SIAM 2017, Section 12.5 and Examples 12.22–12.23 (N) — the accelerated two-block method and the pair and triplet splittings.
+- A. Chambolle and T. Pock, [A first-order primal-dual algorithm for convex problems with applications to imaging](https://doi.org/10.1007/s10851-010-0251-1), JMIV 40, 2011, Table 1 (N) — iterations of dual FISTA against primal–dual variants for ROF.
+- T. Pock, M. Unger, D. Cremers and H. Bischof, Fast and exact solution of total variation models on the GPU, CVPR Workshops 2008 — dual ROF in CUDA, 10–1000× faster than parametric max-flow on grids; shared-memory tiles with inner iterations.
+- S. Lee and S. J. Wright, Implementing algorithms for signal and image reconstruction on graphical processing units, Optimization Online 2008/10/2131 — float32 TV with gap stopping to 1e-6 at under 10% more iterations; a float32 gap stalling near 1e-4 in another solver.
+- M. G. McGaffin and J. A. Fessler, [Edge-preserving image denoising via group coordinate descent on the GPU](https://doi.org/10.1109/TIP.2015.2400813), IEEE TIP 24(4), 2015 — memory traffic and inner products as the cost on GPUs.
+- D. Villacís, First order methods for high resolution image denoising, Latin American Journal of Computing IV(3), 2017 — Chambolle–Pock in PyCUDA on 7680 × 4320 images.
+- Á. Barbero and S. Sra, JMLR 19, 2018 (above), Sections 2.2–2.3 and 4.3 — Condat's quadratic worst case and the taut-string cap; parallelism across fibres only.
+- R. A. Yeh, Y.-T. Hu, Z. Ren and A. G. Schwing, [Total variation optimization layers for computer vision](https://arxiv.org/abs/2204.03643), CVPR 2022 — a GPU projected Newton method for 1D TV, iterative.
+- L. Condat, Mathematical Programming 158, 2016 (above), Table I and Section II — complexities of the simplex methods, and bisection's missing bound.
+- Y. Dai and C. Chen, Sparsity-exploiting distributed projections onto a simplex, INFORMS J. Computing 36(3), 2024, Proposition 3.4 — exact filtering of a long row in chunks.
+- A. J. Kearsley, Projections onto order simplexes and isotonic regression, J. Res. NIST 111(2), 2006, Theorem 1 — merging isotonic regressions of blocks.
+- G. Gonçalves, M. Treviso and A. F. T. Martins, AdaSplash, ICML 2025; M. E. Sander, J. Puigcerver, J. Djolonga, G. Peyré and M. Blondel, Fast, differentiable and sparse top-k, ICML 2023, Section 5 — iterative thresholds and Dykstra's method for isotonic regression on accelerators.
+- P. M. Jensen, N. Jeppesen, A. B. Dahl and V. A. Dahl, [Review of serial and parallel min-cut/max-flow algorithms for computer vision](https://arxiv.org/abs/2202.00418), IEEE TPAMI 45(2), 2023, Section 8 — no generic parallel method consistently beats serial ones.
+- J. Jaiganesh and M. Burtscher, A high-performance connected components implementation for GPUs (ECL-CC), HPDC 2018, Section 3; S. Allegretti, F. Bolelli, M. Cancilla and C. Grana, IPAS 2018 — labelling by hooking to the minimum index.
+- A. McAdams, A. Selle, R. Tamstorf, J. Teran and E. Sifakis, Computing the singular value decomposition of 3 × 3 matrices with minimal branching and elementary floating point operations, UW–Madison TR1690, 2011 — float32 and approximate.
+- G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., Sections 8.5–8.6 (N) — Jacobi methods and their parallel orderings.
+- S. Bai, J. Z. Kolter and V. Koltun, Deep equilibrium models, NeurIPS 2019, Appendix E (N) — converged samples waiting in a batch.
+- NVIDIA documentation (CUDA 13): the CUDA Programming Guide (Sections 2.5.4, 4.2 and 5.5), the CUDA C++ Best Practices Guide (Section 12.1.1), Floating Point and IEEE 754 Compliance (Sections 4.4 and 5.3), the nvcc manual (`--fmad`, `--prec-div`, `--prec-sqrt`, `--ftz`), cuBLAS (Sections 2.1.3, 2.1.4, 2.1.12, 2.4.7), cuFFT (Sections 2.7, 2.13, 3.5–3.8), cuSOLVER (Section 2.1.7), CUDA minor-version compatibility, Compute Sanitizer, and the CCCL determinism pages.
+- DLPack's C API and the array API's `__dlpack__`; the CUDA Array Interface v3; nanobind's `ndarray`; PyTorch's custom operators and CUDA semantics; JAX's FFI; PEPs 817 and 825; conda-forge's CUDA knowledge base; GitHub's runner pricing.
+
+**Cited for the GPU backend from abstracts or other papers**
+
+- M. Held, P. Wolfe and H. P. Crowder, 1974; J. Duchi, S. Shalev-Shwartz, Y. Singer and T. Chandra, ICML 2008 — sort-based simplex projection, through Condat (2016).
+- M. T. Goodrich, S. B. Shauck and S. Guha, Parallel methods for visibility and shortest-path problems in simple polygons, Algorithmica 8, 1992 (abstract).
+- V. Vineet and P. J. Narayanan, CUDA cuts, CVPR Workshops 2008 (abstract); Y. Komura, Comput. Phys. Commun. 194, 2015 (abstract, and its generalisation, arXiv 1603.08357, Section 2).
+- J. Demmel and K. Veselić, Jacobi's method is more accurate than QR, SIAM J. Matrix Anal. Appl. 13(4), 1992 (abstract).
+- P. Ahrens, J. Demmel and H. D. Nguyen, Algorithms for efficient reproducible floating point summation, ACM TOMS 46(3), 2020 — not used: it gives the same sums across GPU models, which is not promised.
 
 **To check before citing in code**
 
