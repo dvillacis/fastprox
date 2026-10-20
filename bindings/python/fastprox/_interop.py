@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import Operator, _ImageOperator
+from . import Operator, Spectral, _ImageOperator
 
 _CALL = ("axis", "tol", "max_iter")
 
@@ -17,15 +17,26 @@ class Spec:
     order at each call)."""
 
     def __init__(self, op, static, names, conj, threads, call):
-        if isinstance(op, Operator):
+        kinds = (Operator, Spectral)
+        if isinstance(op, kinds):
             if static or names:
                 raise TypeError("parameters are given to an operator class, not to an operator; "
                                 f"build {type(op).__name__}(...) with them or pass the class")
-        elif not (isinstance(op, type) and issubclass(op, Operator)):
+        elif not (isinstance(op, type) and issubclass(op, kinds)):
             raise TypeError("op must be a fastprox Operator or an Operator class")
-        image = issubclass(op if isinstance(op, type) else type(op), _ImageOperator)
-        if image and call.get("axis") is not None:
+        cls = op if isinstance(op, type) else type(op)
+        if issubclass(cls, _ImageOperator) and call.get("axis") is not None:
             raise TypeError("image operators act on their last axes; axis is not accepted")
+        # Spectral operators act on the last two axes and are direct.
+        self.spectral = issubclass(cls, Spectral)
+        if self.spectral:
+            if conj:
+                raise TypeError("spectral operators have no prox_conj")
+            if any(call.get(k) is not None for k in _CALL):
+                raise TypeError("spectral operators act on the last two axes; axis, tol and max_iter "
+                                "are not accepted")
+            if cls is Spectral and not isinstance(op, Spectral):
+                raise TypeError("pass Spectral(op, kind) built, or a subclass such as NuclearNorm")
         self.op = op
         self.static = dict(static)
         self.names = tuple(names)
@@ -35,13 +46,18 @@ class Spec:
 
     def build(self, values):
         """The operator for the differentiable parameters' values (NumPy)."""
-        if isinstance(self.op, Operator):
+        if isinstance(self.op, (Operator, Spectral)):
             return self.op
         kw = dict(self.static)
         for k, v in zip(self.names, values):
             v = np.asarray(v, np.float64)
             kw[k] = float(v) if v.ndim == 0 else v
         return self.op(**kw)
+
+    @property
+    def kind(self):
+        """'svd' or 'eigh' for a spectral operator, known before it is built."""
+        return self.op.kind
 
     def run(self, op, x, step):
         """(z, ctx) with the structure kept for jvp and vjp."""

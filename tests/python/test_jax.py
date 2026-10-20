@@ -12,10 +12,12 @@ from jax.test_util import check_grads  # noqa: E402
 import fastprox as fp  # noqa: E402
 import fastprox.jax as fpj  # noqa: E402
 
-from interop_cases import cases  # noqa: E402
+from interop_cases import built, cases, spectral_cases  # noqa: E402
 
 CASES = cases()
 IDS = [c[0] for c in CASES]
+SPECTRAL = spectral_cases()
+SPECTRAL_IDS = [c[0] for c in SPECTRAL]
 
 
 @pytest.fixture(autouse=True)
@@ -99,3 +101,75 @@ def test_errors():
     gl, gx = jax.grad(lambda lam, x: fpj.prox(fp.L0, x, 0.5, lam=lam).sum(), argnums=(0, 1))(
         jnp.asarray(0.3), x + 1.0)
     assert np.isnan(gl) and np.all(np.asarray(gx) == 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Spectral operators
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", SPECTRAL, ids=SPECTRAL_IDS)
+def test_spectral_grads(case):
+    _, op, params, x, step = case
+    names = list(params)
+
+    def fn(x, step, *vals):
+        return fpj.prox(op, x, step, **dict(zip(names, vals)))
+
+    args = (jnp.asarray(x), jnp.asarray(step), *[jnp.asarray(v) for v in params.values()])
+    check_grads(fn, args, order=1, modes=["rev"], eps=1e-6)
+
+
+@pytest.mark.parametrize("case", SPECTRAL, ids=SPECTRAL_IDS)
+def test_spectral_matches_numpy_under_jit(case):
+    _, op, params, x, step = case
+    ref_op = op(**params) if isinstance(op, type) else op
+    g = np.random.default_rng(2).normal(size=x.shape)
+    z, ctx = ref_op.prox(x, step, keep=True)
+    gx, grads = ref_op.vjp(ctx, g)
+    names = list(params)
+
+    def loss(x, step, *vals):
+        return jnp.vdot(fpj.prox(op, x, step, **dict(zip(names, vals))), g)
+
+    args = (jnp.asarray(x), jnp.asarray(step), *[jnp.asarray(v) for v in params.values()])
+    zj = jax.jit(lambda x, s, *v: fpj.prox(op, x, s, **dict(zip(names, v))))(*args)
+    assert zj.dtype == jnp.float64
+    np.testing.assert_allclose(np.asarray(zj), z, atol=1e-13)
+    out = jax.jit(jax.grad(loss, argnums=tuple(range(len(args)))))(*args)
+    np.testing.assert_allclose(np.asarray(out[0]), gx, atol=1e-12)
+    assert float(out[1]) == pytest.approx(grads.gamma, abs=1e-12)
+    for k, v in zip(names, out[2:]):
+        assert float(v) == pytest.approx(getattr(grads, k), abs=1e-12)
+
+
+def test_spectral_ties_and_vmap():
+    rng = np.random.default_rng(3)
+    x = built(7, 5, (2.0, 2.0, 2.0, 1.5, 1.5), rng)
+    g = rng.normal(size=x.shape)
+    op = fp.NuclearNorm(0.7)
+    gx = np.asarray(jax.grad(lambda x: jnp.vdot(fpj.prox(op, x), g))(jnp.asarray(x)))
+    assert np.isfinite(gx).all()
+    for _ in range(3):
+        h = rng.normal(size=x.shape)
+        fd = (np.sum(g * op.prox(x + 1e-6 * h)) - np.sum(g * op.prox(x - 1e-6 * h))) / 2e-6
+        assert np.sum(gx * h) == pytest.approx(fd, rel=1e-6)
+    xb = rng.normal(size=(3, 5, 4))
+    zv = jax.vmap(lambda xi: fpj.prox(op, xi))(jnp.asarray(xb))
+    np.testing.assert_allclose(np.asarray(zv), op.prox(xb), atol=1e-13)
+
+
+def test_spectral_float32_and_errors():
+    jax.config.update("jax_enable_x64", False)
+    x = jnp.asarray(np.random.default_rng(4).normal(size=(2, 5, 5)), jnp.float32)
+    z = fpj.prox(fp.PSD(), x)
+    assert z.dtype == jnp.float32
+    assert jax.grad(lambda x: fpj.prox(fp.PSD(), x).sum())(x).dtype == jnp.float32
+    with pytest.raises(TypeError, match="prox_conj"):
+        fpj.prox_conj(fp.NuclearNorm(), x)
+    with pytest.raises(TypeError, match="axis"):
+        fpj.prox(fp.NuclearNorm(), x, axis=0)
+    with pytest.raises(ValueError, match="matrices"):
+        fpj.prox(fp.NuclearNorm(), jnp.zeros(4))
+    with pytest.raises(ValueError, match="square"):
+        fpj.prox(fp.PSD(), jnp.zeros((3, 4)))

@@ -22,6 +22,12 @@ are copied to the CPU and the result back.
 :func:`tv_iso` and :func:`tv_aniso` instead solve isotropic and anisotropic
 TV in tensor operations on the input's device, GPU included, with a backward
 on the flat regions of the solution (see ``fastprox._tv_torch``).
+
+Spectral operators (since 1.1) go through :func:`prox` too, as an operator
+(``fp.NuclearNorm(0.5)``) or a class with its parameter
+(``fp.NuclearNorm, lam=t``). The SVD or eigendecomposition and the matrix
+products run in torch on the input's device; the prox of the spectrum and the
+k x k core of the derivative run on the CPU.
 """
 
 from __future__ import annotations
@@ -64,6 +70,8 @@ def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
         else:
             static[k] = v
     spec = Spec(op, static, names, conj, threads, {"axis": axis, "tol": tol, "max_iter": max_iter})
+    if spec.spectral:
+        return _SpectralProx.apply(spec, x, step, *values)
     return _Prox.apply(spec, x, step, *values)
 
 
@@ -118,6 +126,91 @@ class _Prox(torch.autograd.Function):
                     0.0 if dstep is None else _scalar(dstep), dparams)
         dtype, device = ctx.x_like
         return torch.from_numpy(dz).to(device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Spectral operators
+# ---------------------------------------------------------------------------
+
+
+def _symmetric(t):
+    return (t + t.mT) / 2
+
+
+class _SpectralProx(torch.autograd.Function):
+    """The decomposition and the products in torch, on x's device; the prox
+    of the spectrum and the k x k core of the derivative on the CPU."""
+
+    @staticmethod
+    def forward(ctx, spec, x, step, *values):
+        op = spec.build([_numpy(v) for v in values])
+        spec.check_names(op, [k for k, need in zip(spec.names, ctx.needs_input_grad[3:]) if need])
+        if x.dim() < 2:
+            raise ValueError("spectral operators act on matrices: the last two axes")
+        xd = x.detach()
+        if op.kind == "eigh":
+            if x.shape[-1] != x.shape[-2]:
+                raise ValueError("kind='eigh' needs square matrices")
+            s, u = torch.linalg.eigh(_symmetric(xd))
+            vh = u.mT
+        else:
+            u, s, vh = torch.linalg.svd(xd, full_matrices=False)
+        sn = np.ascontiguousarray(_numpy(s))
+        z, inner = op.op.prox(sn, _scalar(step), threads=spec.threads, keep=True)
+        ctx.spec, ctx.op, ctx.u, ctx.vh, ctx.s, ctx.z, ctx.inner = spec, op, u, vh, sn, z, inner
+        ctx.step_like = step if isinstance(step, torch.Tensor) else None
+        ctx.shapes = [tuple(v.shape) for v in values]
+        ctx.like = [(v.dtype, v.device) for v in values]
+        ctx.x_like = (x.dtype, x.device)
+        return (u * torch.from_numpy(z).to(x.device)[..., None, :]) @ vh
+
+    @staticmethod
+    def _derivative(ctx, h, dgamma, dparams):
+        """D(h) and A = U^T h V (NumPy), as Spectral._core."""
+        op, u, vh = ctx.op, ctx.u, ctx.vh
+        h = h.to(dtype=u.dtype, device=u.device)
+        if op.kind == "eigh":
+            h = _symmetric(h)
+        a = u.mT @ h @ vh.mT
+        an = _numpy(a)
+        m, n = h.shape[-2:]
+        b, r = op._coefficients(ctx.s, ctx.z, ctx.inner, an, dgamma, dparams, op.kind == "svd" and m != n)
+        out = u @ torch.from_numpy(b).to(u.device) @ vh
+        if r is not None:
+            rt = torch.from_numpy(r).to(u.device)[..., None, :]
+            if m > n:  # (I - U U^T) H V diag(r) V^T
+                out = out + ((h @ vh.mT - u @ a) * rt) @ vh
+            else:      # U diag(r) U^T H (I - V V^T)
+                out = out + (u * rt) @ (u.mT @ h - a @ vh)
+        return out, an
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, g):
+        spec, op = ctx.spec, ctx.op
+        gx, a = _SpectralProx._derivative(ctx, g, 0.0, None)
+        dtype, device = ctx.x_like
+        out_x = gx.to(device=device, dtype=dtype) if ctx.needs_input_grad[1] else None
+        out_step = None
+        out_p = [None] * len(ctx.shapes)
+        if (ctx.step_like is not None and ctx.needs_input_grad[2]) or any(ctx.needs_input_grad[3:]):
+            grads = op._grads(ctx.inner, a)
+            if ctx.step_like is not None and ctx.needs_input_grad[2]:
+                out_step = torch.full_like(ctx.step_like, grads.gamma)
+            vals = spec.param_grads(op, grads, ctx.shapes)
+            for i, (v, (dt, dev)) in enumerate(zip(vals, ctx.like)):
+                if ctx.needs_input_grad[3 + i]:
+                    out_p[i] = torch.from_numpy(v).to(device=dev, dtype=dt)
+        return (None, out_x, out_step, *out_p)
+
+    @staticmethod
+    def jvp(ctx, _spec, dx, dstep, *dvalues):
+        op = ctx.op
+        dparams = ctx.spec.dparams(op, [None if t is None else _numpy(t) for t in dvalues])
+        dtype, device = ctx.x_like
+        h = torch.zeros(ctx.u.shape[:-1] + ctx.vh.shape[-1:], dtype=dtype, device=device) if dx is None else dx
+        dz, _ = _SpectralProx._derivative(ctx, h, 0.0 if dstep is None else _scalar(dstep), dparams)
+        return dz.to(device=device, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------

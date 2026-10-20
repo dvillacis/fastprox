@@ -1113,6 +1113,8 @@ class Spectral:
     $(X + X^\top)/2$.
     """
 
+    kind = "svd"  # the class's kind, read by the framework wrappers before building
+
     def __init__(self, op: Operator, kind="svd"):
         if kind not in _SPECTRAL_KINDS:
             raise ValueError(f"kind must be one of {sorted(_SPECTRAL_KINDS)}")
@@ -1131,6 +1133,17 @@ class Spectral:
     @property
     def nparams(self) -> int:
         return self.op.nparams
+
+    # The parameters are the inner operator's.
+    @property
+    def _layout(self):
+        return self.op._layout
+
+    def _fields(self, gp):
+        return self.op._fields(gp)
+
+    def _flatten(self, dparams):
+        return self.op._flatten(dparams)
 
     def _matrices(self, x, copy):
         x = _input(x, copy)
@@ -1190,19 +1203,28 @@ class Spectral:
                 or ctx.vt.shape[-2] != ctx.s.shape[-1] or ctx.s.shape[-1] != min(ctx.shape[-2:]):
             raise ValueError("derivatives need the full thin decomposition")
 
+    def _coefficients(self, s, z, inner, a, dgamma=0.0, dparams=None, rect=False):
+        """B and, for a rectangular SVD (rect), r from A = U^T H V: the part
+        of the derivative computed by the core, on the CPU. s, z and inner
+        come from the prox of the spectrum."""
+        a = np.ascontiguousarray(a)
+        b = np.empty_like(a)
+        r = np.empty_like(s) if rect else None
+        if dparams is not None:
+            dparams = self.op._flatten(dparams)
+        _C.spectral_jvp(self.op._op, inner.ws, _SPECTRAL_KINDS[self.kind], s, z, a, float(dgamma),
+                        dparams, b, r)
+        return b, r
+
     def _core(self, ctx, h, dgamma, dparams):
         """B and r from A = U^T H V, and the derivative they give."""
         u, vt = ctx.u, ctx.vt
         if self.kind == "eigh":
             h = (h + np.swapaxes(h, -1, -2)) / 2
         a = np.swapaxes(u, -1, -2) @ h @ np.swapaxes(vt, -1, -2)
-        b = np.empty_like(a)
         m, n = ctx.shape[-2:]
-        r = np.empty_like(ctx.s) if self.kind == "svd" and m != n else None
-        if dparams is not None:
-            dparams = self.op._flatten(dparams)
-        _C.spectral_jvp(self.op._op, ctx.inner.ws, _SPECTRAL_KINDS[self.kind], ctx.s, ctx.z,
-                        np.ascontiguousarray(a), float(dgamma), dparams, b, r)
+        b, r = self._coefficients(ctx.s, ctx.z, ctx.inner, a, dgamma, dparams,
+                                  self.kind == "svd" and m != n)
         out = u @ b @ vt
         if r is not None:
             if m > n:  # (I - U U^T) H V diag(r) V^T
@@ -1229,8 +1251,12 @@ class Spectral:
         if g.shape != ctx.shape:
             raise ValueError(f"g must have shape {ctx.shape}")
         gx, a = self._core(ctx, g, 0.0, None)
-        _, grads = self.op.vjp(ctx.inner, np.ascontiguousarray(np.diagonal(a, axis1=-2, axis2=-1)))
-        return gx, grads
+        return gx, self._grads(ctx.inner, a)
+
+    def _grads(self, inner, a):
+        """Grads of gamma and the parameters: the inner operator's VJP on diag(A)."""
+        _, grads = self.op.vjp(inner, np.ascontiguousarray(np.diagonal(a, axis1=-2, axis2=-1)))
+        return Grads(grads.gamma, grads.params, self._fields(grads.params))
 
 
 class NuclearNorm(Spectral):
@@ -1248,10 +1274,17 @@ class SpectralNormBall(Spectral):
     def __init__(self, radius=1.0):
         super().__init__(Box(-radius, radius))
 
+    def _fields(self, gp):
+        f = super()._fields(gp)
+        f["radius"] = f["upper"] - f["lower"]
+        return f
+
 
 class PSD(Spectral):
     r"""The indicator of the positive semidefinite cone: negative eigenvalues
     set to zero (since 1.1)."""
+
+    kind = "eigh"
 
     def __init__(self):
         super().__init__(NonNeg(), "eigh")
