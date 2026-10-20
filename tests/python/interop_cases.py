@@ -46,3 +46,28 @@ def cases():
          rng.normal(size=(2, 12)) * 2, 0.4, False, {}),
     ]
     return out
+
+
+def built(m, n, s, rng):
+    """U diag(s) V^T with random orthonormal U (m x k) and V (n x k)."""
+    k = len(s)
+    u, _ = np.linalg.qr(rng.normal(size=(m, k)))
+    v, _ = np.linalg.qr(rng.normal(size=(n, k)))
+    return u @ np.diag(s) @ v.T
+
+
+def spectral_cases():
+    """(name, op class or operator, differentiable parameters, x, step) for
+    the spectral wrappers: square, tall, wide and batched matrices, away from
+    ties and thresholds."""
+    rng = np.random.default_rng(1)
+    return [
+        ("nuclear", fp.NuclearNorm, {"lam": np.array(0.6)}, rng.normal(size=(5, 5)) * 1.5, 0.9),
+        ("nuclear_tall", fp.NuclearNorm, {"lam": np.array(0.5)}, rng.normal(size=(6, 4)) * 1.5, 1.1),
+        ("spectral_ball_wide", fp.SpectralNormBall, {"radius": np.array(1.2)}, rng.normal(size=(3, 6)) * 1.5,
+         1.0),
+        ("nuclear_ball_batch", fp.Spectral(fp.L1Ball(2.5)), {}, rng.normal(size=(2, 4, 3)) * 1.5, 1.0),
+        ("mcp", fp.Spectral(fp.MCP(0.4, 3.0)), {}, rng.normal(size=(5, 4)) * 1.5, 0.8),
+        ("psd", fp.PSD(), {}, rng.normal(size=(5, 5)), 1.0),
+        ("logdet", fp.Spectral(fp.LogBarrier(0.4), "eigh"), {}, rng.normal(size=(2, 4, 4)), 0.7),
+    ]

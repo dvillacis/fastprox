@@ -1060,6 +1060,27 @@ op.value(X)                              # lam * sum of singular values
   and against the closed-form divergence of Candès, Sing-Long and Trzasko
   (2013). Adjointness and the $\gamma$ and parameter gradients are checked
   too, as is the contrast with autograd through `torch.linalg.svd`.
+- **PyTorch and JAX.** `fastprox.torch.prox` and `fastprox.jax.prox` take a
+  spectral operator like any other, or `NuclearNorm` and `SpectralNormBall`
+  as a class with `lam` or `radius` as a tensor that receives its gradient:
+
+  ```python
+  Z = fpt.prox(fp.NuclearNorm(0.5), X_cuda, gamma)    # differentiable in X and gamma
+  Z = fpt.prox(fp.NuclearNorm, X, gamma, lam=lam)     # and in lam
+  Zj = jax.jit(lambda X: fpj.prox(fp.PSD(), X))(Xj)   # jit, grad, vmap
+  ```
+
+  The decomposition (`torch.linalg.svd` or `eigh`, `jax.numpy.linalg.svd`
+  or `eigh`) and the matrix products run in the framework on the input's
+  device. The prox of the spectrum and the k × k matrix B of the derivative
+  are computed on the CPU, so each call copies s, and each backward A and B,
+  between the device and the host. PyTorch supports reverse and forward
+  mode, forward mode in `x` and `gamma` only; JAX supports reverse mode, and
+  its backward recomputes the prox of the spectrum. There is no `prox_conj`,
+  and `axis`, `tol` and `max_iter` are rejected. The tests in
+  `test_torch.py` and `test_jax.py` check the gradients against finite
+  differences and NumPy's operator, and at tied singular values, where
+  autograd through the SVD fails.
 
 ### Device-native image TV (*since 0.3*)
 

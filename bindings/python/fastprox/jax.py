@@ -22,6 +22,11 @@ gradient costs one prox and one VJP. Float64 needs ``jax_enable_x64``.
 TV in JAX operations on the input's device, GPU included, under ``jit`` and
 ``vmap``, with a backward on the flat regions of the solution (see
 ``fastprox._tv_jax``).
+
+Spectral operators (since 1.1) go through :func:`prox` too, as in
+``fastprox.torch``. The decomposition and the matrix products run in JAX on
+the input's device; the prox of the spectrum and the k x k core of the
+derivative run in callbacks on the CPU.
 """
 
 from __future__ import annotations
@@ -61,6 +66,8 @@ def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
         else:
             static[k] = v
     spec = Spec(op, static, names, conj, threads, {"axis": axis, "tol": tol, "max_iter": max_iter})
+    if spec.spectral:
+        return _spectral(spec, x)(x, jnp.asarray(step, x.dtype), *values)
     return _function(spec)(x, jnp.asarray(step, x.dtype), *values)
 
 
@@ -94,6 +101,88 @@ def _function(spec):
         shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype), jax.ShapeDtypeStruct(step.shape, step.dtype)]
         shapes += [jax.ShapeDtypeStruct(v.shape, v.dtype) for v in values]
         return tuple(jax.pure_callback(cb, tuple(shapes), x, step, g, *values, vmap_method="sequential"))
+
+    f.defvjp(fwd, bwd)
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Spectral operators
+# ---------------------------------------------------------------------------
+
+
+def _mT(a):
+    return jnp.swapaxes(a, -1, -2)
+
+
+def _spectral(spec, x):
+    """The decomposition and the products in JAX, on x's device; the prox of
+    the spectrum and the k x k core of the derivative in callbacks on the
+    CPU. The backward recomputes the prox of the spectrum for its structure."""
+    eig = spec.kind == "eigh"
+    if x.ndim < 2:
+        raise ValueError("spectral operators act on matrices: the last two axes")
+    if eig and x.shape[-1] != x.shape[-2]:
+        raise ValueError("kind='eigh' needs square matrices")
+    m, n = x.shape[-2:]
+    rect = not eig and m != n
+
+    def prox_s(op, s, step):
+        return op.op.prox(np.ascontiguousarray(s), float(step), threads=spec.threads, keep=True)
+
+    def forward(x, step, values):
+        if eig:
+            s, u = jnp.linalg.eigh((x + _mT(x)) / 2)
+            vt = _mT(u)
+        else:
+            u, s, vt = jnp.linalg.svd(x, full_matrices=False)
+
+        def cb(s, step, *values):
+            return prox_s(spec.build(values), s, step)[0]
+
+        z = jax.pure_callback(cb, jax.ShapeDtypeStruct(s.shape, s.dtype), s, step, *values,
+                              vmap_method="sequential")
+        return (u * z[..., None, :]) @ vt, (u, s, vt, step, values)
+
+    @jax.custom_vjp
+    def f(x, step, *values):
+        return forward(x, step, values)[0]
+
+    def fwd(x, step, *values):
+        return forward(x, step, values)
+
+    def bwd(res, g):
+        u, s, vt, step, values = res
+        if eig:
+            g = (g + _mT(g)) / 2
+        a = _mT(u) @ g @ _mT(vt)
+
+        def cb(s, step, a, *values):
+            op = spec.build(values)
+            z, inner = prox_s(op, s, step)
+            a = np.asarray(a)
+            b, r = op._coefficients(np.ascontiguousarray(s), z, inner, a, rect=rect)
+            grads = op._grads(inner, a)
+            out = [b, np.asarray(grads.gamma, s.dtype)]
+            if rect:
+                out.append(r)
+            out += [v.astype(s.dtype) for v in spec.param_grads(op, grads, [np.shape(v) for v in values])]
+            return tuple(out)
+
+        shapes = [jax.ShapeDtypeStruct(a.shape, a.dtype), jax.ShapeDtypeStruct(step.shape, step.dtype)]
+        if rect:
+            shapes.append(jax.ShapeDtypeStruct(s.shape, s.dtype))
+        shapes += [jax.ShapeDtypeStruct(v.shape, v.dtype) for v in values]
+        out = jax.pure_callback(cb, tuple(shapes), s, step, a, *values, vmap_method="sequential")
+        b, gstep, rest = out[0], out[1], out[2:]
+        gx = u @ b @ vt
+        if rect:
+            r, rest = rest[0][..., None, :], rest[1:]
+            if m > n:  # (I - U U^T) G V diag(r) V^T
+                gx = gx + ((g @ _mT(vt) - u @ a) * r) @ vt
+            else:      # U diag(r) U^T G (I - V V^T)
+                gx = gx + (u * r) @ (_mT(u) @ g - a @ vt)
+        return (gx, gstep, *rest)
 
     f.defvjp(fwd, bwd)
     return f
