@@ -37,25 +37,28 @@ import numpy as np
 
 from . import IterInfo
 from . import _tv_jax as _tvj
-from ._interop import Spec, check_dtype, is_float
+from ._interop import Spec, check_dtype, check_step, is_float, spectral_step_grad, steps
 
 __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    r"""$\operatorname{prox}_{\gamma g}(x)$. ``axis`` (row operators), ``tol`` and ``max_iter``
-    (iterative operators) are passed on when given."""
+    r"""$\operatorname{prox}_{\gamma g}(x)$. ``gamma`` is a scalar or (since 1.1) one step per
+    row, image or matrix, broadcasting to the batch shape, as in
+    :func:`fastprox.torch.prox`. ``axis`` (row operators), ``tol`` and
+    ``max_iter`` (iterative operators) are passed on when given."""
     return _apply(op, x, gamma, False, axis, threads, tol, max_iter, params)
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
-    r"""$\operatorname{prox}_{\sigma g^*}(y)$ (Moreau's identity)."""
+    r"""$\operatorname{prox}_{\sigma g^*}(y)$ (Moreau's identity), with a scalar ``sigma``."""
     return _apply(op, y, sigma, True, axis, threads, tol, max_iter, params)
 
 
 def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
     x = jnp.asarray(x)
     check_dtype(x.dtype)
+    check_step(step, conj)
     names, values, static = [], [], {}
     for k, v in params.items():
         if isinstance(v, jax.Array) and is_float(v):
@@ -93,8 +96,9 @@ def _function(spec):
         def cb(x, step, g, *values):
             op = spec.build(values)
             _, ctx = spec.run(op, np.asarray(x), step)
-            gx, grads = op.vjp(ctx, np.asarray(g, x.dtype))
-            out = [gx, np.asarray(grads.gamma, x.dtype)]
+            g = np.asarray(g, x.dtype)
+            gx, grads = op.vjp(ctx, g)
+            out = [gx, spec.step_grad(op, ctx, g, grads, np.shape(step)).astype(x.dtype)]
             out += [v.astype(x.dtype) for v in spec.param_grads(op, grads, [np.shape(v) for v in values])]
             return tuple(out)
 
@@ -128,7 +132,7 @@ def _spectral(spec, x):
     rect = not eig and m != n
 
     def prox_s(op, s, step):
-        return op.op.prox(np.ascontiguousarray(s), float(step), threads=spec.threads, keep=True)
+        return op.op.prox(np.ascontiguousarray(s), steps(step), threads=spec.threads, keep=True)
 
     def forward(x, step, values):
         if eig:
@@ -163,7 +167,7 @@ def _spectral(spec, x):
             a = np.asarray(a)
             b, r = op._coefficients(np.ascontiguousarray(s), z, inner, a, rect=rect)
             grads = op._grads(inner, a)
-            out = [b, np.asarray(grads.gamma, s.dtype)]
+            out = [b, spectral_step_grad(op, inner, a, grads, np.shape(step)).astype(s.dtype)]
             if rect:
                 out.append(r)
             out += [v.astype(s.dtype) for v in spec.param_grads(op, grads, [np.shape(v) for v in values])]

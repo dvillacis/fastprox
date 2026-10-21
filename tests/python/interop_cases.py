@@ -48,6 +48,14 @@ def cases():
     return out
 
 
+def row_steps(case, seed=0):
+    """One step per row for a case: up to the case's own step, of the batch
+    shape (x's shape without the axis, or without the image axes)."""
+    _, cls, const, params, x, step, _, call = case
+    batch = cls(**const, **params)._batch_shape(x.shape, call.get("axis", -1))
+    return step * np.random.default_rng(seed).uniform(0.6, 1.0, batch)
+
+
 def built(m, n, s, rng):
     """U diag(s) V^T with random orthonormal U (m x k) and V (n x k)."""
     k = len(s)

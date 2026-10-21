@@ -38,21 +38,25 @@ import numpy as np
 import torch
 
 from . import _tv_torch as _tvt
-from ._interop import Spec, check_dtype
+from ._interop import Spec, check_dtype, check_step, spectral_step_grad, steps
 
 __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
     r"""$\operatorname{prox}_{\gamma g}(x)$ as a differentiable tensor. ``gamma`` may be a tensor
-    (0-d) that requires grad; ``axis`` (row operators), ``tol`` and
-    ``max_iter`` (iterative operators) are passed on when given."""
+    that requires grad: 0-d, or (since 1.1) one step per row, image or
+    matrix, broadcasting to the batch shape (``x``'s shape without ``axis``,
+    the image axes or the matrix axes); each step's gradient is
+    $\langle g, \partial z / \partial \gamma \rangle$ over its rows, at the cost of one more JVP.
+    ``axis`` (row operators), ``tol`` and ``max_iter`` (iterative operators)
+    are passed on when given."""
     return _apply(op, x, gamma, False, axis, threads, tol, max_iter, params)
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
     r"""$\operatorname{prox}_{\sigma g^*}(y)$ as a differentiable tensor (Moreau's identity);
-    ``sigma`` as ``gamma`` in :func:`prox`."""
+    ``sigma`` as ``gamma`` in :func:`prox`, but a scalar."""
     return _apply(op, y, sigma, True, axis, threads, tol, max_iter, params)
 
 
@@ -60,6 +64,7 @@ def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
     if not isinstance(x, torch.Tensor):
         raise TypeError("x must be a torch.Tensor")
     check_dtype(_np_dtype(x.dtype))
+    check_step(step, conj)
     names, values, static = [], [], {}
     for k, v in params.items():
         if isinstance(v, torch.Tensor) and v.is_floating_point():
@@ -87,12 +92,21 @@ def _scalar(v):
     return float(v.detach().cpu()) if isinstance(v, torch.Tensor) else float(v)
 
 
+def _step(v):
+    """A step as a float, or one step per row as a NumPy array."""
+    return steps(_numpy(v) if isinstance(v, torch.Tensor) else v)
+
+
+def _like(a, t):
+    return torch.from_numpy(np.ascontiguousarray(a)).to(dtype=t.dtype, device=t.device).reshape(t.shape)
+
+
 class _Prox(torch.autograd.Function):
     @staticmethod
     def forward(ctx, spec, x, step, *values):
         op = spec.build([_numpy(v) for v in values])
         spec.check_names(op, [k for k, need in zip(spec.names, ctx.needs_input_grad[3:]) if need])
-        z, fctx = spec.run(op, _numpy(x), _scalar(step))
+        z, fctx = spec.run(op, _numpy(x), _step(step))
         ctx.spec, ctx.op, ctx.fctx = spec, op, fctx
         ctx.step_like = step if isinstance(step, torch.Tensor) else None
         ctx.shapes = [tuple(v.shape) for v in values]
@@ -104,12 +118,14 @@ class _Prox(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, g):
         spec, op = ctx.spec, ctx.op
-        gx, grads = op.vjp(ctx.fctx, _numpy(g))
+        gn = _numpy(g)
+        gx, grads = op.vjp(ctx.fctx, gn)
         dtype, device = ctx.x_like
         out_x = torch.from_numpy(gx).to(device=device, dtype=dtype) if ctx.needs_input_grad[1] else None
         out_step = None
         if ctx.step_like is not None and ctx.needs_input_grad[2]:
-            out_step = torch.full_like(ctx.step_like, grads.gamma)
+            sl = ctx.step_like
+            out_step = _like(spec.step_grad(op, ctx.fctx, gn, grads, tuple(sl.shape)), sl)
         out_p = [None] * len(ctx.shapes)
         if any(ctx.needs_input_grad[3:]):
             vals = spec.param_grads(op, grads, ctx.shapes)
@@ -122,8 +138,11 @@ class _Prox(torch.autograd.Function):
     def jvp(ctx, _spec, dx, dstep, *dvalues):
         op = ctx.op
         dparams = ctx.spec.dparams(op, [None if t is None else _numpy(t) for t in dvalues])
+        per_row = dstep is not None and dstep.numel() > 1
         dz = op.jvp(ctx.fctx, None if dx is None else _numpy(dx),
-                    0.0 if dstep is None else _scalar(dstep), dparams)
+                    0.0 if dstep is None or per_row else _scalar(dstep), dparams)
+        if per_row:
+            dz = dz + ctx.spec.step_tangent(op, ctx.fctx, _numpy(dstep))
         dtype, device = ctx.x_like
         return torch.from_numpy(dz).to(device=device, dtype=dtype)
 
@@ -156,7 +175,7 @@ class _SpectralProx(torch.autograd.Function):
         else:
             u, s, vh = torch.linalg.svd(xd, full_matrices=False)
         sn = np.ascontiguousarray(_numpy(s))
-        z, inner = op.op.prox(sn, _scalar(step), threads=spec.threads, keep=True)
+        z, inner = op.op.prox(sn, _step(step), threads=spec.threads, keep=True)
         ctx.spec, ctx.op, ctx.u, ctx.vh, ctx.s, ctx.z, ctx.inner = spec, op, u, vh, sn, z, inner
         ctx.step_like = step if isinstance(step, torch.Tensor) else None
         ctx.shapes = [tuple(v.shape) for v in values]
@@ -196,7 +215,8 @@ class _SpectralProx(torch.autograd.Function):
         if (ctx.step_like is not None and ctx.needs_input_grad[2]) or any(ctx.needs_input_grad[3:]):
             grads = op._grads(ctx.inner, a)
             if ctx.step_like is not None and ctx.needs_input_grad[2]:
-                out_step = torch.full_like(ctx.step_like, grads.gamma)
+                sl = ctx.step_like
+                out_step = _like(spectral_step_grad(op, ctx.inner, a, grads, tuple(sl.shape)), sl)
             vals = spec.param_grads(op, grads, ctx.shapes)
             for i, (v, (dt, dev)) in enumerate(zip(vals, ctx.like)):
                 if ctx.needs_input_grad[3 + i]:
@@ -209,7 +229,12 @@ class _SpectralProx(torch.autograd.Function):
         dparams = ctx.spec.dparams(op, [None if t is None else _numpy(t) for t in dvalues])
         dtype, device = ctx.x_like
         h = torch.zeros(ctx.u.shape[:-1] + ctx.vh.shape[-1:], dtype=dtype, device=device) if dx is None else dx
-        dz, _ = _SpectralProx._derivative(ctx, h, 0.0 if dstep is None else _scalar(dstep), dparams)
+        per_row = dstep is not None and dstep.numel() > 1
+        dz, _ = _SpectralProx._derivative(ctx, h, 0.0 if dstep is None or per_row else _scalar(dstep),
+                                          dparams)
+        if per_row:  # U diag(ds/dgamma dgamma) V^T, one dgamma per matrix
+            ds = ctx.op.op.jvp(ctx.inner, None, 1.0) * _numpy(dstep)[..., None]
+            dz = dz + (ctx.u * torch.from_numpy(ds).to(ctx.u)[..., None, :]) @ ctx.vh
         return dz.to(device=device, dtype=dtype)
 
 
