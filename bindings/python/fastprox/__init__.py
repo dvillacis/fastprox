@@ -224,6 +224,21 @@ def _output(x: np.ndarray, out) -> np.ndarray:
     return out
 
 
+def _steps(step, batch_shape, conj):
+    """A scalar step as (step, None), or one step per row or image (since 1.1)
+    as (1.0, an array broadcast to the batch shape)."""
+    if np.ndim(step) == 0:
+        return float(step), None
+    if conj:
+        raise ValueError("prox_conj takes a scalar sigma")
+    s = np.asarray(step, dtype=np.float64)
+    try:
+        return 1.0, np.broadcast_to(s, batch_shape)
+    except ValueError:
+        raise ValueError(f"gamma of shape {s.shape} does not broadcast to the batch shape "
+                         f"{tuple(batch_shape)}") from None
+
+
 def _vec(v):
     if v is None:
         return None
@@ -267,7 +282,12 @@ class Operator:
     # -- forward -----------------------------------------------------------
     def prox(self, x, gamma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
              copy=False):
-        r"""$\operatorname{prox}_{\gamma g}(x)$. With ``keep=True`` returns ``(z, ctx)``."""
+        r"""$\operatorname{prox}_{\gamma g}(x)$. With ``keep=True`` returns ``(z, ctx)``.
+
+        ``gamma`` is a scalar, or (since 1.1) an array that broadcasts to the
+        batch shape (the shape of ``x`` without ``axis``): one step per row.
+        Then ``jvp``'s ``dgamma`` moves every step, and ``vjp``'s
+        ``grads.gamma`` is the sum over rows of each row's gradient."""
         return self._run(x, gamma, axis, out, threads, keep, ctx, copy, conj=False)
 
     def value(self, x, *, axis=-1, tol=1e-6):
@@ -300,14 +320,15 @@ class Operator:
     def _run(self, x, step, axis, out, threads, keep, ctx, copy, conj):
         x = _input(x, copy)
         z = _output(x, out)
+        step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
         if not keep:
-            _C.prox(self._op, float(step), x, z, axis, threads, False, None, conj)
+            _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        ctx.info = Info(*_C.prox(self._op, float(step), x, z, axis, threads, True, ctx.ws,
-                                 conj)[:3])
+        ctx.info = Info(*_C.prox(self._op, step, x, z, axis, threads, True, ctx.ws,
+                                 conj, steps=steps)[:3])
         ctx.conj = conj
-        ctx.step = float(step)
+        ctx.step = step if steps is None else steps
         return z, ctx
 
     def _context(self, x, axis, threads, ctx):
@@ -753,7 +774,9 @@ class _ImageOperator(Operator):
 
     def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
              tol=1e-6, max_iter=1000, warm_start=None, warm=False):
-        r"""$\operatorname{prox}_{\gamma g}(x)$; see the class docstring."""
+        r"""$\operatorname{prox}_{\gamma g}(x)$; see the class docstring. ``gamma``
+        may be (since 1.1) an array that broadcasts to the batch shape: one
+        step per image."""
         z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, max_iter,
                                warm_start, warm)
         return (z, ctx) if keep else z
@@ -788,15 +811,16 @@ class _ImageOperator(Operator):
         _C.set_warm(ws, bool(warm))
         if warm_start is not None:
             _C.set_dual(ws, np.asarray(warm_start, np.float64))
-        gap, iters, ties, conv = _C.prox(self._op, float(step), x, z, -1, threads, keep, ws, conj,
-                                         float(tol), int(max_iter))
+        step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
+        gap, iters, ties, conv = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj,
+                                         float(tol), int(max_iter), steps=steps)
         dual = np.empty((self.ndim, *x.shape), np.float64)
         _C.get_dual(ws, dual)
         info = IterInfo(gap, iters, ties, conv, dual)
         if ctx is not None:
             ctx.info = info
             ctx.conj = conj
-            ctx.step = float(step)
+            ctx.step = step if steps is None else steps
         return z, ctx, info
 
 
@@ -992,14 +1016,15 @@ class _Pointwise(Operator):
         t = _tie(tie)
         x = _input(x, copy)
         z = _output(x, out)
+        step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
         if not keep:
-            _C.prox(self._op, float(step), x, z, axis, threads, False, None, conj, tie=t)
+            _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        ctx.info = Info(*_C.prox(self._op, float(step), x, z, axis, threads, True, ctx.ws, conj,
-                                 tie=t)[:3])
+        ctx.info = Info(*_C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj,
+                                 tie=t, steps=steps)[:3])
         ctx.conj = conj
-        ctx.step = float(step)
+        ctx.step = step if steps is None else steps
         return z, ctx
 
 

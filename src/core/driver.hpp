@@ -55,19 +55,74 @@ inline void scatter(const T *src, T *dst, int64_t s, int64_t n) noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// One step per row (fp_prox_steps, since 1.1)
+// ---------------------------------------------------------------------------
+
+// The steps of a batch, one per row in canonical order (C order over the
+// dimensions other than the axis, or over the leading dimensions of an image
+// operator), read through the caller's strides.
+struct Steps {
+    const char *data = nullptr;
+    fp_dtype dtype = FP_F64;
+    int ndim = 0;
+    int64_t shape[FP_MAX_NDIM] = {};
+    int64_t stride[FP_MAX_NDIM] = {};
+
+    double at(int64_t r) const noexcept {
+        int64_t off = 0;
+        for (int d = ndim - 1; d >= 0; --d) {
+            off += (r % shape[d]) * stride[d];
+            r /= shape[d];
+        }
+        return dtype == FP_F32 ? static_cast<double>(reinterpret_cast<const float *>(data)[off])
+                               : reinterpret_cast<const double *>(data)[off];
+    }
+};
+
+// The row of the entry at C-order position pos of an elementwise operator.
+struct RowOfPos {
+    int64_t n = 1, inner = 1;  // the axis length, and the extent after it
+    int64_t operator()(int64_t pos) const noexcept { return pos / (n * inner) * inner + pos % inner; }
+};
+
+inline RowOfPos row_of_pos(int ndim, const int64_t *shape, int axis) noexcept {
+    RowOfPos rp;
+    rp.n = std::max<int64_t>(shape[axis], 1);
+    for (int d = axis + 1; d < ndim; ++d) rp.inner *= shape[d];
+    return rp;
+}
+
+// Splits an elementwise run into pieces that lie in one row, for one step per
+// row: g(i0, len, row) for the entries [i0, i0 + len) of the run. With the
+// axis kept as the plan's last dimension and nothing after it (inner 1), a
+// run lies in one row; otherwise consecutive entries are in different rows.
+// Without steps the run stays whole (row 0).
+template <class G>
+inline void split_rows(const RowOfPos &rp, bool on, int64_t pos, int64_t len, G &&g) {
+    if (!on) {
+        g(int64_t(0), len, int64_t(0));
+    } else if (rp.inner == 1) {
+        g(int64_t(0), len, rp(pos));
+    } else {
+        for (int64_t i = 0; i < len; ++i) g(i, int64_t(1), rp(pos + i));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // prox and prox_conj
 // ---------------------------------------------------------------------------
 
 template <class T>
 fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, double gamma,
                       bool conj, double sigma, fp_workspace &ws, int nt, bool keep, int tie = 0,
-                      int64_t *ties = nullptr) {
+                      int64_t *ties = nullptr, const Steps *steps = nullptr) {
     const T *xd = reinterpret_cast<const T *>(x.data);
     T *od = reinterpret_cast<T *>(out.data);
     const int64_t *st[2] = {x.strides, out.strides};
 
     if (op.elementwise()) {
-        const ElemPlan p = make_elem_plan(x.ndim, x.shape, axis, op.axis_params(), 2, st);
+        const ElemPlan p = make_elem_plan(x.ndim, x.shape, axis, op.axis_params() || steps != nullptr, 2, st);
+        const RowOfPos rp = row_of_pos(x.ndim, x.shape, axis);
         const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         T *save = keep ? ws.xs<T>() : nullptr;
@@ -78,8 +133,11 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
             p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
-                           local += op.prox_run(xd + off[0], xs, od + off[1], os, len, gamma, widx,
-                                                wstep, save ? save + pos : nullptr, conj, sigma, tie);
+                           split_rows(rp, steps != nullptr, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
+                               local += op.prox_run(xd + off[0] + i0 * xs, xs, od + off[1] + i0 * os, os, m,
+                                                    steps ? steps->at(row) : gamma, widx + i0 * wstep, wstep,
+                                                    save ? save + pos + i0 : nullptr, conj, sigma, tie);
+                           });
                        });
             nties.fetch_add(local, std::memory_order_relaxed);
         });
@@ -121,7 +179,7 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
             else res = buf.b;
 
             uint8_t *code = keep ? ws.code.data() + r * n : nullptr;
-            if (int e = op.prox_row(in, res, n, gamma, buf.kernel, code))
+            if (int e = op.prox_row(in, res, n, steps ? steps->at(r) : gamma, buf.kernel, code))
                 err.fetch_or(e, std::memory_order_relaxed);
 
             if (conj) {
@@ -149,7 +207,8 @@ template <class T>
 int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const Arr *mask) {
     const int64_t cstr[FP_MAX_NDIM] = {};
     const int64_t *st[1] = {mask ? mask->strides : cstr};
-    const ElemPlan p = make_elem_plan(ws.ndim, ws.shape, ws.axis, op.axis_params(), 1, st);
+    const ElemPlan p = make_elem_plan(ws.ndim, ws.shape, ws.axis, op.axis_params() || ws.steps_on, 1, st);
+    const RowOfPos rp = row_of_pos(ws.ndim, ws.shape, ws.axis);
     const T *save = ws.xs<T>();
     const double t = ws.conj ? tol / ws.sigma : tol;
     int8_t *md = mask ? reinterpret_cast<int8_t *>(mask->data) : nullptr;
@@ -157,14 +216,16 @@ int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const 
     int64_t count = 0;
     p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                                int64_t wstep) {
-        int8_t buf[256];
-        for (int64_t i0 = 0; i0 < len; i0 += 256) {
-            const int64_t m = std::min<int64_t>(256, len - i0);
-            count += op.kink_run(save + pos + i0, m, ws.gamma, widx + i0 * wstep, wstep, t,
-                                 md ? buf : nullptr);
-            if (md)
-                for (int64_t i = 0; i < m; ++i) md[off[0] + (i0 + i) * ms] = buf[i];
-        }
+        split_rows(rp, ws.steps_on, pos, len, [&](int64_t j0, int64_t jlen, int64_t row) {
+            int8_t buf[256];
+            for (int64_t i0 = j0; i0 < j0 + jlen; i0 += 256) {
+                const int64_t m = std::min<int64_t>(256, j0 + jlen - i0);
+                count += op.kink_run(save + pos + i0, m, ws.step(row), widx + i0 * wstep, wstep, t,
+                                     md ? buf : nullptr);
+                if (md)
+                    for (int64_t i = 0; i < m; ++i) md[off[0] + (i0 + i) * ms] = buf[i];
+            }
+        });
     });
     return count;
 }
@@ -190,7 +251,7 @@ int64_t row_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, co
         }
         int64_t off[1];
         p.offsets(r, off);
-        count += op.kink_row(xb.data(), zb.data(), n, ws.gamma, t, md ? md + off[0] : nullptr, p.astride[0],
+        count += op.kink_row(xb.data(), zb.data(), n, ws.step(r), t, md ? md + off[0] : nullptr, p.astride[0],
                              scr.data());
     }
     return count;
@@ -208,10 +269,11 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
     T *dd = reinterpret_cast<T *>(dout.data);
     const int64_t *st[2] = {dx ? dx->strides : dout.strides, dout.strides};
     const bool conj = ws.conj;
-    const double gamma = ws.gamma, sigma = ws.sigma;
+    const double sigma = ws.sigma;
 
     if (op.elementwise()) {
-        const ElemPlan p = make_elem_plan(dout.ndim, dout.shape, ws.axis, op.axis_params(), 2, st);
+        const ElemPlan p = make_elem_plan(dout.ndim, dout.shape, ws.axis, op.axis_params() || ws.steps_on, 2, st);
+        const RowOfPos rp = row_of_pos(dout.ndim, dout.shape, ws.axis);
         const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         const T *save = ws.xs<T>();
@@ -222,9 +284,12 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
             p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
-                           op.jvp_run(save + pos, dxd ? dxd + off[0] : nullptr, xs, dd + off[1],
-                                      os, len, gamma, dgamma, dparams, widx, wstep, conj, sigma,
-                                      ws.tie, side ? side + pos : nullptr, ktol);
+                           split_rows(rp, ws.steps_on, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
+                               op.jvp_run(save + pos + i0, dxd ? dxd + off[0] + i0 * xs : nullptr, xs,
+                                          dd + off[1] + i0 * os, os, m, ws.step(row), dgamma, dparams,
+                                          widx + i0 * wstep, wstep, conj, sigma, ws.tie,
+                                          side ? side + pos + i0 : nullptr, ktol);
+                           });
                        });
         });
         return FP_OK;
@@ -258,13 +323,13 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
             T *res = (so == 1 && !alias) ? orow : buf.b;
 
             if (!conj) {
-                op.jvp_row(x, z, code, dxr, res, n, gamma, dgamma, dparams, buf.kernel);
+                op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, dparams, buf.kernel);
             } else {
                 // out = y - sigma p(1/sigma, y/sigma); dgamma reads as dsigma.
                 for (int64_t i = 0; i < n; ++i)
                     buf.c[i] = static_cast<T>(static_cast<double>(dxr[i]) / sigma -
                                               static_cast<double>(x[i]) * dgamma / sigma);
-                op.jvp_row(x, z, code, buf.c, buf.d, n, gamma, -dgamma / (sigma * sigma), dparams,
+                op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), dparams,
                            buf.kernel);
                 for (int64_t i = 0; i < n; ++i)
                     res[i] = static_cast<T>(static_cast<double>(dxr[i]) -
@@ -296,10 +361,11 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
     T *xd = reinterpret_cast<T *>(gx.data);
     const int64_t *st[2] = {g.strides, gx.strides};
     const bool conj = ws.conj;
-    const double gamma = ws.gamma, sigma = ws.sigma;
+    const double sigma = ws.sigma;
 
     if (op.elementwise()) {
-        const ElemPlan p = make_elem_plan(g.ndim, g.shape, ws.axis, op.axis_params(), 2, st);
+        const ElemPlan p = make_elem_plan(g.ndim, g.shape, ws.axis, op.axis_params() || ws.steps_on, 2, st);
+        const RowOfPos rp = row_of_pos(g.ndim, g.shape, ws.axis);
         const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t gs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         const T *save = ws.xs<T>();
@@ -313,9 +379,11 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                 p.for_runs(std::min(p.numel, c0 * kChunk), std::min(p.numel, c1 * kChunk),
                            [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                                int64_t wstep) {
-                               op.vjp_run(save + pos, gd + off[0], gs, xd + off[1], os, len, gamma,
-                                          a, widx, wstep, conj, sigma, ws.tie,
-                                          side ? side + pos : nullptr, ktol);
+                               split_rows(rp, ws.steps_on, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
+                                   op.vjp_run(save + pos + i0, gd + off[0] + i0 * gs, gs, xd + off[1] + i0 * os,
+                                              os, m, ws.step(row), a, widx + i0 * wstep, wstep, conj, sigma,
+                                              ws.tie, side ? side + pos + i0 : nullptr, ktol);
+                               });
                            });
             }
         });
@@ -344,9 +412,9 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                     }
                     T *res = (so == 1 && !alias) ? orow : buf.b;
                     if (!conj) {
-                        op.vjp_row(x, z, code, gr, res, n, gamma, a, buf.kernel);
+                        op.vjp_row(x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
                     } else {
-                        op.vjp_row(x, z, code, gr, buf.d, n, gamma, a, buf.kernel);
+                        op.vjp_row(x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
                         double e = 0.0;
                         for (int64_t i = 0; i < n; ++i) {
                             const double gi = static_cast<double>(gr[i]);
@@ -480,7 +548,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
         int64_t off[1];
         p.offsets(r, off);
         const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
-        count += op.kink_image(ws.image_struct(r), xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.gamma, t,
+        count += op.kink_image(ws.image_struct(r), xb.data(), zb.data(), dual, ws.shape + p.nlead, ws.step(r), t,
                                md ? md + off[0] : scratch.data(), ms, reinterpret_cast<char *>(work.data()));
     }
     return count;
@@ -489,7 +557,7 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
 template <class T>
 fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, double gamma, bool conj,
                             double sigma, fp_workspace &ws, int nt, bool keep, double tol,
-                            int max_iter, fp_info *info) {
+                            int max_iter, fp_info *info, const Steps *steps = nullptr) {
     const T *xd = reinterpret_cast<const T *>(x.data);
     T *od = reinterpret_cast<T *>(out.data);
     const int64_t *st[2] = {x.strides, out.strides};
@@ -524,7 +592,7 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         ImageCall c;
         c.shape = ishape;
         c.numel = N;
-        c.gamma = gamma;
+        c.gamma = steps ? steps->at(r) : gamma;
         c.tol = tol;
         c.max_iter = max_iter;
         c.nt = inner;
@@ -599,7 +667,7 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
     const int64_t N = p.numel, B = p.images;
     const int64_t *ishape = dout.shape + p.nlead;
     const bool conj = ws.conj;
-    const double gamma = ws.gamma, sigma = ws.sigma;
+    const double sigma = ws.sigma;
     const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
     parallel_for(B >= 2 ? nt : 1, B, 1, [&](int tid, int64_t r0, int64_t r1) {
         char *set = ws.image_set(tid);
@@ -620,7 +688,7 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
             dc.tol = ws.deriv_tol;
             dc.max_iter = ws.deriv_max_iter;
             if (!conj) {
-                op.jvp_image(save, a, b, ishape, gamma, dgamma, dparams, work, dc);
+                op.jvp_image(save, a, b, ishape, ws.step(r), dgamma, dparams, work, dc);
             } else {
                 // out = y - sigma z(1/sigma, y/sigma); dgamma reads as dsigma.
                 const T *xs = ws.xs<T>() + r * N;
@@ -629,7 +697,7 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
                     b[i] = static_cast<T>(static_cast<double>(a[i]) / sigma -
                                           static_cast<double>(xs[i]) * dgamma / sigma);
                 T *c = b + N;
-                op.jvp_image(save, b, c, ishape, gamma, -dgamma / (sigma * sigma), dparams, work, dc);
+                op.jvp_image(save, b, c, ishape, ws.gamma, -dgamma / (sigma * sigma), dparams, work, dc);
                 for (int64_t i = 0; i < N; ++i)
                     b[i] = static_cast<T>(static_cast<double>(a[i]) - dgamma * static_cast<double>(zs[i]) -
                                           sigma * static_cast<double>(c[i]));
@@ -659,7 +727,6 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
     const int64_t N = p.numel, B = p.images;
     const int64_t *ishape = g.shape + p.nlead;
     const bool conj = ws.conj;
-    const double gamma = ws.gamma;
     const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
     parallel_for(nb >= 2 ? nt : 1, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
         char *set = ws.image_set(tid);
@@ -677,7 +744,7 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
                 DerivCtl dc;
                 dc.tol = ws.deriv_tol;
                 dc.max_iter = ws.deriv_max_iter;
-                op.vjp_image(save, a, b, ishape, gamma, ac, work, dc);
+                op.vjp_image(save, a, b, ishape, ws.step(r), ac, work, dc);
                 const_cast<double *>(ws.deriv_res.data())[r] = dc.residual;
                 const_cast<double *>(ws.deriv_its.data())[r] = dc.iters;
                 if (conj) {

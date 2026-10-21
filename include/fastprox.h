@@ -439,6 +439,19 @@ FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
                          fp_array *out, const fp_options *opt,
                          fp_workspace *ws, fp_info *info);
 
+/* fp_prox with one step per row or image (since 1.1): gamma has the batch
+ * shape, x's shape without the axis (without the image axes for the image
+ * operators), FP_F32 or FP_F64, any strides (0 broadcasts one step over a
+ * dimension); ndim 0 for a single row or image. Every step is checked
+ * before any work (FP_EPARAM as for fp_prox). With keep_structure the steps
+ * are saved: fp_jvp's dgamma then moves every step by dgamma, and fp_vjp's
+ * ggamma is the sum over rows of <g, dz/dgamma> for each row's own step. The
+ * gradient of one row's step is the sum over that row of g times the
+ * fp_jvp output with dx = NULL and dgamma = 1. The fp_info of the call is
+ * read with fp_workspace_info. */
+FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_array *x,
+                               fp_array *out, const fp_options *opt, fp_workspace *ws);
+
 /* prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y / sigma). */
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_array *out, const fp_options *opt,

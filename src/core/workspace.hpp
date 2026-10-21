@@ -130,6 +130,11 @@ struct fp_workspace {
     double gamma = 0.0;  // step used by the kernel (1/sigma in conjugate mode)
     double sigma = 0.0;
     int tie = 0;  // fp_tie rule of the last prox call
+    // One step per row (fp_prox_steps, since 1.1): the steps of the last kept
+    // call in canonical row order, sized with the saved structure.
+    fp::Buffer<double> steps;
+    bool steps_on = false;
+    double step(int64_t r) const noexcept { return steps_on ? steps.data()[r] : gamma; }
 
     char *image_set(int k) const noexcept {
         return reinterpret_cast<char *>(image_work.data()) + static_cast<size_t>(k) * image_bytes;

@@ -126,13 +126,21 @@ fp_options options(int axis, int threads, bool keep, double tol = 1e-6, int max_
 // iterate is written and converged is false.
 std::tuple<double, int, int64_t, bool> prox(const Op &op, double step, const InArr &x, OutArr &out,
                                             int axis, int threads, bool keep, Workspace *ws, bool conj,
-                                            double tol, int max_iter, int tie) {
+                                            double tol, int max_iter, int tie,
+                                            const std::optional<InArr> &steps) {
     const fp_array xa = view(x);
     fp_array oa = view(out);
     const fp_options o = options(axis, threads, keep, tol, max_iter, tie);
     fp_info info{0.0, 0, 0};
     fp_status s;
-    {
+    if (steps) {  // one step per row or image: fp_prox_steps, info from the workspace
+        const fp_array sa = view(*steps);
+        {
+            nb::gil_scoped_release release;
+            s = fp_prox_steps(op.p, &sa, &xa, &oa, &o, ws ? ws->p : nullptr);
+        }
+        if (ws && (s == FP_OK || s == FP_ENOTCONV)) fp_workspace_info(ws->p, &info);
+    } else {
         nb::gil_scoped_release release;
         s = conj ? fp_prox_conj(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info)
                  : fp_prox(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info);
@@ -365,7 +373,8 @@ NB_MODULE(_fastprox, m) {
     }, "ws"_a);
 
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
-          "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000, "tie"_a = 0);
+          "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000, "tie"_a = 0,
+          "steps"_a.none() = nb::none());
     m.def("get_dual", [](const Workspace &ws, OutArr &out) {
         fp_array oa = view(out);
         check(fp_workspace_get_dual(ws.p, &oa));

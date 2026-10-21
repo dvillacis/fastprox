@@ -51,11 +51,11 @@ void row_jvp(const fp_op &op, const fp_workspace &ws, int tid, int64_t r, const 
     const int64_t n = ws.n;
     if (op.elementwise()) {
         const int8_t *side = ws.branch_on ? ws.branch.data() + r * n : nullptr;
-        op.jvp_run(ws.xs<T>() + r * n, dx, 1, out, 1, n, ws.gamma, 0.0, nullptr, 0, 1, false, ws.sigma,
+        op.jvp_run(ws.xs<T>() + r * n, dx, 1, out, 1, n, ws.step(r), 0.0, nullptr, 0, 1, false, ws.sigma,
                    ws.tie, side, branch_tol(ws));
     } else {
         RowBuffers<T> buf(ws, tid, n);
-        op.jvp_row(ws.xs<T>() + r * n, ws.zs<T>() + r * n, ws.code.data() + r * n, dx, out, n, ws.gamma, 0.0,
+        op.jvp_row(ws.xs<T>() + r * n, ws.zs<T>() + r * n, ws.code.data() + r * n, dx, out, n, ws.step(r), 0.0,
                    nullptr, buf.kernel);
     }
 }

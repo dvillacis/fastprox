@@ -2210,6 +2210,18 @@ static void test_no_allocation() {
         CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
     }
     CHECK(g_allocs.load() == before);
+    // One step per row (since 1.1), strided.
+    Vec sv(128);
+    for (size_t i = 0; i < sv.size(); ++i) sv[i] = 0.2 + 0.01 * static_cast<double>(i);
+    const int64_t sshape[1] = {64}, sstride[1] = {2};
+    fp_array sa{sv.data(), FP_F64, 1, sshape, sstride, FP_DEVICE_CPU};
+    CHECK_OK(fp_prox_steps(op, &sa, &x.a, &z.a, &o, ws));
+    const long sb = g_allocs.load();
+    for (int k = 0; k < 3; ++k) {
+        CHECK_OK(fp_prox_steps(op, &sa, &x.a, &z.a, &o, ws));
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
+    }
+    CHECK(g_allocs.load() == sb);
     fp_workspace_free(ws);
     fp_op_free(op);
 
@@ -2510,6 +2522,130 @@ static void test_device_api() {
     for (fp_op *op : {soft, tv1, aniso, iso}) fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- one step per row (since 1.1)
+// fp_prox_steps against fp_prox row by row; tests/python/test_steps.py runs
+// every operator, this covers what Python does not reach.
+static void test_prox_steps() {
+    const int64_t R = 5, n = 40;
+    Vec steps(R);
+    for (int64_t r = 0; r < R; ++r) steps[r] = 0.2 + 0.3 * static_cast<double>(r);
+    Arr x({R, n}, randn(R * n, 2.0)), z({R, n}), zr({n}), xr({n});
+    Arr sa({R}, steps);
+    fp_options o = opts(-1, 1, 1);
+    fp_op *ops[3];
+    CHECK_OK(fp_op_soft(0.5, nullptr, &ops[0]));
+    CHECK_OK(fp_op_mcp(0.6, 3.0, nullptr, &ops[1]));
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &ops[2]));
+    for (fp_op *op : ops) {
+        fp_workspace *ws, *wr;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_workspace_create(op, &xr.a, &o, &wr));
+        CHECK_OK(fp_prox_steps(op, &sa.a, &x.a, &z.a, &o, ws));
+        fp_info info;
+        CHECK_OK(fp_workspace_info(ws, &info));
+        // The kink masks: each row's at its own step.
+        I8 mask({R, n}, {n, 1}, R * n), mr({n}, {1}, n);
+        int64_t count = 0, total = 0;
+        CHECK_OK(fp_workspace_kinks(ws, 0.05, &mask.a, &count));
+        for (int64_t r = 0; r < R; ++r) {
+            std::copy(x.data.begin() + r * n, x.data.begin() + (r + 1) * n, xr.data.begin());
+            CHECK_OK(fp_prox(op, steps[r], &xr.a, &zr.a, &o, wr, nullptr));
+            CHECK(std::equal(zr.data.begin(), zr.data.end(), z.data.begin() + r * n));
+            int64_t c = 0;
+            CHECK_OK(fp_workspace_kinks(wr, 0.05, &mr.a, &c));
+            CHECK(std::equal(mr.data.begin(), mr.data.end(), mask.data.begin() + r * n));
+            total += c;
+        }
+        CHECK(count == total && total > 0);
+        // A scalar call afterwards uses its own step again.
+        CHECK_OK(fp_prox(op, 0.7, &x.a, &z.a, &o, ws, nullptr));
+        Arr d1({R, n}), d2({R, n}), ones({R}, Vec(R, 0.7));
+        CHECK_OK(fp_jvp(op, ws, nullptr, 1.0, nullptr, &d1.a));
+        CHECK_OK(fp_prox_steps(op, &ones.a, &x.a, &z.a, &o, ws));
+        CHECK_OK(fp_jvp(op, ws, nullptr, 1.0, nullptr, &d2.a));
+        CHECK(d1.data == d2.data);
+        fp_workspace_free(ws);
+        fp_workspace_free(wr);
+    }
+
+    // A single row takes a 0-d step; strides of 0 broadcast one step.
+    {
+        double g0 = 0.8;
+        fp_array s0{&g0, FP_F64, 0, nullptr, nullptr, FP_DEVICE_CPU};
+        CHECK_OK(fp_prox_steps(ops[2], &s0, &xr.a, &zr.a, nullptr, nullptr));
+        CHECK(zr.data == prox(ops[2], 0.8, xr.data));
+        const int64_t bshape[1] = {R}, bstride[1] = {0};
+        fp_array sb{&g0, FP_F64, 1, bshape, bstride, FP_DEVICE_CPU};
+        Arr z2({R, n});
+        CHECK_OK(fp_prox_steps(ops[2], &sb, &x.a, &z.a, nullptr, nullptr));
+        CHECK_OK(fp_prox(ops[2], 0.8, &x.a, &z2.a, nullptr, nullptr, nullptr));
+        CHECK(z.data == z2.data);
+        float gf[R];
+        for (int64_t r = 0; r < R; ++r) gf[r] = static_cast<float>(steps[r]);
+        fp_array sf{gf, FP_F32, 1, bshape, nullptr, FP_DEVICE_CPU};
+        CHECK_OK(fp_prox_steps(ops[0], &sf, &x.a, &z.a, nullptr, nullptr));
+    }
+
+    // The spectral core after one step per matrix: each matrix as alone.
+    {
+        const int64_t k = 4;
+        Arr s({R, k}), zs({R, k}), a({R, k, k}, randn(R * k * k)), b({R, k, k});
+        for (int64_t r = 0; r < R; ++r)
+            for (int64_t i = 0; i < k; ++i) s.data[r * k + i] = 0.3 * static_cast<double>((i + r) % k) + 0.1;
+        s.data[k + 1] = s.data[k];  // a tie
+        fp_workspace *ws, *wr;
+        CHECK_OK(fp_workspace_create(ops[0], &s.a, &o, &ws));
+        CHECK_OK(fp_prox_steps(ops[0], &sa.a, &s.a, &zs.a, &o, ws));
+        CHECK_OK(fp_spectral_jvp(ops[0], ws, FP_SPECTRAL_SVD, &s.a, &zs.a, &a.a, 0.3, nullptr, &b.a, nullptr));
+        Arr s1({k}), z1({k}), a1({k, k}), b1({k, k});
+        CHECK_OK(fp_workspace_create(ops[0], &s1.a, &o, &wr));
+        for (int64_t r = 0; r < R; ++r) {
+            std::copy(s.data.begin() + r * k, s.data.begin() + (r + 1) * k, s1.data.begin());
+            std::copy(a.data.begin() + r * k * k, a.data.begin() + (r + 1) * k * k, a1.data.begin());
+            CHECK_OK(fp_prox(ops[0], steps[r], &s1.a, &z1.a, &o, wr, nullptr));
+            CHECK_OK(fp_spectral_jvp(ops[0], wr, FP_SPECTRAL_SVD, &s1.a, &z1.a, &a1.a, 0.3, nullptr, &b1.a, nullptr));
+            CHECK(std::equal(b1.data.begin(), b1.data.end(), b.data.begin() + r * k * k));
+        }
+        fp_workspace_free(ws);
+        fp_workspace_free(wr);
+    }
+
+    // Errors: the batch shape, the steps, and the step conditions.
+    {
+        Arr bad({n}), neg({R}, steps), big({R}, steps);
+        neg.data[2] = -0.1;
+        big.data[3] = 3.5;  // MCP needs b > gamma
+        CHECK(fp_prox_steps(ops[0], nullptr, &x.a, &z.a, nullptr, nullptr) == FP_EINVAL);
+        CHECK(fp_prox_steps(ops[0], &bad.a, &x.a, &z.a, nullptr, nullptr) == FP_ESHAPE);
+        CHECK(fp_prox_steps(ops[0], &x.a, &x.a, &z.a, nullptr, nullptr) == FP_ESHAPE);
+        CHECK(fp_prox_steps(ops[0], &neg.a, &x.a, &z.a, nullptr, nullptr) == FP_EPARAM);
+        z.data.assign(z.data.size(), 9.0);
+        CHECK(fp_prox_steps(ops[1], &big.a, &x.a, &z.a, nullptr, nullptr) == FP_EPARAM);
+        CHECK(z.data == Vec(z.data.size(), 9.0));  // checked before any work
+        fp_options o0 = opts(0);
+        Arr sx({n}, Vec(n, 0.5));
+        CHECK_OK(fp_prox_steps(ops[0], &sx.a, &x.a, &z.a, &o0, nullptr));  // axis 0: n rows
+    }
+    for (fp_op *op : ops) fp_op_free(op);
+
+    // Image operators take the leading shape.
+    {
+        fp_op *tv;
+        CHECK_OK(fp_op_tv_iso(2, nullptr, &tv));
+        Arr im({2, 3, 6, 7}, randn(2 * 3 * 42)), iz({2, 3, 6, 7}), one({6, 7}), oz({6, 7});
+        Arr is({2, 3}, {0.1, 0.2, 0.3, 0.4, 0.5, 0.6});
+        CHECK_OK(fp_prox_steps(tv, &is.a, &im.a, &iz.a, nullptr, nullptr));
+        for (int64_t r = 0; r < 6; ++r) {
+            std::copy(im.data.begin() + r * 42, im.data.begin() + (r + 1) * 42, one.data.begin());
+            CHECK_OK(fp_prox(tv, is.data[r], &one.a, &oz.a, nullptr, nullptr, nullptr));
+            CHECK(std::equal(oz.data.begin(), oz.data.end(), iz.data.begin() + r * 42));
+        }
+        Arr is2({6});
+        CHECK(fp_prox_steps(tv, &is2.a, &im.a, &iz.a, nullptr, nullptr) == FP_ESHAPE);
+        fp_op_free(tv);
+    }
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -2526,6 +2662,7 @@ int main() {
     test_value();
     test_spectral();
     test_device_api();
+    test_prox_steps();
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();
