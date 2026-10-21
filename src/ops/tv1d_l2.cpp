@@ -16,19 +16,32 @@
 // Stat. Comput. 4(3) (1983) 553-572. psi is concave and increasing, so every
 // Newton step lands at or below mu*, and the iterates from mu = 0 increase to
 // it; a bracket [L, R] with R = ||W D x|| / gamma guards against rounding.
-// psi' needs u^T (W D D^T W + mu I)^{-1} u = sum_e a_e Dz_e Dy_e / mu^3, where
-// (mu I + K) y = mu z, and the step is mu + (s - mu gamma) s^2 / (gamma S) with
-// s = ||W D z|| and S = sum_e a_e Dz_e Dy_e. At mu = 0 the same quantities come
-// from cumulative sums: ||u0||, and ||y0||^2 with y0 the mean-free solution of
-// w_e (y0_{e+1} - y0_e) = u0_e. Once a step is below 1e-7 mu it is taken, from
-// either side of the root, and the iteration stops: Newton's quadratic rate
-// puts the next error below rounding.
+// The iteration runs on the differences: with T = D D^T and A = diag(a), D
+// applied to (mu I + K) z = mu x gives (mu I + T A) Dz = mu D x, and the
+// normalised dual uh = u / gamma = W Dz / (mu gamma) has ||uh|| = 1 at the root.
+// Write dh = Dz / (mu gamma) = uh / w, nu = ||uh|| = (sum_e a_e dh_e^2)^(1/2) and
+// yh for (mu I + T A) yh = mu dh. Then psi' gives the step
+// mu (1 + (nu - 1) nu^2 / Sh) with Sh = sum_e a_e dh_e yh_e. Differences of z
+// itself, computed from z, carry its rounding: 1 ulp of z across an edge of
+// weight 0.5 is 1e-17 in ||W D z||, which hid an edge of weight 4e-149 whose
+// part was 1e-150 (fuzzing). z itself is not taken as x - gamma D^T W uh, a
+// difference of flows that grow along a long row, but solved for. At mu = 0
+// the same quantities come from cumulative sums: ||u0||, and ||y0||^2 with y0
+// the mean-free solution of w_e (y0_{e+1} - y0_e) = u0_e. Once a step is below
+// 1e-7 mu it is taken, from either side of the root, and the iteration stops:
+// Newton's quadratic rate puts the next error below rounding.
 //
-// Solves. sigma I + kappa K (sigma = mu, kappa = 1 for mu < 1, else 1 and 1/mu)
-// is a diagonally dominant M-matrix. Its pivots are kept in excess form,
-// e_j = sigma + kappa a_{j-1} e_{j-1} / d_{j-1}, d_j = e_j + kappa a_j, sums of
-// positive terms, so they are accurate for any mu; the piece means are removed
-// from x first.
+// Solves. B = sigma I + kappa T A (sigma = mu, kappa = 1 for mu < 1, else 1 and
+// 1/mu) on the edges of each piece is an M-matrix, diagonally dominant by
+// columns with excess sigma, or sigma + kappa a_e at the ends of a piece. Its
+// pivots are kept in excess form, e_j = sigma + kappa a_j e_{j-1} / p_{j-1},
+// p_j = e_j + kappa a_j (e_{-1} / p_{-1} = 1 at the start of a piece), sums of
+// positive terms, so they are accurate for any mu, and the substitutions only
+// add positive multiples. B dh = (sigma / (mu gamma)) D x has no factor mu for
+// mu < 1, so no product of a tiny mu and a tiny difference underflows. After
+// the piece means are removed, the inside test and the iteration run on x and
+// gamma times a power of two that brings the largest entry to [0.5, 1). z then
+// comes from one solve with sigma I + kappa K at the final mu.
 //
 // Derivatives. F(z) = z - x + gamma K z / s = 0. Its Jacobian in z is
 // H = A - (c / s^2) p p^T with c = gamma / s, A = I + c K and p = K z, and
@@ -45,6 +58,7 @@
 #include "core/op.hpp"
 #include "ops/ops.hpp"
 
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <utility>
@@ -73,13 +87,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     double we(int64_t e) const noexcept { return w.size() == 1 ? w[0] : w[e]; }
     double ae(int64_t e) const noexcept { return a.size() == 1 ? a[0] : a[e]; }
 
-    // 1 / d_j of sigma I + kappa K.
+    // 1 / d_j of sigma I + kappa K. The ratio e / d <= 1 comes first: kappa a_j e
+    // underflowed for a_j = 2e-297 and e = 7e-295 and dropped the edge.
     void factor(double sigma, double kappa, double *inv, int64_t n) const noexcept {
         double e = sigma;
         for (int64_t j = 0; j < n; ++j) {
             const double d = e + (j + 1 < n ? kappa * ae(j) : 0.0);
             inv[j] = 1.0 / d;
-            if (j + 1 < n) e = sigma + kappa * ae(j) * e * inv[j];
+            if (j + 1 < n) e = sigma + kappa * ae(j) * (e * inv[j]);
         }
     }
     // v <- (sigma I + kappa K)^{-1} v, in place.
@@ -88,11 +103,10 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         v[n - 1] *= inv[n - 1];
         for (int64_t j = n - 2; j >= 0; --j) v[j] = (v[j] + kappa * ae(j) * v[j + 1]) * inv[j];
     }
-    // The Newton loop's passes, fused so that the dependent chains of the
-    // factorisation and the substitutions overlap: factor sigma I + kappa K and
-    // solve for v = (sigma I + kappa K)^{-1} sigma b, returning ||W D v||^2.
-    double factor_solve(double sigma, double kappa, double *inv, const double *b, double *v,
-                        int64_t n) const noexcept {
+    // Factor sigma I + kappa K and solve v = (sigma I + kappa K)^{-1} sigma b in one
+    // pass each way, returning ||W D v||^2 (not finite if v is not).
+    double factor_solve_z(double sigma, double kappa, double *inv, const double *b, double *v,
+                          int64_t n) const noexcept {
         double e = sigma, f = 0.0, m = 0.0;
         for (int64_t j = 0; j < n; ++j) {
             const double off = j + 1 < n ? kappa * ae(j) : 0.0;
@@ -112,22 +126,50 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         }
         return s;
     }
-    // y = (sigma I + kappa K)^{-1} sigma z with the factors above, returning
-    // sum_e a_e Dz_e Dy_e.
-    double solve_cross(double sigma, double kappa, const double *inv, const double *z, double *y,
-                       int64_t n) const noexcept {
-        double f = sigma * z[0];
-        y[0] = f;
-        for (int64_t j = 1; j < n; ++j) {
-            f = sigma * z[j] + kappa * ae(j - 1) * inv[j - 1] * f;
-            y[j] = f;
+    // The Newton loop's passes on the edges, fused so that the dependent chains
+    // of the factorisation and the substitutions overlap: factor B and solve
+    // B dh = f D xc, returning sum_e a_e dh_e^2. Edges of zero weight store
+    // inv = 0, so dh = 0 there and each piece is solved on its own; on the
+    // chain, their e / p = sigma (1 / sigma) is 1 to rounding for sigma >= DBL_MIN,
+    // which starts the next piece.
+    double factor_solve(double sigma, double kappa, double f, const double *xc, double *inv,
+                        double *dh, int64_t n) const noexcept {
+        double r = 1.0, g = 0.0, m = 0.0;  // r = e_{j-1} / p_{j-1}, m = kappa a_{j-1} / p_{j-1}
+        for (int64_t j = 0; j + 1 < n; ++j) {
+            const double ka = kappa * ae(j), e = sigma + ka * r;
+            const double ij = 1.0 / (e + ka);
+            g = f * (xc[j + 1] - xc[j]) + m * g;
+            inv[j] = ae(j) != 0.0 ? ij : 0.0;
+            dh[j] = g;
+            m = ka * ij;
+            r = e * ij;
         }
-        double S = 0.0, next = y[n - 1] *= inv[n - 1];
+        double s = 0.0, next = 0.0, kn = 0.0;  // kn = kappa a_{j+1}
         for (int64_t j = n - 2; j >= 0; --j) {
-            const double yj = (y[j] + kappa * ae(j) * next) * inv[j];
-            y[j] = yj;
-            S += ae(j) * (z[j + 1] - z[j]) * (next - yj);
+            const double dj = (dh[j] + kn * next) * inv[j];
+            dh[j] = dj;
+            s += ae(j) * dj * dj;
+            next = dj;
+            kn = kappa * ae(j);
+        }
+        return s;
+    }
+    // yh = B^{-1} sigma dh with the factors above, returning sum_e a_e dh_e yh_e.
+    double solve_cross(double sigma, double kappa, const double *inv, const double *dh, double *yh,
+                       int64_t n) const noexcept {
+        double g = 0.0, m = 0.0;
+        for (int64_t j = 0; j + 1 < n; ++j) {
+            g = sigma * dh[j] + m * g;
+            yh[j] = g;
+            m = kappa * ae(j) * inv[j];
+        }
+        double S = 0.0, next = 0.0, kn = 0.0;
+        for (int64_t j = n - 2; j >= 0; --j) {
+            const double yj = (yh[j] + kn * next) * inv[j];
+            yh[j] = yj;
+            S += ae(j) * dh[j] * yj;
             next = yj;
+            kn = kappa * ae(j);
         }
         return S;
     }
@@ -195,10 +237,22 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
             return kRowOk;
         }
-        double *xc = static_cast<double *>(scr), *inv = xc + n, *zc = inv + n, *y = zc + n;
+        double *xc = static_cast<double *>(scr), *inv = xc + n, *dh = inv + n, *y = dh + n;
         center(x, xc, n);
-        // ||u0||^2 and ||y0||^2 (y0 per piece, mean-free).
-        double rho0sq = 0.0, kap0 = 0.0;
+        // Everything below runs on xc and gamma times t = 2^k with max |t xc| in
+        // [0.5, 1): z - mean is homogeneous in (xc, gamma), mu is unchanged, and
+        // a power of two scales every rounded result exactly. Unscaled, ||u0||^2
+        // underflowed to 0 for entries near 1e-177 (inside, wrongly), and sigma xc
+        // underflowed in the solves for mu = 2e-295 at entries near 1e-147 (NaN;
+        // both found by fuzzing).
+        double t = 0.0;
+        for (int64_t i = 0; i < n; ++i) t = std::fmax(t, std::fabs(xc[i]));
+        int k;
+        std::frexp(t, &k);
+        t = std::ldexp(1.0, -k);
+        const double gt = gamma * t;
+        // ||u0||^2 and ||y0||^2 (y0 per piece, mean-free), and ||W D xc||^2.
+        double rho0sq = 0.0, kap0 = 0.0, wdx = 0.0;
         {
             int64_t s = 0;
             double U = 0.0, yv = 0.0, ys = 0.0;
@@ -207,9 +261,11 @@ struct TV1DL2 final : RowOp<TV1DL2> {
                 ys += yv;
                 const bool end = i == n - 1 || ae(i) == 0.0;
                 if (!end) {
-                    U += xc[i];
+                    U += t * xc[i];
                     rho0sq += U * U / ae(i);
                     yv -= U / ae(i);
+                    const double d = t * (xc[i + 1] - xc[i]);
+                    wdx += ae(i) * d * d;
                     continue;
                 }
                 const double m = ys / static_cast<double>(i - s + 1);
@@ -219,58 +275,83 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             }
         }
         const double rho0 = std::sqrt(rho0sq);
-        double L = 0.0, R = norm_wd(xc, n) / gamma;
+        double L = 0.0, R = std::sqrt(wdx) / gt;
         // R = 0: no differences across nonzero weights, so x is its own
         // piecewise mean whatever rounding left in rho0.
-        if (rho0 <= gamma || !(R > 0.0)) {
+        if (rho0 <= gt || !(R > 0.0)) {
             for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i]);
             if (code) code[0] = kInside;
             return kRowOk;
         }
-        double mu = (rho0 / gamma - 1.0) * rho0sq / kap0;  // Newton from mu = 0
-        if (!(mu > L && mu < R)) mu = 0.5 * (L + R);
-        // The solves run on xc and gamma times t = 2^k with max |t xc| in
-        // [0.5, 1): z - mean is homogeneous in (xc, gamma) and mu is unchanged,
-        // and a power of two scales every rounded result exactly. Unscaled,
-        // sigma xc_j underflowed to 0 for mu = 2e-295 at xc ~ 1e-147 (a weight
-        // of 4e-149 between near-zero entries; found by fuzzing): s was 0 at
-        // every mu, bisection drove mu to 0 and the zero pivot of a zero weight
-        // gave NaN.
-        double t = 0.0;
-        for (int64_t i = 0; i < n; ++i) t = std::fmax(t, std::fabs(xc[i]));
-        int k;
-        std::frexp(t, &k);
-        t = std::ldexp(1.0, -k);
         for (int64_t i = 0; i < n; ++i) xc[i] *= t;
-        gamma *= t;
-        // zc = (sigma I + kappa K)^{-1} sigma xc at mu, returning s; y likewise
-        // from zc, returning S.
-        auto solve_z = [&](double m, double &sigma, double &kappa) {
+        // Bisection in the exponent, a dive below R while no lower bound is
+        // known: mu* can lie hundreds of orders of magnitude below R (w_e^2 of
+        // 2e-297 against R = 1e-146, where ||y0||^2 overflows and Newton has no
+        // start). From below, Newton steps then rise to the root.
+        auto mid = [&] { return L > 0.0 ? std::sqrt(L) * std::sqrt(R) : R * 0x1p-64; };
+        double mu = (rho0 / gt - 1.0) * rho0sq / kap0;  // Newton from mu = 0
+        if (!(mu > L && mu < R)) mu = mid();
+        // mu >= DBL_MIN keeps 1 / sigma finite; a root below it needs w_e^2 of
+        // denormal size, and z is then taken at DBL_MIN.
+        if (!(mu >= DBL_MIN)) mu = DBL_MIN;
+        // dh at mu into dh, returning nu; yh likewise from dh, returning Sh.
+        double sigma, kappa;
+        auto solve_dh = [&](double m) {
             sigma = m < 1.0 ? m : 1.0;
             kappa = m < 1.0 ? 1.0 : 1.0 / m;
-            return std::sqrt(factor_solve(sigma, kappa, inv, xc, zc, n));
+            const double f = m < 1.0 ? 1.0 / gt : 1.0 / (m * gt);
+            return std::sqrt(factor_solve(sigma, kappa, f, xc, inv, dh, n));
         };
+        // The loop sets mu for z: the root, or failing that the last mu whose
+        // solve was finite (an overflow far from the root leaves inf or NaN,
+        // taken as below it).
+        double good = 0.0, muz = 0.0;
+        bool finite = false;  // dh holds a finite solve
         for (int it = 0; it < kMaxIter; ++it) {
-            double sigma, kappa;
-            const double s = solve_z(mu, sigma, kappa);
-            if (s > mu * gamma) L = mu;
-            else if (s < mu * gamma) R = mu;
-            else break;
-            const double S = solve_cross(sigma, kappa, inv, zc, y, n);
-            double next = S > 0.0 ? mu + (s - mu * gamma) * s * s / (gamma * S) : 0.5 * (L + R);
+            const double nu = solve_dh(mu);
+            finite = nu <= DBL_MAX;
+            if (finite) good = mu;
+            if (nu < 1.0) R = mu;
+            else if (nu > 1.0 || !finite) L = mu;
+            else {
+                muz = mu;
+                break;
+            }
+            const double S = solve_cross(sigma, kappa, inv, dh, y, n);
+            double next = S > 0.0 ? mu + mu * ((nu - 1.0) * (nu * nu / S)) : mid();  // nu^2 / S >= 1
             // Take the last small step from either side: rounding can put an
             // iterate just right of the root, and a Newton step from there
             // also lands at or below it, with the same quadratic error.
             if (std::fabs(next - mu) <= 1e-7 * mu) {
-                if (next > L && next < R) solve_z(next, sigma, kappa);
+                muz = next > L && next < R && next >= DBL_MIN ? next : mu;
                 break;
             }
-            if (!(next > L && next < R)) next = 0.5 * (L + R);
+            if (!(next > L && next < R)) next = mid();
+            if (next < DBL_MIN) next = DBL_MIN;  // a step from the right can land at mu 1e-16
             if (!(next > L && next < R)) break;  // the bracket is two adjacent doubles
             mu = next;
         }
-        for (int64_t i = 0; i < n; ++i)
-            z[i] = static_cast<T>(static_cast<double>(x[i]) - (xc[i] - zc[i]) / t);
+        if (!(muz > 0.0) || (muz == mu && !finite)) muz = good;
+        if (!(muz > 0.0)) {  // no finite solve: the piecewise mean
+            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i] / t);
+            return kRowOk;
+        }
+        // z itself from (sigma I + kappa K) zc = sigma xc, accurate to rounding of
+        // xc; its differences were not (above). Should that solve overflow,
+        // z = x - gamma D^T W uh from dh takes over.
+        const double sg = muz < 1.0 ? muz : 1.0, kp = muz < 1.0 ? 1.0 : 1.0 / muz;
+        if (factor_solve_z(sg, kp, inv, xc, y, n) <= DBL_MAX) {
+            for (int64_t i = 0; i < n; ++i)
+                z[i] = static_cast<T>(static_cast<double>(x[i]) - (xc[i] - y[i]) / t);
+            return kRowOk;
+        }
+        if (!(finite && muz == mu)) solve_dh(muz);
+        double q = 0.0;  // gamma a_{i-1} dh_{i-1}, with W uh = A dh
+        for (int64_t i = 0; i < n; ++i) {
+            const double qi = i + 1 < n ? gamma * ae(i) * dh[i] : 0.0;
+            z[i] = static_cast<T>(static_cast<double>(x[i]) - (q - qi));
+            q = qi;
+        }
         return kRowOk;
     }
 
