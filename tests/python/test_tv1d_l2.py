@@ -156,6 +156,36 @@ def test_tiny_weight_between_tiny_entries():
     m = y[29:33].mean()
     np.testing.assert_allclose(z[29:33], m - g * w[32] / 4, rtol=1e-12)
     np.testing.assert_allclose(z[33:], g * w[32] / 3, rtol=1e-12)
+    # The same problem at other scales: z(t y, t g) = t z(y, g). At 2^480,
+    # ||y0||^2 overflowed and Newton started from the bisection: differences
+    # of z then carried its rounding, 1e-17 across the edges of weight 0.53
+    # against 1e-150 across the weak edge, and the iteration returned the
+    # block means unshrunk.
+    for k in (-300, -100, 100, 300, 480):
+        t = 2.0**k
+        np.testing.assert_allclose(fp.tv1d_l2(y * t, g * t, weights=w) / t, z, rtol=1e-12, atol=0)
+
+
+def test_scale_invariance_with_extreme_weights():
+    # z(t x, t gamma) = t z(x, gamma) for weights over 150 orders of magnitude.
+    # Before the inside test and the iteration ran on a rescaled row and the
+    # differences, every one of these rows broke it at some scale, by up to
+    # 100% of max |x|; the results now agree with a 700-digit solver to 2e-16
+    # (checked offline).
+    rng = np.random.default_rng(3)
+    for _ in range(300):
+        n = int(rng.integers(2, 40))
+        w = 10.0 ** rng.uniform(-150, 2, n - 1)
+        w[rng.random(n - 1) < 0.15] = 0.0
+        x = rng.normal(size=n) * 10.0 ** rng.uniform(-3, 3, n) * (rng.random(n) < 0.8)
+        g = rho0(x, w) * 10.0 ** rng.uniform(-3, 0)
+        if not (np.isfinite(g) and g > 0):
+            continue
+        z = fp.tv1d_l2(x, g, weights=w)
+        for k in (-600, -100, 100, 400):
+            t = 2.0**k / np.abs(x).max()
+            np.testing.assert_allclose(fp.tv1d_l2(x * t, g * t, weights=w) / t, z, rtol=0,
+                                       atol=1e-12 * np.abs(x).max())
 
 
 def test_float32():

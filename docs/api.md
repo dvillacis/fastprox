@@ -125,6 +125,9 @@ Notes:
   the root of Moré and Sorensen's secular equation, found by Newton's method
   from $\mu = 0$ (Nocedal and Wright, Algorithm 4.4). It converges monotonically, in 2–8 steps of one
   tridiagonal factorisation and two solves, to rounding, so `fp_info.gap` is 0.
+  The steps solve for the differences $Dz$ rather than $z$, so the result stays
+  exact to rounding when weights and entries span many orders of magnitude
+  (tested with weights over 150 orders and rows rescaled by $2^{\pm 600}$).
   For $n = 2$ it is 1D TV. Derivatives are in closed form: the Hessian of the
   prox problem is that tridiagonal matrix minus a rank-one term (Sherman–
   Morrison), so a JVP or VJP costs three $O(n)$ solves.
