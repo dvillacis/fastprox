@@ -45,7 +45,8 @@ extern "C" {
 /* FP_I8 (since 0.2) is accepted only by the kink and branch arrays of
  * fp_workspace_kinks and fp_workspace_set_branch. */
 typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3 } fp_dtype;
-typedef enum { FP_DEVICE_CPU = 0 } fp_device; /* GPU values reserved */
+/* FP_DEVICE_CUDA (since 1.1) is DLPack's kDLCUDA; 10 (kDLROCM) is reserved. */
+typedef enum { FP_DEVICE_CPU = 0, FP_DEVICE_CUDA = 2 } fp_device;
 
 /* Strided n-d array descriptor. Strides are in elements, not bytes, and may
  * be negative. ndim may be 0 (a scalar). The library never frees `data`. */
@@ -55,7 +56,7 @@ typedef struct {
     int            ndim;
     const int64_t *shape;
     const int64_t *strides;
-    fp_device      device; /* FP_DEVICE_CPU; other values reserved for 1.x */
+    fp_device      device; /* FP_DEVICE_CPU; FP_DEVICE_CUDA needs the plugin */
 } fp_array;
 
 typedef enum {
@@ -66,7 +67,8 @@ typedef enum {
     FP_ENOMEM,   /* std::bad_alloc caught at the API layer */
     FP_ENOTCONV, /* iterative operator stopped before tol */
     FP_EPARAM,   /* invalid operator parameter or step */
-    FP_EINTERNAL /* any other C++ exception, caught */
+    FP_EINTERNAL, /* any other C++ exception, caught */
+    FP_EDEVICE    /* (since 1.1) a device error, now or from earlier work on the stream */
 } fp_status;
 
 typedef enum { FP_TIE_NONZERO = 0, FP_TIE_ZERO = 1 } fp_tie;
@@ -500,6 +502,44 @@ FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
                                  const fp_array *z, const fp_array *a,
                                  double dgamma, const fp_array *dparams,
                                  fp_array *b, fp_array *r);
+
+/* ------------------------------------------------------------------------
+ * Devices (since 1.1). CUDA kernels live in a plugin, libfastprox_cuda,
+ * loaded on first use: from the path in the environment variable
+ * FASTPROX_CUDA_PLUGIN when it is set, else from the directory of this
+ * library, else by name through the system's library search path. Without
+ * it, or without a device, arrays on a device give FP_EINVAL as before.
+ * ---------------------------------------------------------------------- */
+
+/* 1 for FP_DEVICE_CPU; for FP_DEVICE_CUDA, 1 when the plugin is loaded and
+ * sees a device; else 0. */
+FP_API int fp_device_available(fp_device dev);
+
+/* FP_OK when op runs on dev, FP_EINVAL otherwise (and for a device that is
+ * not available). *row_parallel_only (may be NULL) is set to 1 when one row
+ * of op never uses more than one thread there, so a batch of few long rows
+ * runs slowly: on the CPU, every operator with rows that is not elementwise. */
+FP_API fp_status fp_op_device_check(const fp_op *op, fp_device dev, int *row_parallel_only);
+
+/* The stream of a workspace created with a device `like`: a cudaStream_t
+ * passed as void*, NULL for the legacy default stream; calls on the
+ * workspace run on it. A workspace serves one stream at a time. CPU
+ * workspaces: FP_EINVAL. */
+FP_API fp_status fp_workspace_set_stream(fp_workspace *ws, void *stream);
+FP_API fp_status fp_workspace_get_stream(const fp_workspace *ws, void **stream);
+
+/* The fp_info of the last fp_prox or fp_prox_conj call on ws, and its status:
+ * FP_OK, or FP_ENOTCONV when an iterative operator stopped before tol. On a
+ * device it is valid once the stream has reached the end of that call, so a
+ * caller that passes info = NULL to fp_prox need not wait for it. FP_EINVAL
+ * before a call, or after one that failed. */
+FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
+
+/* fp_vjp with the step's gradient written to ggamma, a 0-d FP_F32 or FP_F64
+ * array on the workspace's device (may be NULL), so that a device call need
+ * not wait for its stream. */
+FP_API fp_status fp_vjp_device(const fp_op *op, const fp_workspace *ws, const fp_array *g,
+                               fp_array *gx, fp_array *ggamma, fp_array *gparams);
 
 FP_API const char *fp_strerror(fp_status s);
 FP_API int         fp_abi_version(void);

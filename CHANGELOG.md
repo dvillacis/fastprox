@@ -13,6 +13,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **PyTorch and JAX:** `fastprox.torch.prox` and `fastprox.jax.prox` take spectral operators, with the decomposition and the matrix products in the framework on the input's device (GPU included) and the $k \times k$ core on the CPU. Gradients reach `x`, `gamma`, and `lam` or `radius` when `NuclearNorm` or `SpectralNormBall` is passed as a class; PyTorch also has forward mode, JAX `jit` and `vmap`.
   - **Tests:** finite differences on matrices with repeated and zero singular values, where autograd through `torch.linalg.svd` gives NaN or a gradient 28–35% off, and Candès et al.'s closed-form divergence.
   - The design and its sources are in docs/spec.md, "Spectral operators".
+- The device API of the GPU backend, which has no kernels yet: `FP_DEVICE_CUDA` (DLPack's value 2) and the status `FP_EDEVICE`. The C library loads the CUDA plugin, `libfastprox_cuda`, on first use. It looks first at the path in `FASTPROX_CUDA_PLUGIN`, then next to the library, then on the system's search path, and takes the plugin only from the same version. Arrays on a device still return `FP_EINVAL`. New functions, which already work on the CPU:
+  - `fp_device_available` and `fp_op_device_check`. The latter also reports whether one row of an operator is limited to one thread.
+  - `fp_workspace_info`: the `fp_info` and status of the last prox call on a workspace.
+  - `fp_vjp_device`: `fp_vjp` with the step's gradient in a 0-d array.
+  - `fp_workspace_set_stream` and `fp_workspace_get_stream`, for device workspaces.
+  - Tests: CTest runs the loader against a stub plugin, a plugin of another version, a missing one and an empty `FASTPROX_CUDA_PLUGIN`.
 
 ## [1.0.0rc1] — 2026-10-20
 

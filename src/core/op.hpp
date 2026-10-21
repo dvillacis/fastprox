@@ -107,6 +107,9 @@ struct fp_op {
     // Validates the step the kernel will use (1/sigma after fp_prox_conj):
     // FP_EPARAM where the prox is not single-valued (SCAD, MCP).
     virtual fp_status check_step(double) const noexcept { return FP_OK; }
+    // Whether one row or image can use several threads on the CPU
+    // (fp_op_device_check): elementwise maps, and image operators that say so.
+    virtual bool splits_rows() const noexcept { return elementwise(); }
     // True when the prox can be set-valued at thresholds (nonconvex maps):
     // prox_run then applies the tie rule and counts the entries on a tie.
 

@@ -17,7 +17,8 @@ Exact proximal operators with JVP/VJP. C++17 core behind the plain-C header
 - `src/core/op.hpp` — `fp_op` base class; `ElemOp<D>` (elementwise, needs `prox1`/`deriv1`) and `RowOp<D>` (row kernels `prox`/`jvp`/`vjp`) CRTP helpers.
 - `src/core/driver.hpp` — batching over strided n-d arrays, saved structure; `src/core/parallel.cpp` — the thread pool (no OpenMP: bundled libomp copies abort each other, e.g. next to PyTorch); `src/core/layout.hpp` — row and elementwise iteration plans.
 - `src/ops/*.cpp` — one file per operator family, each with a `make_*` factory declared in `src/ops/ops.hpp`.
-- `src/api/api.cpp` — the only `extern "C"` code: validation, dtype dispatch, try/catch.
+- `src/api/api.cpp` — the only `extern "C"` code of the library: validation, dtype dispatch, try/catch.
+- `src/device/` — the CUDA plugin's loader and its private, versioned table (docs/spec.md, "GPU backend"); the plugin's one export is `fastprox_cuda_plugin`.
 - `bindings/python/src/module.cpp` calls only the C API; `bindings/python/fastprox/__init__.py` is the user-facing package.
 
 ## Tracking
