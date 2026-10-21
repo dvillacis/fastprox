@@ -204,6 +204,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.dparams.resize(static_cast<size_t>(P) + 1);
             w.deriv_res.resize(static_cast<size_t>(B));
             w.deriv_its.resize(static_cast<size_t>(B));
+            w.steps.resize(static_cast<size_t>(B));
             if (op.has_branches())
                 w.branch.resize(static_cast<size_t>(std::max(w.numel, B * op.kink_sites())) + 1);
         }
@@ -228,6 +229,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
         w.tot.resize(static_cast<size_t>(P + 2));
         w.dparams.resize(static_cast<size_t>(P) + 1);
+        w.steps.resize(static_cast<size_t>(w.rows) + 1);
     }
     return FP_OK;
 }
@@ -236,8 +238,30 @@ int resolve_threads(const fp_options &o) noexcept {
     return o.threads > 0 ? o.threads : default_threads();
 }
 
+// The steps of fp_prox_steps: an array of the batch shape, x's shape without
+// the axis (row and elementwise operators) or without the image axes.
+fp_status read_steps(const fp_op &op, const fp_array *sa, const Arr &x, int axis, Steps &st) noexcept {
+    Arr t;
+    if (fp_status s = to_arr(sa, t)) return s;
+    const int k = op.image_ndim();
+    const int nb = k ? x.ndim - k : x.ndim - 1;
+    if (sa->ndim != nb) return FP_ESHAPE;
+    st.data = t.data;
+    st.dtype = t.dtype;
+    st.ndim = nb;
+    for (int d = 0, e = 0; d < (k ? nb : x.ndim); ++d) {
+        if (!k && d == axis) continue;
+        if (t.shape[e] != x.shape[d]) return FP_ESHAPE;
+        st.shape[e] = t.shape[e];
+        st.stride[e] = t.strides[e];
+        ++e;
+    }
+    return FP_OK;
+}
+
 fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *oa,
-                    const fp_options *opt, fp_workspace *ws, fp_info *info, bool conj) {
+                    const fp_options *opt, fp_workspace *ws, fp_info *info, bool conj,
+                    const fp_array *sa = nullptr) {
     if (!op || !xa || !oa) return FP_EINVAL;
     if (!finite(step) || step < 0) return FP_EPARAM;
     const fp_options o = opt ? *opt : defaults();
@@ -251,6 +275,11 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     if (norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
     const bool keep = o.keep_structure != 0;
     if (keep && !ws) return FP_EINVAL;
+    Steps steps;
+    if (sa) {
+        if (op->image_ndim() && x.ndim < op->image_ndim()) return FP_ESHAPE;
+        if (fp_status s = read_steps(*op, sa, x, axis, steps)) return s;
+    }
 
     std::unique_ptr<fp_workspace> local;
     int nt = resolve_threads(o);
@@ -261,6 +290,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
             if (ws->shape[d] != x.shape[d]) return FP_ESHAPE;
         if (keep && !ws->keep) return FP_EINVAL;
         ws->valid = false;
+        ws->steps_on = false;
         ws->branch_on = false;  // a branch override belongs to the point it was set for
         ws->override_on = false;
         nt = std::min(nt, ws->nthreads);
@@ -305,25 +335,38 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     }
     const double gamma = conj ? 1.0 / step : step;
     const double sigma = conj ? step : 0.0;
-    if (fp_status s = op->check_step(gamma)) return s;
+    const Steps *sp = sa ? &steps : nullptr;
+    if (sp) {
+        // Every step before any work; a kept call saves them for the derivatives.
+        for (int64_t r = 0; r < ws->rows; ++r) {
+            const double v = steps.at(r);
+            if (!finite(v) || v < 0) return FP_EPARAM;
+            if (fp_status s = op->check_step(v)) return s;
+        }
+        if (keep)
+            for (int64_t r = 0; r < ws->rows; ++r) ws->steps.data()[r] = steps.at(r);
+    } else if (fp_status s = op->check_step(gamma)) {
+        return s;
+    }
     if (k) {
         fp_status s = x.dtype == FP_F32
                           ? image_prox_driver<float>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
-                                                     o.tol, o.max_iter, info)
+                                                     o.tol, o.max_iter, info, sp)
                           : image_prox_driver<double>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
-                                                      o.tol, o.max_iter, info);
+                                                      o.tol, o.max_iter, info, sp);
         if ((s == FP_OK || s == FP_ENOTCONV) && keep) {
             ws->valid = true;
             ws->conj = conj;
             ws->gamma = gamma;
             ws->sigma = sigma;
+            ws->steps_on = sp != nullptr;
         }
         return s;
     }
     int64_t ties = 0;
     fp_status s = x.dtype == FP_F32
-                      ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties)
-                      : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties);
+                      ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties, sp)
+                      : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties, sp);
     if (info) info->ties = ties;
     if (s == FP_OK && keep) {
         ws->valid = true;
@@ -331,17 +374,18 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         ws->gamma = gamma;
         ws->sigma = sigma;
         ws->tie = o.tie;
+        ws->steps_on = sp != nullptr;
     }
     return s;
 }
 
 // prox_impl, keeping the call's fp_info and status in ws for fp_workspace_info.
 fp_status prox_call(const fp_op *op, double step, const fp_array *xa, fp_array *oa, const fp_options *opt,
-                    fp_workspace *ws, fp_info *info, bool conj) {
-    if (!ws) return prox_impl(op, step, xa, oa, opt, ws, info, conj);
+                    fp_workspace *ws, fp_info *info, bool conj, const fp_array *sa = nullptr) {
+    if (!ws) return prox_impl(op, step, xa, oa, opt, ws, info, conj, sa);
     ws->info_valid = false;
     fp_info local = {0.0, 0, 0};
-    const fp_status s = prox_impl(op, step, xa, oa, opt, ws, info ? info : &local, conj);
+    const fp_status s = prox_impl(op, step, xa, oa, opt, ws, info ? info : &local, conj, sa);
     if (s == FP_OK || s == FP_ENOTCONV) {
         ws->info = info ? *info : local;
         ws->info_status = s;
@@ -643,7 +687,7 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
             }
             const double *dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
             const int64_t S = op.kink_sites() ? op.kink_sites() : N;  // sides per image
-            op.branch_image(ws.image_struct(r), xb.data(), zb.data(), dual, ishape, ws.gamma, t,
+            op.branch_image(ws.image_struct(r), xb.data(), zb.data(), dual, ishape, ws.step(r), t,
                             side + r * S, ws.image_set(0) + image_staging_bytes(N));
         }
         return;
@@ -660,7 +704,7 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
             xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
             zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
         }
-        op.branch_row(xb.data(), zb.data(), ws.code.data() + r * n, n, ws.gamma, t, side + r * n, scr.data());
+        op.branch_row(xb.data(), zb.data(), ws.code.data() + r * n, n, ws.step(r), t, side + r * n, scr.data());
     }
 }
 
@@ -1282,6 +1326,14 @@ FP_API fp_status fp_workspace_set_warm(fp_workspace *ws, int on) {
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x, fp_array *out,
                          const fp_options *opt, fp_workspace *ws, fp_info *info) {
     return guard([&] { return fp::prox_call(op, gamma, x, out, opt, ws, info, false); });
+}
+
+FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_array *x, fp_array *out,
+                               const fp_options *opt, fp_workspace *ws) {
+    return guard([&] {
+        if (!gamma) return FP_EINVAL;
+        return fp::prox_call(op, 1.0, x, out, opt, ws, nullptr, false, gamma);
+    });
 }
 
 FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out) {

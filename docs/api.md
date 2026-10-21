@@ -697,6 +697,36 @@ fp_workspace_free(ws);
   reads as $\sigma$.
 - A workspace is used by one call at a time; use one per thread.
 
+### One step per row (*since 1.1*)
+
+```c
+/* gamma: the batch shape, x's shape without opt.axis (without the image axes
+ * for the image operators); float32 or float64, any strides */
+fp_prox_steps(op, &gamma, &x, &z, &opt, ws);
+fp_workspace_info(ws, &info);                /* fp_info of the call */
+```
+
+`fp_prox_steps` is `fp_prox` with one step per row, image or matrix, as
+DeepInverse's denoisers take one noise level per image. A stride of 0
+broadcasts a step over a dimension, and a single row takes a 0-d array. Each
+row gives what `fp_prox` gives on that row alone with its step, bit for bit,
+for any thread count. Every step is checked before any work: `FP_EPARAM` for a
+negative or non-finite step, or one that breaks the operator's step condition
+(SCAD, MCP).
+
+With `keep_structure`, the steps are saved for the derivatives:
+
+- `fp_jvp`'s `dgamma` moves every row's step by `dgamma`.
+- `fp_vjp`'s `ggamma` is the sum over rows of each row's gradient in its own
+  step.
+- The gradient in one row's step is the sum over that row of $g$ times the
+  output of `fp_jvp(op, ws, NULL, 1.0, NULL, &t)`, which is
+  $\partial z / \partial \gamma$ of every row at its step.
+
+There is no conjugate form. In Python, `gamma` may be an array that broadcasts
+to the batch shape, in `prox` (and `prox_from` for spectral operators). The
+PyTorch and JAX wrappers still take a scalar step.
+
 ### Warm starts and the dual (*since 0.2*)
 
 ```c
