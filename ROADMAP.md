@@ -142,6 +142,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
   - [x] 1.0.0rc1: the version (`FP_VERSION_MAJOR` and `FP_ABI_VERSION` 1, soname `libfastprox.so.1`), a TestPyPI dry run, the tag and a GitHub release — Released (2026-10-20): `v1.0.0rc1` on cda044a, on PyPI as a pre-release (`pip install --pre fastprox`; plain `pip install` still gets 0.5.0) with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The `abi` job passed against v0.5.0
   - [ ] 1.0.0 after some use of the rc, as for 0.3: the version without the suffix, the README's pre-release line removed, a TestPyPI dry run, the tag and a GitHub release
   - [ ] At 1.0.0, in the conda-forge feedstock: `run_exports` from `x.x` to `x`, as the ABI then holds for every 1.x
+- [x] Release 0.5.1, a patch on 0.5.0 with the tv1d_l2 fix (#76), for `pip install fastprox` while 1.0 is a release candidate — Released (2026-10-21): `v0.5.1` on c636d21 of the `release/0.5.x` branch (cut from `v0.5.0`, the two fix commits cherry-picked), on PyPI with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and passed the fuzz case in a clean environment; `pip install fastprox` gets it. The fix reaches 1.0.0 from master
 
 ## 1.x — GPU backend
 
