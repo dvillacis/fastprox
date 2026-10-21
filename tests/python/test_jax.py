@@ -12,7 +12,7 @@ from jax.test_util import check_grads  # noqa: E402
 import fastprox as fp  # noqa: E402
 import fastprox.jax as fpj  # noqa: E402
 
-from interop_cases import built, cases, spectral_cases  # noqa: E402
+from interop_cases import built, cases, row_steps, spectral_cases  # noqa: E402
 
 CASES = cases()
 IDS = [c[0] for c in CASES]
@@ -66,6 +66,40 @@ def test_grad_matches_vjp_under_jit():
     np.testing.assert_array_equal(np.asarray(dx), gx)
     np.testing.assert_array_equal(np.asarray(dw), grads.weights)
     assert float(ds) == grads.gamma
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_steps_grads(case):
+    """One step per row (fp_prox_steps), each row's step gradient from a JVP
+    in gamma; also under jit."""
+    _, cls, const, params, x, step, conj, call = case
+    s = row_steps(case)
+    if conj:
+        with pytest.raises(ValueError, match="scalar sigma"):
+            fpj.prox_conj(cls, jnp.asarray(x), jnp.asarray(s), **const, **params, **call)
+        return
+    fn = lambda x, s: fpj.prox(cls, x, s, **const, **params, **call)  # noqa: E731
+    check_grads(fn, (jnp.asarray(x), jnp.asarray(s)), order=1, modes=["rev"], eps=1e-6)
+    op = cls(**const, **params)
+    np.testing.assert_array_equal(np.asarray(jax.jit(fn)(jnp.asarray(x), jnp.asarray(s))),
+                                  op.prox(x, s, **call))
+
+
+def test_steps_broadcast_and_spectral():
+    rng = np.random.default_rng(6)
+    x, g = rng.normal(size=(4, 3, 20)).cumsum(-1), rng.normal(size=(4, 3, 20))
+    s = rng.uniform(0.2, 1.0, (4, 1))
+    op = fp.TV1D()
+    gs = jax.jit(jax.grad(lambda s: jnp.vdot(fpj.prox(op, jnp.asarray(x), s), g)))(jnp.asarray(s))
+    assert gs.shape == (4, 1)
+    for i in range(4):
+        gr = [op.vjp(op.prox(x[i, j], s[i, 0], keep=True)[1], g[i, j])[1].gamma for j in range(3)]
+        assert float(gs[i, 0]) == pytest.approx(sum(gr), rel=1e-11, abs=1e-12)
+    xm, sm = rng.normal(size=(2, 3, 5, 4)) * 1.5, rng.uniform(0.4, 1.0, (2, 3))
+    fn = lambda x, s, lam: fpj.prox(fp.NuclearNorm, x, s, lam=lam)  # noqa: E731
+    check_grads(fn, (jnp.asarray(xm), jnp.asarray(sm), jnp.asarray(0.6)), order=1, modes=["rev"], eps=1e-6)
+    check_grads(lambda x, s: fpj.prox(fp.PSD(), x, s), (jnp.asarray(xm[:, :, :4]), jnp.asarray(sm)),
+                order=1, modes=["rev"], eps=1e-6)
 
 
 def test_vmap():

@@ -9,7 +9,7 @@ torch = pytest.importorskip("torch")
 import fastprox as fp  # noqa: E402
 import fastprox.torch as fpt  # noqa: E402
 
-from interop_cases import built, cases, spectral_cases  # noqa: E402
+from interop_cases import built, cases, row_steps, spectral_cases  # noqa: E402
 
 CASES = cases()
 IDS = [c[0] for c in CASES]
@@ -62,6 +62,49 @@ def test_backward_matches_vjp():
     np.testing.assert_array_equal(xt.grad.numpy(), gx)
     np.testing.assert_array_equal(wt.grad.numpy(), grads.weights)
     assert st.grad.item() == grads.gamma
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_steps_gradcheck(case):
+    """One step per row (fp_prox_steps): each row's step gradient from a JVP
+    in gamma, forward mode through each row's dz/dgamma."""
+    _, cls, const, params, x, step, conj, call = case
+    s = row_steps(case)
+    if conj:
+        with pytest.raises(ValueError, match="scalar sigma"):
+            fpt.prox_conj(cls, _t(x), _t(s), **const, **params, **call)
+        return
+    fn = lambda x, s: fpt.prox(cls, x, s, **const, **params, **call)  # noqa: E731
+    assert torch.autograd.gradcheck(fn, (_t(x), _t(s)), check_forward_ad=True)
+
+
+def test_steps_match_rows():
+    rng = np.random.default_rng(6)
+    x, g = rng.normal(size=(4, 3, 20)).cumsum(-1), rng.normal(size=(4, 3, 20))
+    s = rng.uniform(0.2, 1.0, (4, 1))  # broadcast over the second axis
+    op = fp.TV1D(weights=rng.uniform(0.5, 1.5, 19))
+    xt, st = _t(x), _t(s)
+    z = fpt.prox(op, xt, st)
+    np.testing.assert_array_equal(z.detach().numpy(), op.prox(x, np.broadcast_to(s, (4, 3))))
+    (z * torch.tensor(g)).sum().backward()
+    assert st.grad.shape == (4, 1)
+    for i in range(4):
+        gr = [op.vjp(op.prox(x[i, j], s[i, 0], keep=True)[1], g[i, j])[1].gamma for j in range(3)]
+        assert st.grad[i, 0].item() == pytest.approx(sum(gr), rel=1e-11, abs=1e-12)
+    # Along the first axis, steps over the remaining one.
+    xa = _t(x[:, 0].T.copy())
+    sa = _t(rng.uniform(0.2, 1.0, 4))
+    fpt.prox(op, xa, sa, axis=0).sum().backward()
+    ref = [op.vjp(op.prox(x[i, 0], sa[i].item(), keep=True)[1], np.ones(20))[1].gamma for i in range(4)]
+    np.testing.assert_allclose(sa.grad.numpy(), ref, rtol=1e-11, atol=1e-12)
+    with pytest.raises(ValueError, match="broadcast"):
+        fpt.prox(op, xt, _t(np.ones(4)))
+    # A single value in any shape is a scalar step, as before 1.1.
+    x1 = _t(x[0, 0])
+    s1 = _t([0.5])
+    fpt.prox(op, x1, s1).sum().backward()
+    assert s1.grad.shape == (1,)
+    assert s1.grad.item() == op.vjp(op.prox(x[0, 0], 0.5, keep=True)[1], np.ones(20))[1].gamma
 
 
 def test_float32_strides_no_grad():
@@ -156,6 +199,26 @@ def test_spectral_matches_numpy(case):
     assert st.grad.item() == pytest.approx(grads.gamma, abs=1e-12)
     for k, v in pt.items():
         assert v.grad.item() == pytest.approx(getattr(grads, k), abs=1e-12)
+
+
+@pytest.mark.parametrize("op, params, shape", [
+    (fp.NuclearNorm, {"lam": 0.6}, (4, 5, 3)),
+    (fp.SpectralNormBall, {"radius": 1.2}, (2, 3, 3, 6)),
+    (fp.PSD(), {}, (3, 4, 4)),
+], ids=["nuclear", "spectral_ball", "psd"])
+def test_spectral_steps(op, params, shape):
+    """One step per matrix: gradcheck in both modes, and the prox against
+    matrix-by-matrix calls."""
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=shape) * 1.5
+    s = rng.uniform(0.4, 1.0, shape[:-2])
+    pt = {k: _t(v) for k, v in params.items()}
+    fn = lambda x, s, *v: fpt.prox(op, x, s, **dict(zip(pt, v)))  # noqa: E731
+    assert torch.autograd.gradcheck(fn, (_t(x), _t(s), *pt.values()), check_forward_ad=not pt)
+    ref = _spectral_op(op, params)
+    z = fpt.prox(op, torch.tensor(x), torch.tensor(s), **params).numpy()
+    for i in np.ndindex(shape[:-2]):
+        np.testing.assert_allclose(z[i], ref.prox(x[i], s[i]), atol=1e-13)
 
 
 def test_spectral_ties():

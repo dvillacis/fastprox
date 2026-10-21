@@ -4,6 +4,8 @@ library's own derivatives."""
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from . import Operator, Spectral, _ImageOperator
@@ -62,8 +64,30 @@ class Spec:
     def run(self, op, x, step):
         """(z, ctx) with the structure kept for jvp and vjp."""
         f = op.prox_conj if self.conj else op.prox
-        return f(x, float(step), threads=self.threads, keep=True, **self.call)
+        return f(x, steps(step), threads=self.threads, keep=True, **self.call)
 
+    def row_axes(self, op, ndim):
+        """The axes of x that a step does not vary over: the operator's axis,
+        or the image axes."""
+        if isinstance(op, _ImageOperator):
+            return tuple(range(ndim - op.ndim, ndim))
+        return (self.call.get("axis", -1) % ndim,) if ndim else ()
+
+    def step_grad(self, op, ctx, g, grads, shape):
+        """The gradient of a step of the given shape: grads.gamma for a
+        scalar, else each row's <g, dz/dgamma> (fp_jvp with dgamma = 1)
+        summed to the step's shape."""
+        if math.prod(shape) == 1:
+            return np.full(shape, grads.gamma)
+        t = op.jvp(ctx, None, 1.0)
+        return sum_to(np.sum(g * t, axis=self.row_axes(op, g.ndim)), shape)
+
+    def step_tangent(self, op, ctx, dstep):
+        """dz from a step tangent of the step's shape, one per row."""
+        t = op.jvp(ctx, None, 1.0)
+        axes = self.row_axes(op, t.ndim)
+        batch = tuple(n for i, n in enumerate(t.shape) if i not in axes)
+        return t * np.expand_dims(np.broadcast_to(dstep, batch), axes)
     def param_grads(self, op, grads, shapes):
         """The gradient of each differentiable parameter, shaped like it; NaN
         for a parameter without one."""
@@ -102,6 +126,39 @@ class Spec:
                 raise ValueError(f"forward-mode derivatives of {type(op).__name__} with respect to "
                                  f"{k!r} are not available")
         return op._flatten(given)
+
+
+def check_step(step, conj):
+    """Steps per row are for prox only, as in the NumPy API."""
+    n = step.numel() if hasattr(step, "numel") else np.size(step)  # torch, or arrays and numbers
+    if conj and n > 1:
+        raise ValueError("prox_conj takes a scalar sigma")
+
+
+def steps(step):
+    """A step for the NumPy API: a float (from any single value), or (since
+    1.1) an array of one step per row."""
+    s = np.asarray(step, np.float64)
+    return float(s.reshape(())) if s.size == 1 else s
+
+
+def sum_to(a, shape):
+    """a summed over the axes that broadcasting added or stretched to reach
+    its shape from shape: the gradient of a broadcast step."""
+    a = np.asarray(a)
+    lead = a.ndim - len(shape)
+    a = a.sum(axis=tuple(range(lead))) if lead else a
+    stretched = tuple(i for i, n in enumerate(shape) if n == 1 and a.shape[i] != 1)
+    return a.sum(axis=stretched, keepdims=True) if stretched else a
+
+
+def spectral_step_grad(op, inner, a, grads, shape):
+    """step_grad for a spectral operator: each matrix's <diag(A), ds/dgamma>,
+    with ds/dgamma of the spectrum from the inner operator's JVP."""
+    if math.prod(shape) == 1:
+        return np.full(shape, grads.gamma)
+    t = op.op.jvp(inner, None, 1.0)
+    return sum_to(np.sum(np.diagonal(a, axis1=-2, axis2=-1) * t, axis=-1), shape)
 
 
 def _derived(op):

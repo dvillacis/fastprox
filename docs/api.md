@@ -727,8 +727,8 @@ With `keep_structure`, the steps are saved for the derivatives:
   $\partial z / \partial \gamma$ of every row at its step.
 
 There is no conjugate form. In Python, `gamma` may be an array that broadcasts
-to the batch shape, in `prox` (and `prox_from` for spectral operators). The
-PyTorch and JAX wrappers still take a scalar step.
+to the batch shape, in `prox` (and `prox_from` for spectral operators), and
+so may `gamma` in `fastprox.torch.prox` and `fastprox.jax.prox` (below).
 
 ### Warm starts and the dual (*since 0.2*)
 
@@ -1045,6 +1045,12 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   parameters are then constants, or an operator class with its constructor
   arguments as keywords. `axis` (row operators), `tol` and `max_iter`
   (iterative operators) are passed on when given.
+- **One step per row** (*since 1.1*). `gamma` may be a tensor or array that
+  broadcasts to the batch shape: `x`'s shape without `axis`, the image axes
+  or the matrix axes. Its gradient is each row's
+  $\langle g, \partial z / \partial \gamma \rangle$, from one more JVP in $\gamma$, summed back
+  to `gamma`'s own shape; in PyTorch's forward mode a tangent of that shape
+  moves each row's step. `prox_conj` takes a scalar `sigma`.
 - **Parameter gradients.** A parameter gets the gradient of the `Grads` field
   of the same name (see `Operator.vjp`): in PyTorch, float tensors that
   require grad; in JAX, JAX float arrays (Python and NumPy values are
