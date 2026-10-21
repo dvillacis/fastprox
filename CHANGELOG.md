@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `fp_workspace_set_stream` and `fp_workspace_get_stream`, for device workspaces.
   - Tests: CTest runs the loader against a stub plugin, a plugin of another version, a missing one and an empty `FASTPROX_CUDA_PLUGIN`.
 
+### Fixed
+
+- 1D TV with the ℓ2 norm (since 0.5): NaN where the root of the secular equation lies far below the scale of the entries, as when entries near 10⁻¹⁴⁷ have only an edge of weight 4·10⁻¹⁴⁹ between them (μ* ≈ 2·10⁻²⁹⁵, in a conjugate prox in the nightly fuzz run). σx underflowed in the tridiagonal solves, so ‖W D z‖ was 0 at every μ, bisection drove μ to 0, and the zero pivot of a zero weight gave NaN. The Newton solves now run on the centred row and γ scaled by a power of two that brings the largest entry to [½, 1). This is exact, so other rows give bit-identical results. Bisection also stops when the bracket can no longer be split. Tested in `tests/python/test_tv1d_l2.py` against the closed form for two rigid blocks.
+
 ## [1.0.0rc1] — 2026-10-20
 
 The release candidate for 1.0, on PyPI as a pre-release (`pip install --pre fastprox`). The C ABI is now frozen: until 2.0 it only grows, and CI checks that against the last release. Its ABI is that of 0.5.0, unchanged, under a new major version. The operators and the Python API are those of 0.5.0.

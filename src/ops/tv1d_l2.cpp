@@ -229,6 +229,20 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         }
         double mu = (rho0 / gamma - 1.0) * rho0sq / kap0;  // Newton from mu = 0
         if (!(mu > L && mu < R)) mu = 0.5 * (L + R);
+        // The solves run on xc and gamma times t = 2^k with max |t xc| in
+        // [0.5, 1): z - mean is homogeneous in (xc, gamma) and mu is unchanged,
+        // and a power of two scales every rounded result exactly. Unscaled,
+        // sigma xc_j underflowed to 0 for mu = 2e-295 at xc ~ 1e-147 (a weight
+        // of 4e-149 between near-zero entries; found by fuzzing): s was 0 at
+        // every mu, bisection drove mu to 0 and the zero pivot of a zero weight
+        // gave NaN.
+        double t = 0.0;
+        for (int64_t i = 0; i < n; ++i) t = std::fmax(t, std::fabs(xc[i]));
+        int k;
+        std::frexp(t, &k);
+        t = std::ldexp(1.0, -k);
+        for (int64_t i = 0; i < n; ++i) xc[i] *= t;
+        gamma *= t;
         // zc = (sigma I + kappa K)^{-1} sigma xc at mu, returning s; y likewise
         // from zc, returning S.
         auto solve_z = [&](double m, double &sigma, double &kappa) {
@@ -252,10 +266,11 @@ struct TV1DL2 final : RowOp<TV1DL2> {
                 break;
             }
             if (!(next > L && next < R)) next = 0.5 * (L + R);
+            if (!(next > L && next < R)) break;  // the bracket is two adjacent doubles
             mu = next;
         }
         for (int64_t i = 0; i < n; ++i)
-            z[i] = static_cast<T>(static_cast<double>(x[i]) - (xc[i] - zc[i]));
+            z[i] = static_cast<T>(static_cast<double>(x[i]) - (xc[i] - zc[i]) / t);
         return kRowOk;
     }
 
