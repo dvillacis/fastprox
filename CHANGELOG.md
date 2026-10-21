@@ -21,6 +21,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `fp_workspace_set_stream` and `fp_workspace_get_stream`, for device workspaces.
   - Tests: CTest runs the loader against a stub plugin, a plugin of another version, a missing one and an empty `FASTPROX_CUDA_PLUGIN`.
 
+### Fixed
+
+- 1D TV with the ℓ2 norm (since 0.5): wrong results, and NaN, on rows whose weights or entries span many orders of magnitude. Found by the nightly fuzz run: NaN on entries near 10⁻¹⁴⁷ with only an edge of weight 4·10⁻¹⁴⁹ between them (μ* ≈ 2·10⁻²⁹⁵, in a conjugate prox). Three causes:
+  - σx underflowed in the tridiagonal solves, so ‖W D z‖ was 0 at every μ, bisection drove μ to 0, and the zero pivot of a zero weight gave NaN.
+  - ‖W D z‖ was computed from differences of z, which carry its rounding: one ulp of z across an edge of weight 0.5 is 10⁻¹⁷, which hid an edge whose part was 10⁻¹⁵⁰. The Newton iteration now runs on the differences, B Dz = μ D x with B = μI + D Dᵀ W² on the edges. B is an M-matrix whose pivots are kept in the same cancellation-free excess form. The step is taken in the normalised dual u/γ. z still comes from one solve with μI + K at the final μ.
+  - ‖u₀‖² underflowed for small rows, which passed them as inside. The inside test and the iteration now run on the centred row and γ scaled by a power of two that brings the largest entry to [½, 1). Bisection runs in the exponent, so a root 150 orders of magnitude below its bracket takes a few steps, not 500.
+
+  On such rows the old results were off by up to 100% of max|x|; they now agree with a 700-digit solver to 2·10⁻¹⁶. Ordinary rows change only by rounding, at the same speed. Tested in `tests/python/test_tv1d_l2.py`: the fuzz input against the closed form for two rigid blocks, and scale invariance over 2^±600 for 300 rows with weights over 150 orders of magnitude.
+
 ## [1.0.0rc1] — 2026-10-20
 
 The release candidate for 1.0, on PyPI as a pre-release (`pip install --pre fastprox`). The C ABI is now frozen: until 2.0 it only grows, and CI checks that against the last release. Its ABI is that of 0.5.0, unchanged, under a new major version. The operators and the Python API are those of 0.5.0.
