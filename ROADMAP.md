@@ -140,7 +140,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 - [~] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
   - [x] The check (2026-10-20): the `abi` CI job compares the library, built with debug information, against the last release (rc tags excluded; 0.5.0 until 1.0 is out) with `abidiff --no-added-syms`, on the types of `fastprox.h`; publishing waits for it. CMake requires `FP_ABI_VERSION` to equal the major version, which is the soname's. The policy is written in docs/api.md ("ABI stability"). Probed with a throwaway commit (#64): an added function passed, and a field added to `fp_info` failed the job (size 192 → 256 bits, through `fp_prox`)
   - [x] 1.0.0rc1: the version (`FP_VERSION_MAJOR` and `FP_ABI_VERSION` 1, soname `libfastprox.so.1`), a TestPyPI dry run, the tag and a GitHub release — Released (2026-10-20): `v1.0.0rc1` on cda044a, on PyPI as a pre-release (`pip install --pre fastprox`; plain `pip install` still gets 0.5.0) with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The `abi` job passed against v0.5.0
-  - [ ] 1.0.0 after some use of the rc and once the 1.0.0 items of the audit below have landed (through 1.0.0rc2, A11), as for 0.3: the version without the suffix, the README's pre-release line removed, a TestPyPI dry run, the tag and a GitHub release
+  - [ ] 1.0.0 after some use of the rc and once the 1.0.0 items of the audit and of the user feedback below have landed (through 1.0.0rc2, A11, and an rc3 if the feedback items land after it), as for 0.3: the version without the suffix, the README's pre-release line removed, a TestPyPI dry run, the tag and a GitHub release
   - [ ] At 1.0.0, in the conda-forge feedstock: `run_exports` from `x.x` to `x`, as the ABI then holds for every 1.x
 - [x] Release 0.5.1, a patch on 0.5.0 with the tv1d_l2 fix (#76), for `pip install fastprox` while 1.0 is a release candidate — Released (2026-10-21): `v0.5.1` on c636d21 of the `release/0.5.x` branch (cut from `v0.5.0`, the two fix commits cherry-picked), on PyPI with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and passed the fuzz case in a clean environment; `pip install fastprox` gets it. The fix reaches 1.0.0 from master
 
@@ -224,17 +224,17 @@ its row to the decisions table when it lands.
 
 - [ ] P1: exact second-order reverse mode through the linear part and where the Jacobian is locally constant, NaN elsewhere — [spec](docs/audit-2026-10.md#p1)
 
-## 1.x — user feedback of 2026-10-23
+## 1.0 — user feedback of 2026-10-23
 
-Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing paper experiments with the library.
+Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing paper experiments with the library. Every item gates 1.0.0 (decided 2026-10-23), with the decisions recorded at the end of the doc.
 
-- [ ] U1: Accuracy in the units of z: the √tol bound in the docs (1.0.0), `ztol=` and `IterInfo.zerr` (1.1) — [spec](docs/feedback-2026-10.md#u1)
+- [ ] U1: Accuracy in the units of z: the √tol bound in the docs, `ztol=` and `IterInfo.zerr` — [spec](docs/feedback-2026-10.md#u1)
 - [ ] U2: Unconverged and too-loose calls are silent: `ConvergenceWarning`, the `fp.inner_accuracy` context — [spec](docs/feedback-2026-10.md#u2)
 - [ ] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
 - [ ] U4: Derivatives of iterative TV at loose gaps: `ctx.deriv.exact`, `ctx.refine` — [spec](docs/feedback-2026-10.md#u4)
 - [ ] U5: Weighted nuclear norm through a sorted ℓ1 (OWL/SLOPE) operator — [spec](docs/feedback-2026-10.md#u5)
 - [ ] U6: Spectral MCP divergence: get the reproducer, then test or fix — [spec](docs/feedback-2026-10.md#u6)
-- [ ] U7: Releases: 1.0.0, then 1.1.0rc1 with the spectral operators on PyPI — [spec](docs/feedback-2026-10.md#u7)
+- [ ] U7: Releases: 1.0.0rc2 (with the spectral operators) on PyPI, an rc3 if U1–U5 land after it, then 1.0.0 — [spec](docs/feedback-2026-10.md#u7)
 
 ## 1.x — GPU backend
 

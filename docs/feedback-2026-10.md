@@ -27,19 +27,21 @@ Each item follows the audit's format (`docs/audit-2026-10.md`): the problem, the
 change, its constraints under the project's rules, its tests and its
 acceptance criterion. The items are tracked in
 [ROADMAP.md](https://github.com/dvillacis/fastprox/blob/master/ROADMAP.md)
-under "1.x — user feedback of 2026-10-23".
+under "1.0 — user feedback of 2026-10-23". All of them gate 1.0.0 (decided
+2026-10-23). By A11, master ships as 1.0.0, so the C functions added here join
+the 1.0 ABI before it freezes, and need no "since" note.
 
 ## Summary
 
 | Item | Kind | Target | Effort |
 | --- | --- | --- | --- |
-| U1. Accuracy in the units of z | docs, API | docs 1.0.0; `ztol` 1.1 | S |
-| U2. Unconverged and too-loose calls are silent | usability | 1.1 | M |
-| U3. One set of derivative keywords on every operator | API | 1.1 | S |
-| U4. Derivatives of iterative TV at loose gaps | correctness | 1.1 | M |
-| U5. Weighted nuclear norm: the sorted ℓ1 norm | feature | 1.1 | M |
+| U1. Accuracy in the units of z | docs, API | 1.0.0 | S |
+| U2. Unconverged and too-loose calls are silent | usability | 1.0.0 | M |
+| U3. One set of derivative keywords on every operator | API | 1.0.0 | S |
+| U4. Derivatives of iterative TV at loose gaps | correctness | 1.0.0 | M |
+| U5. Weighted nuclear norm: the sorted ℓ1 norm | feature | 1.0.0 | M |
 | U6. Spectral MCP divergence: reproduce first | investigation | — | S |
-| U7. Releases, so that no one builds from a workspace | process | 1.0.0, 1.1 | S |
+| U7. Releases, so that no one builds from a workspace | process | 1.0.0rc2, 1.0.0 | S |
 
 ---
 
@@ -58,19 +60,19 @@ under "1.x — user feedback of 2026-10-23".
      - the bound;
      - the known conditions on prox errors for proximal gradient and its accelerated form, with the gap as the error measure. Schmidt, Le Roux and Bach (NeurIPS 2011) give a rate-preserving condition on the summability of √εₖ, with a factor k for the accelerated method. The exact statements are to be checked against the paper before the section lands;
      - the practical recipe: an inner `ztol` (item 2) a factor of 10 below the outer tolerance on z, or a decreasing schedule, with warm starts from the previous dual (`warm=True`), which make tight inner solves cheap near convergence.
-2. **`ztol=` (1.1).**
+2. **`ztol=`.**
    - **Where:** every iterative `prox`, `prox_conj` and `solve` in Python (TVAniso, TVIso, GraphTV, the `fastprox.torch` and `fastprox.jax` image functions, and their generic `prox` paths). It is the relative error of z to certify, and is mutually exclusive with `tol` (`ValueError` if both are given).
    - **Implementation:** it passes tol = ztol², so the per-image stopping rule is unchanged. A ztol whose square underflows (below about 1e-154) raises `ValueError` rather than silently meaning "run to max_iter".
    - **No C change.** fp_options.tol keeps its meaning, and its comment gains the √tol sentence.
-3. **`IterInfo.zerr` (1.1).**
+3. **`IterInfo.zerr`.**
    - **What:** maxᵢ √(2·gapᵢ)/‖xᵢ‖ over the images, the certified relative error of the worst image, in the units `ztol` takes.
-   - **Source:** per-image gaps come from a new C call, `fp_workspace_image_info(ws, gaps, iters)`, which writes the per-image gaps and iterations of the last call (FP_F64 and FP_I32 arrays of the batch shape). The workspace already holds them in `image_gaps` and `image_iters`; this is an ABI addition, allowed in 1.1.
+   - **Source:** per-image gaps come from a new C call, `fp_workspace_image_info(ws, gaps, iters)`, which writes the per-image gaps and iterations of the last call (FP_F64 and FP_I32 arrays of the batch shape). The workspace already holds them in `image_gaps` and `image_iters`. The function joins the 1.0 ABI.
    - **Values:** NaN for a NaN image (A8), and 0 where ‖xᵢ‖ = 0.
 
 **Constraints.**
 - **Determinism:** unchanged.
 - **Allocation:** `fp_workspace_image_info` copies existing buffers.
-- **ABI:** one new function (1.1).
+- **ABI:** one new function, in the 1.0 baseline.
 - **Spec:** no departure.
 
 **Tests.**
@@ -159,7 +161,7 @@ under "1.x — user feedback of 2026-10-23".
    - `ctx.deriv` becomes a named tuple `DerivInfo(residual, iters, exact, smoothing)`.
    - **`exact`:** for anisotropic TV, whether the derivative came from regions the polish certified. A new flag is saved in the structure, one byte, next to `ncomp`. Graph and tree TV are always exact. Isotropic TV is exact only at gap 0.
    - **`smoothing`:** μ for isotropic TV, scaled back to the input's units, and 0 elsewhere.
-   - **In C:** `fp_workspace_deriv_info` keeps its signature. A new `fp_workspace_deriv_exact(ws, int *exact, double *smoothing)` reports the two fields (1.1).
+   - **In C:** `fp_workspace_deriv_info` keeps its signature. A new `fp_workspace_deriv_exact(ws, int *exact, double *smoothing)` reports the two fields.
 2. **Refine on demand.**
    - **New call:** `ctx.refine(ztol)` in Python and `fp_workspace_refine(op, ws, tol, max_iter)` in C. It re-solves the kept call from its saved x and its saved dual, as a warm start, to the tighter tolerance, then rewrites the saved z, structure, dual and `fp_info`. The saved x and the steps are already in the workspace, so no input is needed. It returns `FP_ENOTCONV` as a prox would.
    - **Keyword shortcut:** `jvp(..., refine=ztol)` and `vjp(..., refine=ztol)` refine first.
@@ -170,7 +172,7 @@ under "1.x — user feedback of 2026-10-23".
 **Constraints.**
 - **Determinism:** a refine is an ordinary warm-started solve, bit-identical for any thread count.
 - **Allocation:** none with a workspace; the refine uses the workspace's scratch.
-- **ABI:** `fp_workspace_refine` and `fp_workspace_deriv_exact` (1.1).
+- **ABI:** `fp_workspace_refine` and `fp_workspace_deriv_exact`, in the 1.0 baseline.
 - **Spec:** an addition to Section 5's derivative contract, recorded in the decisions table when it lands.
 
 **Tests.**
@@ -209,7 +211,7 @@ under "1.x — user feedback of 2026-10-23".
 **Constraints.**
 - **Determinism:** rows are independent.
 - **Allocation:** the sort buffer comes from `scratch_bytes`.
-- **ABI:** a new constructor (1.1).
+- **ABI:** a new constructor, in the 1.0 baseline.
 - **Spec:** a new operator, so `docs/spec.md` gains its row.
 - **CLAUDE.md "Adding an operator":** the kernel, the factory, the C and Python constructors, `CASES` and `derivative_cases`.
 
@@ -250,23 +252,24 @@ under "1.x — user feedback of 2026-10-23".
 ### U7. Releases, so that no one builds from a workspace
 
 **Problem.**
-- **The released version lacks the spectral operators.** PyPI has 1.0.0rc1, and the spectral operators are 1.1 features. Using them meant building from the development workspace, which broke once on uncommitted edits.
+- **The release on PyPI lacks the spectral operators.** PyPI has 1.0.0rc1 (2026-10-20), and the spectral operators landed on master after it. Using them meant building from the development workspace, which broke once on uncommitted edits.
 - **The papers project now pins the PyPI release**, so the spectral experiments were dropped.
 
 **Design.**
-1. Release 1.0.0 as planned (audit A11, through 1.0.0rc2), once the 1.0.0 items land.
-2. Publish 1.1.0rc1 to PyPI right after 1.0.0, with the spectral operators and U1–U3. U4 and U5 follow in 1.1.0rc2 if they are not ready. The README's install section gains `pip install --pre fastprox` for pre-releases, and `pip install "fastprox @ git+https://github.com/dvillacis/fastprox@v1.1.0rc1"` for a tag.
-3. CI already builds every push to master. Users who need unreleased work install from a commit of master, never from a working tree. The README says so.
+1. **1.0.0rc2 (A11) ships master**, the spectral operators included, once the audit's remaining 1.0.0 items land. It goes to PyPI, so the spectral operators can be used without a build. The U items may land after rc2. If they change the API, as U1–U5 do, a 1.0.0rc3 follows before the final release.
+2. **1.0.0** follows after some use of the last candidate, with every U item in.
+3. **README.** The install section gains `pip install --pre fastprox` for release candidates, and `pip install "fastprox @ git+https://github.com/dvillacis/fastprox@v1.0.0rc2"` for a tag. CI already builds every push to master. Users who need unreleased work install from a commit of master, never from a working tree, and the README says so.
 
 **Constraints.** Process only. The release steps are those of `CLAUDE.md` ("Releasing").
 
-**Acceptance.** 1.0.0 and 1.1.0rc1 are on PyPI, and the README documents both install paths.
+**Acceptance.** 1.0.0rc2 and then 1.0.0 are on PyPI, and the README documents both install paths.
 
 ---
 
-## Open questions
+## Decisions (2026-10-23)
 
-1. **U2:** is the context's default `factor` of 0.1 right? Should `ConvergenceWarning` also apply to the C-level `fp_info` users? The proposal covers Python only, since C callers have the status.
-2. **U2:** keep the default `tol` of 1e-6, which certifies 1e-3 relative error of z, and only document it, as proposed? Or tighten it in 1.1, which would change results?
-3. **U4:** a refine is opt-in (`refine=`), with a warning, as proposed. Should it instead run automatically before a derivative when `exact` is False?
-4. **U5:** add nondecreasing weights (WNNM) now, or only when asked for?
+1. **U2, the context's factor.** It is 0.1: inside `fp.inner_accuracy(target)`, ztol = 0.1·target. The inner error is then a tenth of the outer tolerance and never decides the outer test, and warm starts keep the tighter solves cheap. For accelerated methods the theory asks for errors that decrease over the iterations, so the docs (U1) also give the decreasing schedule. `ConvergenceWarning` is Python only, since C callers receive the status.
+2. **U2, the default tolerance.** `tol` stays 1e-6, and its meaning (a certified relative error of 1e-3 for z) is documented. Tightening it would change every caller's results and run times. U1 and U2 address the actual pitfall: not knowing what tol certifies. A default in the units of z, `ztol` replacing `tol`, is a candidate for 2.0.
+3. **U4, refining.** It is opt-in (`refine=`, `ctx.refine`), with the warning. An automatic refine would make a derivative's cost unpredictable, and would differentiate at a point other than the z the caller holds, a mismatch that is hard to trace in an autograd graph. With `fp.inner_accuracy` setting tight tolerances, the warning rarely fires.
+4. **U5, nondecreasing weights.** They are deferred until asked for. The penalty is nonconvex. Its prox is simple, soft thresholding in sorted order, which stays sorted. But at singular values tied with different weights the prox is set-valued and has no derivative, which needs a tie rule and the nonconvex kink machinery. Nonincreasing weights, the convex weighted nuclear norm, cover the common use.
+5. **Target.** Every U item gates 1.0.0, and U6 also needs the reproducer.
