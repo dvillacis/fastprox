@@ -1060,7 +1060,10 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   edges) are constants and must be concrete under `jax.jit`.
 - **PyTorch**: a `torch.autograd.Function` with `backward` (the VJP) and
   `jvp` (the JVP, for `torch.autograd.forward_ad`; only for parameters that
-  are part of $\theta$, so not `Soft`'s `lam`). Not twice differentiable, and not
+  are part of $\theta$, so not `Soft`'s `lam`). Not twice differentiable:
+  second-order reverse mode (`create_graph=True`, as in
+  `torch.autograd.functional.hvp` and `hessian`) raises `RuntimeError` until
+  1.0.x, for `prox`, `prox_conj` and the device-native TV functions. Not
   under the `torch.func` transforms (`grad`, `jvp`, `vmap`), which pass the
   derivatives wrapped tensors that cannot be read as NumPy arrays. Checked
   with `torch.autograd.gradcheck` in both modes. `torch.compile` breaks the
