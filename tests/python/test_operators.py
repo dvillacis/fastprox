@@ -452,8 +452,10 @@ def test_projections_idempotent(x, r):
 
 
 @settings(max_examples=60, deadline=None)
-@given(rows, st.floats(0.01, 10.0), st.floats(0.01, 5.0))
+@given(rows, st.floats(1e-320, 1e300), st.floats(0.01, 5.0))
 def test_moreau_conjugates(y, sigma, lam):
+    # Positively homogeneous g: y - prox_g(y), exact for every sigma > 0 (since
+    # 1.0; it overflowed below sigma ~ 1e-300).
     # (lam ||.||_1)* is the indicator of the l-inf ball of radius lam.
     np.testing.assert_allclose(fp.Soft(lam).prox_conj(y, sigma), np.clip(y, -lam, lam),
                                rtol=1e-12, atol=1e-12 * (1 + np.abs(y).max()))

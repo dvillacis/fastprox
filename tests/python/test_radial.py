@@ -36,8 +36,11 @@ def test_log_barrier_extremes():
     np.testing.assert_allclose(z[4:7], x[4:7], rtol=1e-15)
     assert z[7] == np.inf and z[8] == 0.0
     assert np.isnan(fp.prox_log_barrier(np.array([np.nan]))[0])
-    # A huge step: the square of x and 4 gamma lam both overflow.
-    assert fp.prox_log_barrier(np.array([-1e200]), 1e300, 1e8)[0] == pytest.approx(1e108, rel=1e-14)
+    # A huge step: the square of x overflows; 4 gamma lam stays in the step
+    # range (gamma lam <= 2^960, since 1.0), beyond which the call fails.
+    assert fp.prox_log_barrier(np.array([-1e200]), 1e280, 1e8)[0] == pytest.approx(1e88, rel=1e-14)
+    with pytest.raises(ValueError):
+        fp.prox_log_barrier(np.array([-1e200]), 1e300, 1e8)
     z32 = fp.prox_log_barrier(np.array([-1e30, 3.0], np.float32), 0.5)
     assert z32.dtype == np.float32 and np.all(z32 > 0)
 

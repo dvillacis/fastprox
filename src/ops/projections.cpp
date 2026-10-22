@@ -226,6 +226,7 @@ struct L2Ball final : RowOp<L2Ball> {
     double r;
     explicit L2Ball(double rr) : r(rr) {}
     const char *name() const noexcept override { return "l2_ball"; }
+    double step_scale() const noexcept override { return 0.0; }
     int spectral() const noexcept override { return kSpectralBoth; }  // Frobenius ball
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -303,6 +304,7 @@ struct Simplex final : RowOp<Simplex> {
     double r;
     explicit Simplex(double rr) : r(rr) {}
     const char *name() const noexcept override { return "simplex"; }
+    double step_scale() const noexcept override { return 0.0; }
     int spectral() const noexcept override { return kSpectralEig; }  // the spectraplex
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -461,6 +463,7 @@ struct L1Ball final : RowOp<L1Ball> {
     double scale;  // the largest weight given
     L1Ball(double rr, Vec ww, double sc) : r(rr), w(std::move(ww)), scale(sc) {}
     const char *name() const noexcept override { return "l1_ball"; }
+    double step_scale() const noexcept override { return 0.0; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }  // nuclear-norm ball
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t n) const noexcept override {
@@ -608,6 +611,8 @@ struct LInf final : RowOp<LInf> {
     Vec one{1.0};
     explicit LInf(double l) : lambda(l) {}
     const char *name() const noexcept override { return "linf"; }
+    double step_scale() const noexcept override { return lambda; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int spectral() const noexcept override { return kSpectralBoth; }  // spectral norm
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -696,6 +701,8 @@ struct Max final : RowOp<Max> {
     double lambda;
     explicit Max(double l) : lambda(l) {}
     const char *name() const noexcept override { return "max"; }
+    double step_scale() const noexcept override { return lambda; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
     size_t scratch_bytes(int64_t n) const noexcept override { return condat_scratch(n); }

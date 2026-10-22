@@ -54,6 +54,7 @@ struct TVBall final : RowOp<TVBall> {
     TVBall(double a, Vec ww, fp_op *t) : alpha(a), w(std::move(ww)), tv(t) {}
 
     const char *name() const noexcept override { return "tv1d_ball"; }
+    double step_scale() const noexcept override { return 0.0; }
     int64_t nparams() const noexcept override { return 1 + static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override { return tv->check_n(n); }
     bool needs_distinct() const noexcept override { return true; }

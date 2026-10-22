@@ -885,6 +885,11 @@ fp_vjp_device(op, ws, &g, &gx, &ggamma, &gtheta);  /* ggamma: a 0-d array */
 $\operatorname{prox}_{\sigma g^\ast}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$.
 $\sigma = 0$ returns $y$.
 
+Since 1.0 the computation depends on the operator (audit A1).
+
+- **Positively homogeneous $g$ and cone indicators.** This covers soft thresholding, ℓ2 and group ℓ2, the tree-structured norms, ℓ∞, the maximum, the sums of the largest entries, every TV operator, the nonnegative orthant, the second-order cone and isotonic regression. There $g^\ast$ is the indicator of a set $C$, and the result, $y - \operatorname{prox}_g(y)$, is the projection onto $C$. It is the same for every $\sigma > 0$, computed without scaling, so it is exact even at $\sigma = 10^{-320}$. Its derivative in $\sigma$ is 0. After the call, an image operator's dual is that of $\operatorname{prox}_g(y)$ at unit step, and $\sum_a q_a$ is the output; this is the same dual for every $\sigma$.
+- **The other operators** evaluate the formula as written. $1/\sigma$ must lie in `fp_prox`'s step range, and every $y_i/\sigma$ must be finite in the array's dtype; otherwise the call returns `FP_EPARAM`. The quotients are checked for every $\sigma < 1$ in float32, and in float64 for $\sigma < 2^{-64}$. Above that, a float64 quotient can overflow only for $\lvert y_i \rvert$ beyond about $10^{289}$, and its output is then $\pm\infty$ or NaN. A check for every $\sigma < 1$ cost 15–30% on the cheapest conjugates.
+
 ### Errors
 
 | Status | Meaning |
@@ -894,7 +899,7 @@ $\sigma = 0$ returns $y$.
 | `FP_EDTYPE` | dtype other than float32/float64, or mismatched dtypes |
 | `FP_ESHAPE` | mismatched shapes or parameter lengths |
 | `FP_ENOMEM` | out of memory |
-| `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
+| `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), a step beyond the operator's range ($\gamma$ times its largest parameter above $2^{960}$, since 1.0), a $\sigma$ too small for the conjugate's formula, or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
 | `FP_EINTERNAL` | any other internal error |
 | `FP_EDEVICE` | (*since 1.1*) a device error, from the call or from earlier work on its stream |
 

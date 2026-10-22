@@ -130,6 +130,8 @@ struct TVIso final : ImageOp<TVIso> {
     }
 
     const char *name() const noexcept override { return "tv_iso"; }
+    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (alpha.empty() ? 1.0 : vmax(alpha)); }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }
     fp_status check_image(const int64_t *shape) const noexcept override {

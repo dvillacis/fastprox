@@ -375,6 +375,8 @@ struct TV1D final : RowOp<TV1D> {
           has_zero(zero), method(m) {}
 
     const char *name() const noexcept override { return "tv1d"; }
+    double step_scale() const noexcept override { return wmax; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return nw; }
     fp_status check_n(int64_t n) const noexcept override {
         return (nw == 1 || nw == n - 1) ? FP_OK : FP_ESHAPE;

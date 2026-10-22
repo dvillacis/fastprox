@@ -59,6 +59,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
     }
 
     const char *name() const noexcept override { return nm; }
+    double step_scale() const noexcept override { return h->step_scale() * cmax; }
     int64_t nparams() const noexcept override { return Ph + static_cast<int64_t>(c.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;
@@ -225,6 +226,8 @@ struct GroupRadial final : RowOp<GroupRadial> {
 
 struct Soc final : RowOp<Soc> {
     const char *name() const noexcept override { return "soc"; }
+    double step_scale() const noexcept override { return 0.0; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return 0; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 

@@ -32,7 +32,7 @@ NAMES = sorted(ops(1.0))
 
 
 @pytest.mark.parametrize("name", NAMES)
-@pytest.mark.parametrize("k", [-1000, -600, -400, 400, 600, 1000])
+@pytest.mark.parametrize("k", [-1000, -600, -400, 400, 600, 900])  # 900: gamma lam in the step range
 def test_homogeneous(name, k):
     rng = np.random.default_rng(4)
     x = rng.standard_normal((5, 8))

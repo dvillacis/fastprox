@@ -1226,6 +1226,11 @@ static void test_tv_iso() {
             eo.tol = 1e-10;
             eo.max_iter = 100000;
             fp_info ei;
+            if (wv * gam > 0x1p960) {  // outside the step range (audit A1)
+                CHECK(fp_prox(eop, gam, &ex.a, &ez.a, &eo, nullptr, &ei) == FP_EPARAM);
+                fp_op_free(eop);
+                continue;
+            }
             CHECK_OK(fp_prox(eop, gam, &ex.a, &ez.a, &eo, nullptr, &ei));
             CHECK(std::isfinite(maxabs(ez.data)) && ei.gap <= 1e-10 * 0.5 * 42 * 9);
             if (wv * gam > 1e10) {  // constant mean
@@ -2681,6 +2686,162 @@ static void test_prox_steps() {
     }
 }
 
+// ---------------------------------------------------------------- conjugate and step range
+// fp_prox_conj at extreme sigma, and the step range of every call (audit A1).
+template <class T>
+static fp_status conj_call(fp_op *op, double sigma, const std::vector<int64_t> &shape, const Vec &y, std::vector<T> &z,
+                           fp_workspace *ws = nullptr) {
+    std::vector<T> yt(y.begin(), y.end());
+    z.assign(y.size(), T(0));
+    const fp_dtype dt = sizeof(T) == 4 ? FP_F32 : FP_F64;
+    fp_array ya{yt.data(), dt, static_cast<int>(shape.size()), shape.data(), nullptr, FP_DEVICE_CPU};
+    fp_array za{z.data(), dt, static_cast<int>(shape.size()), shape.data(), nullptr, FP_DEVICE_CPU};
+    fp_options o = opts(-1, 0, ws ? 1 : 0);
+    o.tol = 1e-12;
+    o.max_iter = 100000;
+    return fp_prox_conj(op, sigma, &ya, &za, &o, ws, nullptr);
+}
+
+static void test_conj_extremes() {
+    static const int64_t chain[] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+    const Vec row = {0.5, 2, -3, 1, 20, -7};
+    const Vec img = {0.5, 2, -3, 1, 20, -7, 0.3, -0.2, 4, 1.5, -2.5, 0.1, 9, -1, 3, 0.7};
+    struct C {
+        std::function<fp_status(fp_op **)> make;
+        bool image;
+    };
+    const std::vector<C> homog = {
+        {[](fp_op **o) { return fp_op_soft(10.0, nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_group_l2(10.0, 0, nullptr, 1, nullptr, o); }, false},
+        {[](fp_op **o) {
+             static const int64_t ptr[] = {0, 3}, idx[] = {0, 1, 2};
+             return fp_op_tree_l2(0.5, 1, ptr, idx, nullptr, o);
+         }, false},
+        {[](fp_op **o) { return fp_op_linf(10.0, o); }, false},
+        {[](fp_op **o) { return fp_op_max(10.0, o); }, false},
+        {[](fp_op **o) { return fp_op_sum_largest(10.0, 2, 0, o); }, false},
+        {[](fp_op **o) { return fp_op_sum_largest(10.0, 2, 1, o); }, false},
+        {[](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, false},
+        {[](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_graph_tv(6, 5, chain, nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_tree_tv(6, 5, chain, nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_nonneg(o); }, false},
+        {[](fp_op **o) { return fp_op_soc(o); }, false},
+        {[](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, false},
+        {[](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }, true},
+        {[](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }, true},
+    };
+    // Homogeneous g: y - prox_g(y), the same bits for every sigma > 0, and
+    // derivatives constant in sigma.
+    for (const C &c : homog) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        const std::vector<int64_t> shape = c.image ? std::vector<int64_t>{4, 4} : std::vector<int64_t>{6};
+        const Vec &y = c.image ? img : row;
+        std::vector<double> z1, z;
+        std::vector<float> f1, f;
+        CHECK_OK(conj_call(op, 1.0, shape, y, z1));
+        CHECK_OK(conj_call(op, 1.0, shape, y, f1));
+        for (double sg : {5e-324, 1e-310, 1e-300, 1e-100, 1e100, 1e300}) {
+            CHECK(conj_call(op, sg, shape, y, z) == FP_OK && z == z1);
+            CHECK(conj_call(op, sg, shape, y, f) == FP_OK && f == f1);
+        }
+        Arr ya(shape, y), za(shape), d0(shape), d1(shape), g(shape, randn(y.size())), gx(shape);
+        fp_options o = opts(-1, 0, 1);
+        o.tol = 1e-12;
+        o.max_iter = 100000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &ya.a, &o, &ws));
+        CHECK_OK(fp_prox_conj(op, 1e-200, &ya.a, &za.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &g.a, 0.0, nullptr, &d0.a));
+        CHECK_OK(fp_jvp(op, ws, &g.a, 1.0, nullptr, &d1.a));
+        CHECK(d0.data == d1.data);
+        double gg = -1.0;
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, nullptr));
+        CHECK(gg == 0.0);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    {  // soft (lambda 10): y clipped to [-10, 10] at any sigma
+        fp_op *op;
+        CHECK_OK(fp_op_soft(10.0, nullptr, &op));
+        std::vector<double> z;
+        for (double sg : {1e-320, 1e300}) {
+            CHECK_OK(conj_call(op, sg, {3}, {20, -3, 0.5}, z));
+            CHECK((z == std::vector<double>{10, -3, 0.5}));
+        }
+        fp_op_free(op);
+    }
+    // Other operators: FP_EPARAM where 1/sigma or y/sigma overflows, or 1/sigma
+    // leaves the step range; projections (which ignore the step) stay exact.
+    const std::vector<std::pair<std::function<fp_status(fp_op **)>, bool>> other = {
+        {[](fp_op **o) { return fp_op_elastic_net(1.0, 10.0, o); }, true},
+        {[](fp_op **o) { return fp_op_huber(10.0, 1.0, o); }, true},
+        {[](fp_op **o) { return fp_op_log_barrier(10.0, o); }, true},
+        {[](fp_op **o) { return fp_op_l0(1.0, nullptr, o); }, true},
+        {[](fp_op **o) { return fp_op_box(-1.0, 2.0, nullptr, nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_l2_ball(1.0, o); }, false},
+        {[](fp_op **o) { return fp_op_simplex(1.0, o); }, false},
+        {[](fp_op **o) { return fp_op_l1_ball(1.0, nullptr, o); }, false},
+        {[](fp_op **o) { return fp_op_tv1d_ball(1.0, nullptr, o); }, false},
+    };
+    for (const auto &c : other) {
+        fp_op *op;
+        CHECK_OK(c.first(&op));
+        std::vector<double> z;
+        CHECK(conj_call(op, 1e-310, {6}, row, z) == FP_EPARAM);  // 1/sigma = inf
+        const fp_status s = conj_call(op, 1e-300, {6}, row, z);
+        if (c.second) {
+            CHECK(s == FP_EPARAM);  // 1/sigma = 1e300 beyond the step range
+        } else {
+            CHECK(s == FP_OK);
+            CHECK(std::isfinite(maxabs(z)));
+        }
+        fp_op_free(op);
+    }
+    {  // float32: y / sigma = 1e40 overflows the dtype, elementwise and row alike
+        fp_op *en, *ball;
+        CHECK_OK(fp_op_elastic_net(1.0, 1.0, &en));
+        CHECK_OK(fp_op_l2_ball(1.0, &ball));
+        std::vector<float> f;
+        CHECK(conj_call(en, 1e-30, {3}, {1e10, 1.0, 2.0}, f) == FP_EPARAM);
+        CHECK(conj_call(ball, 1e-30, {3}, {1e10, 1.0, 2.0}, f) == FP_EPARAM);
+        fp_op_free(en);
+        fp_op_free(ball);
+    }
+    // The step range: gamma lam > 2^960 is FP_EPARAM; inside it, finite.
+    {
+        const std::vector<std::function<fp_status(fp_op **)>> ranged = {
+            [](fp_op **o) { return fp_op_log_barrier(10.0, o); },
+            [](fp_op **o) { return fp_op_max(10.0, o); },
+            [](fp_op **o) { return fp_op_sum_largest(10.0, 2, 0, o); },
+            [](fp_op **o) { return fp_op_tree_tv(6, 5, chain, nullptr, o); },
+        };
+        for (const auto &make : ranged) {
+            fp_op *op;
+            CHECK_OK(make(&op));
+            Arr x({6}, row), z({6});
+            CHECK(fp_prox(op, 1e308, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+            CHECK_OK(fp_prox(op, 1e280, &x.a, &z.a, nullptr, nullptr, nullptr));
+            CHECK(std::isfinite(maxabs(z.data)));
+            fp_op_free(op);
+        }
+        fp_op *lb, *tt;
+        CHECK_OK(fp_op_log_barrier(10.0, &lb));
+        CHECK_OK(fp_op_tree_tv(6, 5, chain, nullptr, &tt));
+        Arr x({6}, row), z({6});
+        CHECK_OK(fp_prox(lb, 1e280, &x.a, &z.a, nullptr, nullptr, nullptr));
+        const double expect = (-3.0 + std::hypot(-3.0, 2.0 * std::sqrt(1e280) * std::sqrt(10.0))) / 2;
+        CHECK(std::fabs(z.data[2] - expect) <= 1e-15 * expect);
+        CHECK_OK(fp_prox(tt, 1e280, &x.a, &z.a, nullptr, nullptr, nullptr));
+        double mean = 0;
+        for (double v : row) mean += v / 6;
+        for (double v : z.data) CHECK(std::fabs(v - mean) <= 1e-15 * 20);
+        fp_op_free(lb);
+        fp_op_free(tt);
+    }
+}
+
 // ---------------------------------------------------------------- outputs and descriptors
 static fp_array view(double *data, int nd, const int64_t *shape, const int64_t *strides) {
     return fp_array{data, FP_F64, nd, shape, strides, FP_DEVICE_CPU};
@@ -2875,6 +3036,7 @@ int main() {
     test_errors_and_special_values();
     test_aliasing();
     test_descriptor_bounds();
+    test_conj_extremes();
     test_float32();
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;

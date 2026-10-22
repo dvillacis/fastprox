@@ -75,6 +75,8 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     TV1DL2(Vec ww, Vec aa) : w(std::move(ww)), a(std::move(aa)) {}
 
     const char *name() const noexcept override { return "tv1d_l2"; }
+    double step_scale() const noexcept override { return vmax(w); }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (w.size() == 1 || static_cast<int64_t>(w.size()) == n - 1) ? FP_OK : FP_ESHAPE;
