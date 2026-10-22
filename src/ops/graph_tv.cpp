@@ -36,8 +36,11 @@
 // in the same max-flow solve, one solve per round.
 //
 // Certificate and derivatives (src/ops/edge_tv.hpp). The flow is the dual:
-// f_e = gamma w_e - (residual u -> v) on live edges, +-gamma w_e on deleted
-// ones; the gap is zero up to rounding when every part ended exactly.
+// on live edges, f_e = gamma w_e - (residual u -> v), or once gamma w_e
+// exceeds 64 times the value range the engine's net flow u -> v, summed from
+// what each augmentation pushed (the residual lost it below an ulp of gamma
+// w_e, audit T6); +-gamma w_e on deleted ones. The gap is zero up to
+// rounding when every part ended exactly.
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -232,6 +235,11 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         const double eps = std::max(c.tol * (xmax - xmin), 32.0 * kEps * scale);
 
         MF mf(g, wk.engine);
+        // The engine's net flows (audit T6) only where cap - residual loses
+        // the dual: with every capacity within 64 times the value range, it is
+        // accurate to 64 eps of the range, and tracking cost 8% at 512^2.
+        const bool track = gamma * vmax(w) > 64.0 * (xmax - xmin);
+        if (track) mf.track_flow();
         for (int64_t e = 0; e < m; ++e) {
             const double cap = gamma * we(e);
             mf.init_edge(static_cast<Index>(e), cap, cap);
@@ -400,7 +408,7 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         double *fsave = c.save ? reinterpret_cast<double *>(c.save + base_bytes()) : nullptr;
         certificate(d, zv, [&](int64_t e) {
             const double cap = gamma * we(e);
-            const double f = esgn[e] ? esgn[e] * cap : cap - mf.residual(g.arc[e]);
+            const double f = esgn[e] ? esgn[e] * cap : track ? mf.flow(g.arc[e]) : cap - mf.residual(g.arc[e]);
             if (fsave) fsave[e] = f;
             return f;
         }, c);

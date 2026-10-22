@@ -227,6 +227,21 @@ static bool certify(const Graph &g, const MF<T> &mf, const Problem &pb, double f
     return ok;
 }
 
+// The engine's net flow (audit T6), less f0 when given, against
+// cap - residual on every edge.
+template <class T>
+static bool flows_match(const Graph &g, const MF<T> &mf, const std::vector<double> &cuv, const double *f0,
+                        double tol) {
+    bool ok = true;
+    for (Index e = 0; e < g.m; ++e) {
+        const Index a = g.arc[e];
+        const double f = double(mf.flow(a)) - (f0 ? f0[e] : 0.0);
+        ok &= std::fabs(f - (cuv[e] - double(mf.residual(a)))) <= tol;
+        ok &= mf.flow(g.sister[a]) == -mf.flow(a);
+    }
+    return ok;
+}
+
 // The residual problem of the current state: capacities are the residuals.
 template <class T>
 static Problem residual_problem(const Graph &g, const MF<T> &mf, const Problem &pb) {
@@ -342,10 +357,12 @@ static void check_fresh(const Problem &pb, double tol) {
     build<T>(g, pb);
     Mem mem(MF<T>::bytes(g));
     MF<T> mf(g, mem.data());
+    mf.track_flow();
     load(mf, pb);
     const double flow = double(mf.solve());
     CHECK(certify(g, mf, pb, flow, tol));
     CHECK(std::fabs(flow - dinic(pb)) <= tol);
+    CHECK(flows_match(g, mf, pb.cuv, nullptr, tol));
     // A second solve finds nothing more and leaves the state alone.
     CHECK(mf.solve() == 0);
     CHECK(certify(g, mf, pb, flow, tol));
@@ -400,6 +417,7 @@ static void check_reuse(Problem pb, int rounds, int k, bool integer) {
     build<T>(g, pb);
     Mem mem(MF<T>::bytes(g)), mem2(MF<T>::bytes(g));
     MF<T> mf(g, mem.data());
+    mf.track_flow();
     load(mf, pb);
     mf.solve();
     const double tol = integer ? 0.0 : 1e-9 * (1 + g.m);
@@ -427,8 +445,11 @@ static void check_reuse(Problem pb, int rounds, int k, bool integer) {
         // set_terminal and add_terminal keep integers exact; the residual
         // problem is read before the reused solve.
         const Problem rp = residual_problem(g, mf, pb);
+        std::vector<double> f0(g.m);
+        for (Index e = 0; e < g.m; ++e) f0[e] = double(mf.flow(g.arc[e]));
         const double flow = double(mf.solve());
         CHECK(certify(g, mf, rp, flow, tol));
+        CHECK(flows_match(g, mf, rp.cuv, f0.data(), tol));
         MF<T> fresh(g, mem2.data());
         load(fresh, rp);
         const double flow2 = double(fresh.solve());
@@ -436,6 +457,38 @@ static void check_reuse(Problem pb, int rounds, int k, bool integer) {
         bool same = true;
         for (Index p = 0; p < g.n; ++p) same &= mf.tree(p) == fresh.tree(p);
         CHECK(same);
+    }
+}
+
+// Capacities far above the flow (graph TV at a large step, audit T6):
+// cap - residual loses the flow below an ulp of cap, the engine's net flow
+// does not, so conservation holds at every node to rounding of the terminals.
+static void test_large_caps() {
+    for (int rep = 0; rep < 12; ++rep) {
+        Problem pb = random_problem(rep < 6 ? 200 : 1000, rep < 6 ? 1000 : 5000, 10, false);
+        const double big = rep % 3 == 0 ? 1e17 : rep % 3 == 1 ? 1e20 : 1e280;
+        for (size_t e = 0; e < pb.u.size(); ++e)
+            if (irand(0, 1)) pb.cuv[e] *= big, pb.cvu[e] *= big;
+        Graph g;
+        build<double>(g, pb);
+        Mem mem(MF<double>::bytes(g));
+        MF<double> mf(g, mem.data());
+        mf.track_flow();
+        load(mf, pb);
+        mf.solve();
+        std::vector<double> out(g.n, 0.0);
+        double scale = 0.0;
+        for (Index e = 0; e < g.m; ++e) {
+            const double f = mf.flow(g.arc[e]);
+            // within capacity to rounding of the summed pushes (terminals <= 10)
+            CHECK(f - pb.cuv[e] <= 1e-12 * (pb.cuv[e] + 10.0) && -f - pb.cvu[e] <= 1e-12 * (pb.cvu[e] + 10.0));
+            out[pb.u[e]] += f;
+            out[pb.v[e]] -= f;
+        }
+        for (Index p = 0; p < g.n; ++p) scale = std::max(scale, std::fabs(pb.term[p]));
+        double worst = 0.0;
+        for (Index p = 0; p < g.n; ++p) worst = std::max(worst, std::fabs(pb.term[p] - mf.terminal(p) - out[p]));
+        CHECK(worst <= 1e-12 * scale * double(g.m));
     }
 }
 
@@ -642,6 +695,7 @@ int main() {
     test_hubs();
     test_grids();
     test_reuse();
+    test_large_caps();
     test_levels();
 #ifdef FP_TEST_EIBFS
     test_subset();

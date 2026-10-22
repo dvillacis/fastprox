@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Graph TV: the dual and gap at large steps (audit T6). The flow of a live edge was read as γwₑ − residual, which loses it below an ulp of γwₑ. On a 16×16 grid with tol 0, the result was:
+  - at γ = 1e10: a dual residual ‖x − z − q‖∞ of 2.7e-6;
+  - at γ = 1e15: a gap of 0.33;
+  - at γ ≥ 1e17: a dual residual of 2.8 and a gap of 121, all reported `converged`.
+
+  The saved flow, which decides kinks, had the same error. Once γ·max w exceeds 64 times the value range, the max-flow engines (EIBFS and BK) now sum each arc's net flow from what every augmentation pushes, and the certificate reads that. Below that bound, cap − residual is accurate to 64ε of the range and stays, so the common case is not slowed. The dual residual is now 4e-16 and the gap 1e-30 from γ = 1e10 to 1e280. Tested in `test_graph_tv.py` (`test_dual_at_large_steps`, `test_dual_at_the_step_bound`) and `test_maxflow.cpp` (`test_large_caps`, and the net flow against cap − residual on every problem).
 - Spectral derivatives on chains of near-ties (audit T7). Values whose adjacent gaps fall under the tie band ε^(1/3)·max|s| chain into clusters much wider than the band, and every pair in such a cluster took the averaged limit. Now only pairs within the band do; the others take their quotient. 200 singular values 5e-6 apart had a nuclear-norm jvp off by 0.23 relative, now about 1e-13. Tested in `test_spectral.py` (`test_chained_near_ties`).
 - Graph and tree TV: inputs whose range overflows (audit T9). With `max x − min x` infinite, the graph solver's stopping width was NaN, so it set every node to the mean (x = [1e308, −1e308, 5e307, −5e307] gave [0, 0, 0, 0] with `converged`), and tree TV's gap was NaN. Both operators now solve far from unit scale on a power-of-two rescaling, as the image TVs do since T5. This is exact, and results are unchanged near unit scale. The gap can be inf when its value exceeds the double range. Tested in `test_graph_tv.py` (`test_value_range_overflow`, `test_power_of_two_scale`).
 - 1D TV with the ℓ2 norm: derivatives far from unit scale (audit K4). The prox was already scaled, but its jvp and vjp formed ‖W D z‖ and its cube on raw z. On x = σ·[0, 1, 3, 2, 5] with γ = 0.8σ:
