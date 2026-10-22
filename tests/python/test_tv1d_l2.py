@@ -218,3 +218,29 @@ def test_errors():
     assert np.all(np.isnan(z))
     with pytest.raises(ValueError):
         fp.tv1d_l2(np.array([1.0, np.inf]), 0.5)
+
+
+@pytest.mark.parametrize("k", [-560, -365, 365, 530])
+def test_derivative_scale_invariance(k):
+    """H is unchanged when z and gamma both scale, so the derivatives in x and
+    gamma are scale-free and those in w scale with z (audit K4). Setup on raw z
+    under- and overflowed: NaN, -inf, a silent 2x error at 1e110, or the
+    identity Jacobian beyond 1e160."""
+    sigma = 2.0 ** k
+    rng = np.random.default_rng(8)
+    for x0, w in [(np.array([0.0, 1, 3, 2, 5]), None), (rng.normal(size=50).cumsum(), rng.uniform(0.3, 2.0, 49))]:
+        op = fp.TV1DL2(w)
+        n = x0.size
+        u, v = rng.normal(size=n), rng.normal(size=n)
+        dw = rng.normal(size=op.nparams)
+        _, c1 = op.prox(x0, 0.8, keep=True)
+        _, cs = op.prox(x0 * sigma, 0.8 * sigma, keep=True)
+        np.testing.assert_allclose(op.jvp(cs, u), op.jvp(c1, u), rtol=1e-12, atol=1e-13)
+        np.testing.assert_allclose(op.jvp(cs, None, 1.0), op.jvp(c1, None, 1.0), rtol=1e-12, atol=1e-13)
+        np.testing.assert_allclose(op.jvp(cs, None, 0.0, dw) / sigma, op.jvp(c1, None, 0.0, dw), rtol=1e-12, atol=1e-13)
+        g1, r1 = op.vjp(c1, v)
+        gs, rs = op.vjp(cs, v)
+        np.testing.assert_allclose(gs, g1, rtol=1e-12, atol=1e-13)
+        np.testing.assert_allclose(rs.params / sigma, r1.params, rtol=1e-12, atol=1e-13)
+        lhs = v @ op.jvp(cs, u)
+        assert abs(lhs - gs @ u) <= 1e-12 * (1 + abs(lhs))

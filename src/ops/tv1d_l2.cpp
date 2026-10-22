@@ -50,7 +50,9 @@
 // sum_e a_e Dz_e Dy_e, without the cancellation. JVP: dz = H^{-1} r with
 // r = dx - (dgamma / s) p - gamma sum_e dw_e d(K z / s)/dw_e, and
 // d(K z / s)/dw_e = 2 w_e Dz_e D_e^T / s - p w_e Dz_e^2 / s^3. The VJP is the
-// adjoint. Inside, the Jacobian is the piecewise averaging.
+// adjoint. Inside, the Jacobian is the piecewise averaging. All of it runs in
+// scale-free form (see setup): delta = Dz / s, pi = p / s and c, so neither s
+// nor s^3 is formed; they under- or overflowed for |z| beyond 1e+-103.
 //
 // Kinks: ||u0|| = gamma is inside.
 //
@@ -357,27 +359,63 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         return kRowOk;
     }
 
-    // The outside structure at the saved z: s, c, p (into p), and the factored
-    // A = I + c K. Returns false when z has no differences (identity).
+    // The outside structure at the saved z, scale-free (audit K4): H is
+    // unchanged when z and gamma are both multiplied by t, so the setup runs
+    // on the differences t D z with t a power of two that brings max w_e |Dz_e|
+    // to [1/2, 1) (h = 1/2 first when Dz itself overflows). With sh = ||W D(t z)||
+    // = t s: delta_e = Dz_e / s (|w_e delta_e| <= 1), c = gamma / s =
+    // gamma t / sh, pi = K z / s = D^T A delta, and y = A^{-1} (t z_c) with z_c
+    // the centred z. kOutside sets c, pi (into pi), the factored A = I + c K
+    // and y; kIdentity when z has no differences; kMean when c is beyond the
+    // range (the piecewise mean, the limit of A^{-1} as c -> inf).
+    struct Scale {
+        double h = 1.0, t = 1.0, sh = 0.0, f = 0.0;  // f = t / sh: a multiply per delta, not a division
+        template <class T>
+        double delta(const T *z, int64_t e) const noexcept {
+            return (h * static_cast<double>(z[e + 1]) - h * static_cast<double>(z[e])) * f;
+        }
+    };
+    enum Kind { kIdentity, kMean, kOutside };
     template <class T>
-    bool setup(const T *z, int64_t n, double gamma, double &s, double &c, double *inv, double *p,
+    Kind setup(const T *z, int64_t n, double gamma, Scale &sc, double &c, double *inv, double *pi,
                double *y) const noexcept {
-        s = norm_wd(z, n);
-        if (!(s > 0.0)) return false;
-        c = gamma / s;
-        for (int64_t i = 0; i < n; ++i) p[i] = 0.0;
+        double M = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e)
+            M = std::max(M, we(e) * std::fabs(static_cast<double>(z[e + 1]) - static_cast<double>(z[e])));
+        if (!(M <= DBL_MAX)) {  // the differences overflow: halves first
+            sc.h = 0.5;
+            M = 0.0;
+            for (int64_t e = 0; e + 1 < n; ++e)
+                M = std::max(M, we(e) * std::fabs(0.5 * static_cast<double>(z[e + 1]) - 0.5 * static_cast<double>(z[e])));
+        }
+        if (!(M > 0.0)) return kIdentity;
+        int k;
+        std::frexp(M, &k);
+        sc.t = std::ldexp(1.0, -k);
+        double ss = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) {
-            const double v = ae(e) * (static_cast<double>(z[e + 1]) - static_cast<double>(z[e]));
-            p[e + 1] += v;
-            p[e] -= v;
+            const double d = (sc.h * static_cast<double>(z[e + 1]) - sc.h * static_cast<double>(z[e])) * sc.t;
+            ss += ae(e) * d * d;
+        }
+        sc.sh = std::sqrt(ss);
+        sc.f = sc.t / sc.sh;
+        c = gamma * sc.h * sc.t / sc.sh;  // gamma / s; with h, s is ||W D(h z)|| / h
+        if (!(c <= DBL_MAX)) return kMean;
+        for (int64_t i = 0; i < n; ++i) pi[i] = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) {
+            const double v = ae(e) * sc.delta(z, e);
+            pi[e + 1] += v;
+            pi[e] -= v;
         }
         factor(1.0, c, inv, n);
         piece_mean(z, y, n);
-        for (int64_t i = 0; i < n; ++i) y[i] = static_cast<double>(z[i]) - y[i];
-        return true;
+        const double tz = sc.h * sc.t;
+        for (int64_t i = 0; i < n; ++i) y[i] = (static_cast<double>(z[i]) - y[i]) * tz;
+        return kOutside;
     }
 
-    // v <- H^{-1} v given t = A^{-1} p and pty = p^T A^{-1} z.
+    // v <- H^{-1} v given t = A^{-1} pi and pty = pi^T A^{-1} (t z_c) / sh: the
+    // Sherman-Morrison term c t (t^T v) / pty, scale-free (K4).
     void apply_hinv(double c, const double *inv, const double *t, double pty, double *v,
                     int64_t n) const noexcept {
         double tv = 0.0;
@@ -387,79 +425,80 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         for (int64_t i = 0; i < n; ++i) v[i] += f * t[i];
     }
 
+    // y <- A^{-1} y and pi^T y / sh = sum_e a_e delta_e (y_{e+1} - y_e) / sh,
+    // without the cancellation of pi^T y.
+    template <class T>
+    double solve_pty(const T *z, const Scale &sc, double c, const double *inv, double *y, int64_t n) const noexcept {
+        solve(c, inv, y, n);
+        double pty = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) pty += ae(e) * sc.delta(z, e) * (y[e + 1] - y[e]);
+        return pty / sc.sh;
+    }
+
     template <class T>
     void jvp(const T *, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n,
              double gamma, double dgamma, const double *dp, void *scr) const noexcept {
-        if (code[0] == kInside) {
+        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *r = y + n;
+        Scale sc;
+        double c = 0.0;
+        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
+        if (kind == kMean) {
             piece_mean(dx, dz, n);
             return;
         }
-        double *inv = static_cast<double *>(scr), *p = inv + n, *y = p + n, *r = y + n;
-        double s, c;
-        if (n == 1 || !setup(z, n, gamma, s, c, inv, p, y)) {
+        if (kind == kIdentity) {
             for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
             return;
         }
-        // y = A^{-1} z (centred), p^T y; then t = A^{-1} p into p's buffer, keeping
-        // p for r first.
-        solve(c, inv, y, n);
-        double pty = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) {
-            const double dze = static_cast<double>(z[e + 1]) - static_cast<double>(z[e]);
-            pty += ae(e) * dze * (y[e + 1] - y[e]);
-        }
-        double wsum = 0.0;  // sum_e dw_e w_e Dz_e^2
-        for (int64_t i = 0; i < n; ++i) r[i] = static_cast<double>(dx[i]) - dgamma / s * p[i];
+        const double pty = solve_pty(z, sc, c, inv, y, n);
+        // r = dx - dgamma pi + sum_e 2 gamma w_e delta_e dw_e (e_e - e_{e+1})
+        //     + gamma (sum_e dw_e w_e delta_e^2) pi.
+        for (int64_t i = 0; i < n; ++i) r[i] = static_cast<double>(dx[i]) - dgamma * pi[i];
         if (dp) {
+            double wsum = 0.0;
             for (int64_t e = 0; e + 1 < n; ++e) {
-                const double dze = static_cast<double>(z[e + 1]) - static_cast<double>(z[e]);
-                const double dwe = dp[w.size() == 1 ? 0 : e];
-                const double q = 2.0 * gamma * we(e) * dze * dwe / s;
+                const double de = sc.delta(z, e), dwe = dp[w.size() == 1 ? 0 : e];
+                const double q = 2.0 * gamma * we(e) * de * dwe;
                 r[e] += q;
                 r[e + 1] -= q;
-                wsum += dwe * we(e) * dze * dze;
+                wsum += dwe * we(e) * de * de;
             }
-            const double f = gamma * wsum / (s * s * s);
-            for (int64_t i = 0; i < n; ++i) r[i] += f * p[i];
+            for (int64_t i = 0; i < n; ++i) r[i] += gamma * wsum * pi[i];
         }
-        solve(c, inv, p, n);  // t
-        apply_hinv(c, inv, p, pty, r, n);
+        solve(c, inv, pi, n);  // tau = A^{-1} pi
+        apply_hinv(c, inv, pi, pty, r, n);
         for (int64_t i = 0; i < n; ++i) dz[i] = static_cast<T>(r[i]);
     }
 
     template <class T>
     void vjp(const T *, const T *z, const uint8_t *code, const T *gv, T *gx, int64_t n,
              double gamma, double *acc, void *scr) const noexcept {
-        if (code[0] == kInside) {
+        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *q = y + n;
+        Scale sc;
+        double c = 0.0;
+        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
+        if (kind == kMean) {
             piece_mean(gv, gx, n);
             return;
         }
-        double *inv = static_cast<double *>(scr), *p = inv + n, *y = p + n, *q = y + n;
-        double s, c;
-        if (n == 1 || !setup(z, n, gamma, s, c, inv, p, y)) {
+        if (kind == kIdentity) {
             for (int64_t i = 0; i < n; ++i) gx[i] = gv[i];
             return;
         }
-        solve(c, inv, y, n);
-        double pty = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) {
-            const double dze = static_cast<double>(z[e + 1]) - static_cast<double>(z[e]);
-            pty += ae(e) * dze * (y[e + 1] - y[e]);
-        }
-        // y is free again: keep p there, and t = A^{-1} p in p's buffer.
-        std::memcpy(y, p, static_cast<size_t>(n) * sizeof(double));
-        solve(c, inv, p, n);
+        const double pty = solve_pty(z, sc, c, inv, y, n);
+        // y is free again: keep pi there, and tau = A^{-1} pi in pi's buffer.
+        std::memcpy(y, pi, static_cast<size_t>(n) * sizeof(double));
+        solve(c, inv, pi, n);
         for (int64_t i = 0; i < n; ++i) q[i] = static_cast<double>(gv[i]);
-        apply_hinv(c, inv, p, pty, q, n);
+        apply_hinv(c, inv, pi, pty, q, n);
         for (int64_t i = 0; i < n; ++i) gx[i] = static_cast<T>(q[i]);
-        double pq = 0.0;
-        for (int64_t i = 0; i < n; ++i) pq += y[i] * q[i];
+        double piq = 0.0;
+        for (int64_t i = 0; i < n; ++i) piq += y[i] * q[i];
         const int64_t P = nparams();
-        acc[P] -= pq / s;
+        acc[P] -= piq;
         for (int64_t e = 0; e + 1 < n; ++e) {
-            const double dze = static_cast<double>(z[e + 1]) - static_cast<double>(z[e]);
-            acc[w.size() == 1 ? 0 : e] -=
-                gamma * we(e) * dze * (2.0 * (q[e + 1] - q[e]) / s - pq * dze / (s * s * s));
+            const double de = sc.delta(z, e);
+            acc[w.size() == 1 ? 0 : e] -= gamma * we(e) * de * (2.0 * (q[e + 1] - q[e]) - piq * de);
         }
     }
 };
