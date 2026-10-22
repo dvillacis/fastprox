@@ -183,9 +183,15 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         bool done;
         const int st = read_input(x, z, wk.d, c, done);
         if (st != kRowOk || done) return st;
+        const double gamma0 = c.gamma;
+        const int e = rescale(wk.d, c);
         solve(wk, c);
-        for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(wk.zv[i]);
         if (c.save) structure(wk.d, wk.zv, wk.lev, wk.uf, c);
+        if (e) {  // the regions are scale-free; the saved flow is compared with gamma w_e
+            unscale(e, wk.zv, gamma0, c);
+            if (c.save) scale2(reinterpret_cast<double *>(c.save + base_bytes()), m, e);
+        }
+        for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(wk.zv[i]);
         return kRowOk;
     }
 

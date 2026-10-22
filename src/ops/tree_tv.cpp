@@ -260,13 +260,16 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
         bool done;
         const int st = read_input(x, z, wk.d, c, done);
         if (st != kRowOk || done) return st;
+        const double gamma0 = c.gamma;
+        const int e = rescale(wk.d, c);
         for (int64_t j = 0; j < n; ++j) wk.x[j] = wk.d[order[static_cast<size_t>(j)]];
         solve(wk, c.gamma);
         polish(wk, c.gamma);
         for (int64_t j = 0; j < n; ++j) wk.zn[order[static_cast<size_t>(j)]] = wk.zv[j];
         certificate(wk.d, wk.zn, wk.s, c);
-        for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(wk.zn[i]);
         if (c.save) structure(wk.d, wk.zn, wk.lo, wk.hmax, c);
+        if (e) unscale(e, wk.zn, gamma0, c);
+        for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(wk.zn[i]);
         return kRowOk;
     }
 

@@ -16,10 +16,13 @@
 // at s_i = s_j, and G-_ij, r_i -> J_ii at zero, since J_ij = 0 there (Ding et
 // al., Lemma 3.2). Pairs closer than eps^(1/3) max |s| count as tied and take
 // the average of their two limits: a quotient there would lose eps |z| / gap
-// to rounding, while the average is off by O(gap^2) and exact at a tie.
+// to rounding, while the average is off by O(gap^2) and exact at a tie. The
+// rule is per pair: values whose adjacent gaps are within that band chain
+// into clusters, which can be much wider than the band, and a pair of the
+// same cluster farther apart takes its quotient (audit T7).
 //
 // The limits come from one JVP per row, in a direction d that is nonzero on
-// every member of each cluster of tied values and sums to zero over it. On a
+// every member of each cluster (the chained one) and sums to zero over it. On a
 // cluster of equal values, permutation invariance gives J the form
 // a I + b 1 1^T there and a constant c 1 1^T to each other cluster, so
 // (J d)_i / d_i = a for every member: J_ii - J_ij for all its pairs. For a
@@ -155,8 +158,11 @@ fp_status spectral_driver(const fp_op &op, const fp_workspace &ws, bool svd, con
             for (int64_t i = 0; i < k; ++i) {
                 for (int64_t j = 0; j < k; ++j) {
                     if (i == j) continue;
-                    const double gp = cid[i] == cid[j] ? 0.5 * (lam[i] + lam[j])
-                                                       : (zv[i] - zv[j]) / (sv[i] - sv[j]);
+                    // The limit only for a pair within the band: a run of close
+                    // values chains into a cluster much wider (audit T7), and
+                    // the quotient over a gap above the band loses only eps^(2/3).
+                    const bool tied = cid[i] == cid[j] && std::fabs(sv[i] - sv[j]) <= band;
+                    const double gp = tied ? 0.5 * (lam[i] + lam[j]) : (zv[i] - zv[j]) / (sv[i] - sv[j]);
                     const double aij = static_cast<double>(arow[i * ai + j * aj]);
                     double v;
                     if (svd) {
