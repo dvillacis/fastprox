@@ -177,7 +177,7 @@ its row to the decisions table when it lands.
 - [ ] K9: TV1D `constant_mean` overflows — [spec](docs/audit-2026-10.md#k9)
 - [ ] K10: Huber derivative: c² underflows — [spec](docs/audit-2026-10.md#k10)
 - [ ] K11: A degenerate bound lo = hi is treated as free — [spec](docs/audit-2026-10.md#k11)
-- [ ] T1: Anisotropic TV: flat edges at tiny bounds λ_e — [spec](docs/audit-2026-10.md#t1)
+- [x] T1: Anisotropic TV: flat edges at tiny bounds λ_e — [spec](docs/audit-2026-10.md#t1)
 - [ ] T5: Image TV: overflow of ‖x‖² and of the gap (power-of-two rescaling) — [spec](docs/audit-2026-10.md#t5)
 - [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
 - [ ] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)

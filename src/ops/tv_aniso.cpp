@@ -130,18 +130,20 @@ struct TVAniso final : ImageOp<TVAniso> {
         for (int a = 0; a < k; ++a) P = std::max(P, fiber_blocks(g, a));
         return (12 * static_cast<size_t>(g.N) + static_cast<size_t>(P) + 8) * sizeof(double);
     }
-    // Saved structure: the number of components, a component label per entry,
-    // and per component 1/|C| and the boundary sign sums S_{C,a} (k of them;
-    // with edge weights, sums of beta_e sign_e); with edge weights also the
-    // sign of every edge (k N bytes).
+    // Saved structure: the number of components and the gap of the saved
+    // point (for branch_image), a component label per entry, and per
+    // component 1/|C| and the boundary sign sums S_{C,a} (k of them; with
+    // edge weights, sums of beta_e sign_e); with edge weights also the sign
+    // of every edge (k N bytes).
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N), K = static_cast<size_t>(k);
-        return 8 + round8(4 * N) + (1 + K) * N * 8 + (beta.empty() ? 0 : K * N);
+        return 16 + round8(4 * N) + (1 + K) * N * 8 + (beta.empty() ? 0 : K * N);
     }
     static size_t round8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     struct View {
         int64_t *ncomp;
+        double *gap;
         int32_t *label;
         double *inv, *S;  // S[a * N + C]
         int8_t *sign;     // sign[a * N + i] of the edge (i, i + e_a), with edge weights
@@ -149,8 +151,9 @@ struct TVAniso final : ImageOp<TVAniso> {
     View view(char *save, int64_t N) const noexcept {
         View v;
         v.ncomp = reinterpret_cast<int64_t *>(save);
-        v.label = reinterpret_cast<int32_t *>(save + 8);
-        v.inv = reinterpret_cast<double *>(save + 8 + round8(4 * static_cast<size_t>(N)));
+        v.gap = reinterpret_cast<double *>(save + 8);
+        v.label = reinterpret_cast<int32_t *>(save + 16);
+        v.inv = reinterpret_cast<double *>(save + 16 + round8(4 * static_cast<size_t>(N)));
         v.S = v.inv + N;
         v.sign = beta.empty() ? nullptr : reinterpret_cast<int8_t *>(v.S + k * N);
         return v;
@@ -882,6 +885,20 @@ struct TVAniso final : ImageOp<TVAniso> {
     // gave errors of 0.07-0.19 against the exact derivative on 128^2 images
     // at a gap tolerance of 1e-8. Along other axes the components do not
     // join and the signs are those of z's jumps. Uses u as scratch.
+    //
+    // The dual test fails where lam_e is near the rounding of p_e, about eps
+    // max |d| (so at tiny gamma or edge weights: errors of 0.6-0.97 against
+    // the exact derivative). An edge whose jump is certified comes first: the
+    // gap bounds |z - z*|_inf <= |z - z*|_2 <= rho = sqrt(2 gap) (Beck, Lemma
+    // 12.7), so |z_j - z_i| > 2 rho means a jump at the solution as well,
+    // with the same sign, and every optimal dual on the bound there. In
+    // floating point the threshold is tau = 2 sqrt(2 gap+) + tau0, with gap+
+    // = gap + (M + 4) eps A, the error bound of a recursive sum of M = (k + 1) N
+    // terms of total size A = sum_e lam_e |z_j - z_i| + sum_p |z_p| |d_p - z_p|
+    // (N. J. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed.,
+    // SIAM 2002, Section 4.2), and tau0 = 64 eps (max |d| + 2 sum_a max_e
+    // lam_e) for the rounding of z and of d - z = sum_a q_a, the allowance of
+    // graph TV's regions (edge_tv.hpp). d is z + sum_a q_a.
     // With side (since 0.3; C order, from fp_workspace_set_branch), an edge
     // (i, j) at a kink within stol, its jump within stol of 0 and its 1D dual
     // within stol of its bound, is joined for side[i] = -1 and kept apart
@@ -924,11 +941,19 @@ struct TVAniso final : ImageOp<TVAniso> {
             const bool kink = r > 0.0 && std::fabs(z[i + s] - z[i]) <= stol && std::fabs(pe) >= r - stol;
             return kink ? static_cast<int>(side[i]) : 0;
         };
+        // No jump exceeds tau when tau is above the range of z (the usual case
+        // but at tiny lam_e), and then the test is skipped.
+        const double tau = jump_bound(g, c, lam, z);
+        auto certified = [&](int a, int64_t i, int64_t s) {  // a jump at the solution too
+            return tau == tau && le(lam, a, i, N) > 0.0 && std::fabs(z[i + s] - z[i]) > tau;
+        };
         for (int a = 0; a < g.k; ++a) {
             if (lam[a] == 0.0 || g.L[a] == 1) continue;
             edges(a, [&](int64_t i, int64_t s, double pe) {
                 const int f = forced(a, i, s, pe);
-                if (f > 0 || (f == 0 && !(std::fabs(pe) < le(lam, a, i, N) * (1.0 - kPolishEta)))) return;
+                if (f > 0 || (f == 0 && (!(std::fabs(pe) < le(lam, a, i, N) * (1.0 - kPolishEta)) ||
+                                         certified(a, i, s))))
+                    return;
                 int64_t ri = find(i), rj = find(i + s);
                 if (ri == rj) return;
                 if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
@@ -968,8 +993,9 @@ struct TVAniso final : ImageOp<TVAniso> {
             if (lam[a] > 0.0) {
                 // An edge without weight has p_e = 0 up to rounding, so its sign
                 // comes from z (as the one-sided derivative in beta_e needs).
-                edges(a, [&](int64_t i, int64_t, double pe) {
-                    add(i, ba && ba[i] == 0.0 ? zsign(i) : (pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : 0.0)));
+                edges(a, [&](int64_t i, int64_t s, double pe) {
+                    add(i, (ba && ba[i] == 0.0) || certified(a, i, s)
+                               ? zsign(i) : (pe > 0.0 ? -1.0 : (pe < 0.0 ? 1.0 : 0.0)));
                 });
                 continue;
             }
@@ -980,6 +1006,40 @@ struct TVAniso final : ImageOp<TVAniso> {
         }
         for (int64_t C = 0; C < nc; ++C) inv[C] = 1.0 / inv[C];
         *v.ncomp = nc;
+        *v.gap = c.gap;
+    }
+
+    // tau of structure(): above it, a jump of z is a jump of the solution.
+    // One serial pass in a fixed order. NaN, so that no edge is certified,
+    // without an active axis or when tau is above the range of z.
+    double jump_bound(const Geom &g, const ImageCall &c, const double *lam, const double *z) const {
+        const int64_t N = g.N;
+        double lmax = 0.0;
+        for (int a = 0; a < g.k; ++a) {
+            if (lam[a] == 0.0 || g.L[a] == 1) continue;
+            const double *ba = bw(a, N);
+            double m = 1.0;
+            if (ba) m = *std::max_element(ba, ba + N);
+            lmax += lam[a] * m;
+        }
+        const double none = std::numeric_limits<double>::quiet_NaN();
+        if (!(lmax > 0.0)) return none;
+        const auto [zlo, zhi] = std::minmax_element(z, z + N);
+        const double range = *zhi - *zlo;
+        if (!(2.0 * std::sqrt(2.0 * std::max(c.gap, 0.0)) < range)) return none;  // tau is larger
+        double A = 0.0, dmax = 0.0;
+        for (int64_t r = 0; r < g.rows(); ++r) A += tv_row(g, lam, z, r);
+        for (int64_t p = 0; p < N; ++p) {
+            double res = 0.0;  // d_p - z_p
+            for (int a = 0; a < g.k; ++a) res += c.dual[a * N + p];
+            A += std::fabs(z[p]) * std::fabs(res);
+            dmax = std::max(dmax, std::fabs(z[p] + res));
+        }
+        const double eps = std::numeric_limits<double>::epsilon();
+        const double M = static_cast<double>((g.k + 1) * N);
+        const double gp = std::max(c.gap, 0.0) + (M + 4.0) * eps * A;
+        const double tau = 2.0 * std::sqrt(2.0 * gp) + 64.0 * eps * (dmax + 2.0 * lmax);
+        return tau < range ? tau : none;
     }
 
     // ---- kinks (since 0.3) ----------------------------------------------------
@@ -1036,6 +1096,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.gamma = gamma;
         c.save = save;
         c.dual = const_cast<double *>(dual);
+        c.gap = *view(save, g.N).gap;  // of the saved point
         structure(g, c, lam, z, reinterpret_cast<double *>(work), side, tol);
     }
 
