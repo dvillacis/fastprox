@@ -18,6 +18,18 @@ namespace fp {
 
 constexpr int kMaxArr = 4;
 
+// The largest entry count and element offset span of an array (to_arr): with
+// both below 2^60, offsets times the item size and byte counts fit in int64.
+constexpr int64_t kMaxElems = (int64_t{1} << 60) - 1;
+
+// r = a * b for 0 <= a, b <= kMaxElems; false when the product exceeds
+// kMaxElems. Portable (MSVC has no __builtin_mul_overflow).
+inline bool mul_bounded(int64_t a, int64_t b, int64_t &r) noexcept {
+    if (a != 0 && b > kMaxElems / a) return false;
+    r = a * b;
+    return true;
+}
+
 // Internal array: ndim >= 1 (scalars become shape [1]).
 struct Arr {
     char *data = nullptr;
@@ -39,6 +51,45 @@ inline bool same_shape(const Arr &a, const Arr &b) noexcept {
     for (int d = 0; d < a.ndim; ++d)
         if (a.shape[d] != b.shape[d]) return false;
     return true;
+}
+
+// Exact aliasing: the same data pointer, shape and stride on every dimension
+// of extent > 1 (strides of extent-1 dimensions are never used).
+inline bool same_layout(const Arr &a, const Arr &b) noexcept {
+    if (a.data != b.data || !same_shape(a, b)) return false;
+    for (int d = 0; d < a.ndim; ++d)
+        if (a.shape[d] > 1 && a.strides[d] != b.strides[d]) return false;
+    return true;
+}
+
+// The byte range [lo, hi] of the entries of a (numel > 0). to_arr bounds the
+// offset span by kMaxElems, so nothing here overflows.
+inline void byte_range(const Arr &a, uintptr_t &lo, uintptr_t &hi) noexcept {
+    int64_t mn = 0, mx = 0;
+    for (int d = 0; d < a.ndim; ++d) {
+        if (a.shape[d] < 2) continue;
+        const int64_t e = (a.shape[d] - 1) * a.strides[d];
+        (e < 0 ? mn : mx) += e;
+    }
+    const int64_t item = static_cast<int64_t>(a.itemsize());
+    const uintptr_t base = reinterpret_cast<uintptr_t>(a.data);
+    lo = base - static_cast<uintptr_t>(-mn * item);
+    hi = base + static_cast<uintptr_t>(mx * item + item - 1);
+}
+
+// An output may be written: no stride 0 on a dimension of extent > 1, and
+// either exactly the input (same_layout) or disjoint from the input's byte
+// range. The test is conservative: disjoint interleaved views of one buffer
+// are rejected. in may be null (only the stride rule).
+inline fp_status check_output(const Arr *in, const Arr &out) noexcept {
+    if (out.numel() == 0) return FP_OK;
+    for (int d = 0; d < out.ndim; ++d)
+        if (out.shape[d] > 1 && out.strides[d] == 0) return FP_EINVAL;
+    if (!in || in->numel() == 0 || same_layout(*in, out)) return FP_OK;
+    uintptr_t a0, a1, b0, b1;
+    byte_range(*in, a0, a1);
+    byte_range(out, b0, b1);
+    return (a0 <= b1 && b0 <= a1) ? FP_EINVAL : FP_OK;
 }
 
 struct RowPlan {

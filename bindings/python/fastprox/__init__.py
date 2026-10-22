@@ -216,12 +216,30 @@ def _input(x, copy: bool) -> np.ndarray:
     return np.asarray(x, dtype=np.float64)
 
 
-def _output(x: np.ndarray, out) -> np.ndarray:
+def _output(x: np.ndarray, out, shape=None, dtype=None) -> np.ndarray:
+    shape = x.shape if shape is None else shape
+    dtype = x.dtype if dtype is None else dtype
     if out is None:
-        return np.empty(x.shape, dtype=x.dtype)
-    if not isinstance(out, np.ndarray) or out.shape != x.shape or out.dtype != x.dtype:
-        raise ValueError("out must be an ndarray with the shape and dtype of the input")
+        return np.empty(shape, dtype=dtype)
+    if not isinstance(out, np.ndarray) or out.shape != shape or out.dtype != dtype:
+        raise ValueError("out must be a writeable ndarray with the shape and dtype of the input")
     return out
+
+
+def _restage(out, *inputs):
+    """Called when the C library rejected a call: copies of the inputs when
+    the caller's out may share memory with one of them, for a retry (the
+    library takes an out that is exactly its input and, since 1.0, rejects any
+    other overlap before any work); a clear error for an out it cannot write;
+    else the original error. Only failures pay for these checks."""
+    if out is not None:
+        if not out.flags.writeable:
+            raise ValueError("out must be a writeable ndarray with the shape and dtype of the input") from None
+        if any(st == 0 and n > 1 for st, n in zip(out.strides, out.shape)):
+            raise ValueError("out must not have zero strides") from None
+        if any(a is not None and np.may_share_memory(a, out) for a in inputs):
+            return tuple(None if a is None else a.copy() for a in inputs)
+    raise  # noqa: PLE0704 - the error being handled
 
 
 def _steps(step, batch_shape, conj):
@@ -287,7 +305,12 @@ class Operator:
         ``gamma`` is a scalar, or (since 1.1) an array that broadcasts to the
         batch shape (the shape of ``x`` without ``axis``): one step per row.
         Then ``jvp``'s ``dgamma`` moves every step, and ``vjp``'s
-        ``grads.gamma`` is the sum over rows of each row's gradient."""
+        ``grads.gamma`` is the sum over rows of each row's gradient.
+
+        ``out`` may be ``x`` itself or any array that shares memory with it;
+        an overlapping input is copied first (since 1.0; the same for the
+        ``out`` of ``jvp`` and ``vjp``). It must be writeable, without zero
+        strides."""
         return self._run(x, gamma, axis, out, threads, keep, ctx, copy, conj=False)
 
     def value(self, x, *, axis=-1, tol=1e-6):
@@ -322,11 +345,19 @@ class Operator:
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
         if not keep:
-            _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
+            try:
+                _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
+            except (TypeError, ValueError):
+                x, steps = _restage(out, x, steps)
+                _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        ctx.info = Info(*_C.prox(self._op, step, x, z, axis, threads, True, ctx.ws,
-                                 conj, steps=steps)[:3])
+        try:
+            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
+        except (TypeError, ValueError):
+            x, steps = _restage(out, x, steps)
+            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
+        ctx.info = Info(*res[:3])
         ctx.conj = conj
         ctx.step = step if steps is None else steps
         return z, ctx
@@ -354,21 +385,29 @@ class Operator:
         self._check_ctx(ctx)
         if dx is not None:
             dx = _input(dx, True).astype(ctx.dtype, copy=False)
-        dout = np.empty(ctx.shape, ctx.dtype) if out is None else out
+        dout = _output(None, out, ctx.shape, ctx.dtype)
         if dparams is not None:
             dparams = self._flatten(dparams)
         with _branch(ctx, branch, kink_tol):
-            _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
+            try:
+                _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
+            except (TypeError, ValueError):
+                dx, = _restage(out, dx)
+                _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
         return dout
 
     def vjp(self, ctx: Context, g, *, out=None, branch=None, kink_tol=0.0):
         r"""($J_x^\top g$, Grads) at the saved point; ``branch`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
-        gx = np.empty(ctx.shape, ctx.dtype) if out is None else out
+        gx = _output(None, out, ctx.shape, ctx.dtype)
         gp = np.zeros(self.nparams, np.float64)
         with _branch(ctx, branch, kink_tol):
-            gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
+            try:
+                gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
+            except (TypeError, ValueError):
+                g, = _restage(out, g)
+                gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
         return gx, Grads(gg, gp, self._fields(gp))
 
     def _check_ctx(self, ctx):
@@ -812,8 +851,14 @@ class _ImageOperator(Operator):
         if warm_start is not None:
             _C.set_dual(ws, np.asarray(warm_start, np.float64))
         step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
-        gap, iters, ties, conv = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj,
-                                         float(tol), int(max_iter), steps=steps)
+        try:
+            res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol), int(max_iter),
+                          steps=steps)
+        except (TypeError, ValueError):
+            x, steps = _restage(out, x, steps)
+            res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol), int(max_iter),
+                          steps=steps)
+        gap, iters, ties, conv = res
         dual = np.empty((self.ndim, *x.shape), np.float64)
         _C.get_dual(ws, dual)
         info = IterInfo(gap, iters, ties, conv, dual)
@@ -1018,11 +1063,19 @@ class _Pointwise(Operator):
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
         if not keep:
-            _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
+            try:
+                _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
+            except (TypeError, ValueError):
+                x, steps = _restage(out, x, steps)
+                _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        ctx.info = Info(*_C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj,
-                                 tie=t, steps=steps)[:3])
+        try:
+            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
+        except (TypeError, ValueError):
+            x, steps = _restage(out, x, steps)
+            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
+        ctx.info = Info(*res[:3])
         ctx.conj = conj
         ctx.step = step if steps is None else steps
         return z, ctx
@@ -1323,7 +1376,11 @@ class PSD(Spectral):
 def _once(handle, x, step, axis, out, threads, copy):
     x = _input(x, copy)
     z = _output(x, out)
-    _C.prox(handle, float(step), x, z, axis, threads, False, None, False)
+    try:
+        _C.prox(handle, float(step), x, z, axis, threads, False, None, False)
+    except (TypeError, ValueError):
+        x, = _restage(out, x)
+        _C.prox(handle, float(step), x, z, axis, threads, False, None, False)
     return z
 
 

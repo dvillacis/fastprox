@@ -64,10 +64,14 @@ fp_status to_arr(const fp_array *a, Arr &out, bool int8 = false) noexcept {
     } else {
         if (!a->shape) return FP_EINVAL;
         out.ndim = a->ndim;
+        // The entry count, zero extents skipped (so that every product
+        // Arr::numel forms is bounded too), at most kMaxElems.
+        int64_t count = 1;
         for (int d = 0; d < a->ndim; ++d) {
             if (a->shape[d] < 0) return FP_ESHAPE;
             out.shape[d] = a->shape[d];
             out.strides[d] = a->strides ? a->strides[d] : 0;
+            if (a->shape[d] > 1 && !mul_bounded(count, a->shape[d], count)) return FP_ESHAPE;
         }
         if (!a->strides) {  // NULL strides: C-contiguous
             int64_t s = 1;
@@ -75,6 +79,17 @@ fp_status to_arr(const fp_array *a, Arr &out, bool int8 = false) noexcept {
                 out.strides[d] = s;
                 s *= out.shape[d];
             }
+        }
+        // The element offset span, sum_d (shape_d - 1) |stride_d|, at most
+        // kMaxElems: offsets times the item size then fit in int64.
+        int64_t span = 0;
+        for (int d = 0; d < a->ndim; ++d) {
+            if (out.shape[d] < 2) continue;
+            const int64_t st = out.strides[d];
+            if (st < -kMaxElems || st > kMaxElems) return FP_ESHAPE;
+            int64_t e;
+            if (!mul_bounded(out.shape[d] - 1, st < 0 ? -st : st, e) || e > kMaxElems - span) return FP_ESHAPE;
+            span += e;
         }
     }
     if (!out.data && out.numel() > 0) return FP_EINVAL;
@@ -199,8 +214,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.image_sets = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(B, w.nthreads)));
         w.image_bytes = image_staging_bytes(N) + round64(op.image_bytes(ishape));
         w.image_thread_bytes = round64(op.image_thread_bytes(ishape));
-        w.image_work.resize(w.image_bytes * static_cast<size_t>(w.image_sets) / sizeof(double) + 1);
-        w.image_thread.resize(w.image_thread_bytes * static_cast<size_t>(w.nthreads) / sizeof(double) + 1);
+        w.image_work.resize(mul_size(w.image_bytes, static_cast<size_t>(w.image_sets)) / sizeof(double) + 1);
+        w.image_thread.resize(mul_size(w.image_thread_bytes, static_cast<size_t>(w.nthreads)) / sizeof(double) + 1);
         w.dual.resize(static_cast<size_t>(B) * static_cast<size_t>(k) * static_cast<size_t>(N));
         w.image_gaps.resize(static_cast<size_t>(B));
         w.image_iters.resize(static_cast<size_t>(B));
@@ -209,7 +224,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.xsave.resize(bytes / sizeof(double) + 1);
             w.zsave.resize(bytes / sizeof(double) + 1);
             w.struct_bytes = round64(op.struct_bytes(ishape));
-            w.structure.resize(w.struct_bytes * static_cast<size_t>(B) / sizeof(double) + 1);
+            w.structure.resize(mul_size(w.struct_bytes, static_cast<size_t>(B)) / sizeof(double) + 1);
             const int64_t P = op.nparams();
             w.nblocks = reduction_blocks(B, P);
             w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
@@ -225,7 +240,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
     }
     if (!elem && w.numel > 0) {
         w.thread_bytes = row_thread_bytes(op, w.n, item);
-        w.scratch.resize(w.thread_bytes * static_cast<size_t>(w.nthreads) / sizeof(double) + 1);
+        w.scratch.resize(mul_size(w.thread_bytes, static_cast<size_t>(w.nthreads)) / sizeof(double) + 1);
     }
     if (keep) {
         const size_t bytes = static_cast<size_t>(w.numel) * item;
@@ -284,6 +299,8 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     if (fp_status s = to_arr(oa, out)) return s;
     if (x.dtype != out.dtype) return FP_EDTYPE;
     if (!same_shape(x, out)) return FP_ESHAPE;
+    // Before any change to ws, so that a rejected call keeps its structure.
+    if (fp_status s = check_output(&x, out)) return s;
     int axis;
     if (norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
     const bool keep = o.keep_structure != 0;
@@ -292,6 +309,9 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     if (sa) {
         if (op->image_ndim() && x.ndim < op->image_ndim()) return FP_ESHAPE;
         if (fp_status s = read_steps(*op, sa, x, axis, steps)) return s;
+        Arr st;  // the steps are read during the work, so out must not overlap them
+        if (fp_status s = to_arr(sa, st)) return s;
+        if (fp_status s = check_output(&st, out)) return s;
     }
 
     std::unique_ptr<fp_workspace> local;
@@ -427,6 +447,7 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
         if (fp_status s = to_arr(dxa, dx)) return s;
         if (fp_status s = check_like_ws(*ws, dx)) return s;
     }
+    if (fp_status s = check_output(dxa ? &dx : nullptr, out)) return s;
     const int64_t P = op->nparams();
     const double *dp = nullptr;
     if (dpa && P > 0) {
@@ -487,6 +508,14 @@ fp_status spectral_jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_sp
         if (fp_status e = to_arr(ra, r)) return e;
         if (fp_status e = check_like_ws(*ws, r)) return e;
     }
+    // b and r must not overlap a, s or z (nor each other).
+    for (const Arr *in : {&a, &s, &z}) {
+        if (fp_status e = check_output(in, b)) return e;
+        if (ra)
+            if (fp_status e = check_output(in, r)) return e;
+    }
+    if (ra)
+        if (fp_status e = check_output(&b, r)) return e;
     const int64_t P = op->nparams();
     const double *dp = nullptr;
     if (dpa && P > 0) {
@@ -516,6 +545,7 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     if (fp_status s = to_arr(gxa, gx)) return s;
     if (fp_status s = check_like_ws(*ws, g)) return s;
     if (fp_status s = check_like_ws(*ws, gx)) return s;
+    if (fp_status s = check_output(&g, gx)) return s;
     const int64_t P = op->nparams();
     if (gpa) {  // validate before any work
         Arr t;
@@ -630,6 +660,7 @@ fp_status value_impl(const fp_op *op, const fp_array *xa, const fp_options *opt,
     if (fp_status s = to_arr(xa, x)) return s;
     if (fp_status s = to_arr(oa, out)) return s;
     if (out.dtype != FP_F64) return FP_EDTYPE;
+    if (fp_status s = check_output(&x, out)) return s;
     // The batch shape: x's without the axis (rows) or the image axes.
     const int k = op->image_ndim();
     int axis = 0;
@@ -661,6 +692,8 @@ fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr m;
     if (fp_status s = kink_arrays(ws, ma, &m, false)) return s;
+    if (ma)
+        if (fp_status s = check_output(nullptr, m)) return s;
     const Arr *mp = ma ? &m : nullptr;
     const bool f32 = ws->dtype == FP_F32;
     const fp_op &op = *ws->op;
@@ -839,6 +872,8 @@ fp_status dual_impl(fp_workspace *ws, const fp_array *aa, bool to_ws) {
     for (int d = 0; d < ws->ndim; ++d)
         if (a.shape[d + 1] != ws->shape[d]) return FP_ESHAPE;
     if (!to_ws && !ws->dual_valid) return FP_EINVAL;
+    if (!to_ws)
+        if (fp_status s = check_output(nullptr, a)) return s;
     if (ws->numel == 0) return FP_OK;
     if (to_ws) {  // a seed must be finite
         bool ok = true;

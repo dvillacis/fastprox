@@ -2681,6 +2681,178 @@ static void test_prox_steps() {
     }
 }
 
+// ---------------------------------------------------------------- outputs and descriptors
+static fp_array view(double *data, int nd, const int64_t *shape, const int64_t *strides) {
+    return fp_array{data, FP_F64, nd, shape, strides, FP_DEVICE_CPU};
+}
+
+// Outputs (audit C1): exactly the input, or disjoint from its byte range,
+// and no stride 0 on a dimension of extent > 1; anything else is FP_EINVAL
+// before any work.
+static void test_aliasing() {
+    fp_op *soft, *tv1d, *aniso;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &soft));
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv1d));
+    aniso = make_aniso(2, {1.0});
+    // Exact alias accepted, also through negative non-unit strides: (60, 57)
+    // read as x[i, j] = buf[(59 - i) 114 + (56 - j) 2].
+    for (fp_op *op : {soft, tv1d, aniso})
+        for (int t : {1, 8}) {
+            const int64_t shape[2] = {60, 57}, neg[2] = {-114, -2};
+            Vec buf = randn(60 * 114, 1.5);
+            Arr xc({60, 57}), ref({60, 57});
+            for (int64_t i = 0; i < 60; ++i)
+                for (int64_t j = 0; j < 57; ++j) xc.data[i * 57 + j] = buf[(59 - i) * 114 + (56 - j) * 2];
+            fp_options o = opts(-1, t);
+            o.tol = 1e-10;
+            o.max_iter = 100000;
+            CHECK_OK(fp_prox(op, 0.7, &xc.a, &ref.a, &o, nullptr, nullptr));
+            fp_array v = view(buf.data() + 59 * 114 + 56 * 2, 2, shape, neg);
+            CHECK_OK(fp_prox(op, 0.7, &v, &v, &o, nullptr, nullptr));
+            bool same = true;
+            for (int64_t i = 0; i < 60; ++i)
+                for (int64_t j = 0; j < 57; ++j) same = same && buf[(59 - i) * 114 + (56 - j) * 2] == ref.data[i * 57 + j];
+            CHECK(same);
+            CHECK_OK(fp_prox(op, 0.7, &xc.a, &xc.a, &o, nullptr, nullptr));  // contiguous in place
+            CHECK(xc.data == ref.data);
+        }
+    // Overlaps rejected, with the buffer untouched.
+    auto rejected = [](fp_op *op, fp_array x, fp_array out, const Vec &buf, const Vec &before) {
+        CHECK(fp_prox(op, 0.7, &x, &out, nullptr, nullptr, nullptr) == FP_EINVAL);
+        CHECK(buf == before);
+    };
+    {
+        Vec buf = randn(64 * 64);
+        const Vec before = buf;
+        const int64_t shape[2] = {64, 64}, c[2] = {64, 1}, tr[2] = {1, 64};
+        rejected(soft, view(buf.data(), 2, shape, c), view(buf.data(), 2, shape, tr), buf, before);  // transpose
+    }
+    {
+        Vec buf = randn(257 * 64);
+        const Vec before = buf;
+        const int64_t shape[2] = {256, 64};
+        rejected(tv1d, view(buf.data(), 2, shape, nullptr), view(buf.data() + 64, 2, shape, nullptr), buf, before);
+        rejected(tv1d, view(buf.data() + 64, 2, shape, nullptr), view(buf.data(), 2, shape, nullptr), buf, before);
+    }
+    {
+        Vec buf = randn(200);
+        const Vec before = buf;
+        const int64_t n[1] = {100}, two[1] = {2}, rev[1] = {-1}, one[1] = {1};
+        rejected(soft, view(buf.data(), 1, n, two), view(buf.data() + 1, 1, n, two), buf, before);  // a[0::2], a[1::2]
+        rejected(soft, view(buf.data(), 1, n, one), view(buf.data() + 99, 1, n, rev), buf, before);  // reversed
+    }
+    // Stride 0 in an output: rejected on an extent > 1, accepted on extent 1.
+    {
+        Arr x({1000});
+        Vec z(1, 0.0);
+        const int64_t n[1] = {1000}, zero[1] = {0};
+        fp_array out = view(z.data(), 1, n, zero);
+        CHECK(fp_prox(soft, 0.7, &x.a, &out, nullptr, nullptr, nullptr) == FP_EINVAL);
+        Arr x2({1, 1000}, randn(1000)), z2({1, 1000});
+        const int64_t sh[2] = {1, 1000}, st[2] = {0, 1};
+        fp_array o2 = view(z2.data.data(), 2, sh, st);
+        CHECK_OK(fp_prox(soft, 0.7, &x2.a, &o2, nullptr, nullptr, nullptr));
+    }
+    // A rejected call leaves the workspace's structure usable; derivatives
+    // follow the same rules (dx/dout, g/gx).
+    for (fp_op *op : {soft, tv1d}) {
+        Vec buf = randn(2 * 640);
+        const int64_t shape[2] = {10, 64};
+        fp_array x = view(buf.data(), 2, shape, nullptr);
+        Arr z({10, 64}), dx({10, 64}, randn(640)), d1({10, 64}), d2({10, 64});
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.7, &x, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &d1.a));
+        fp_array shifted = view(buf.data() + 7, 2, shape, nullptr);
+        CHECK(fp_prox(op, 0.7, &x, &shifted, &o, ws, nullptr) == FP_EINVAL);
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &d2.a));
+        CHECK(d1.data == d2.data);
+        // jvp: dx and dout partially overlapping, then exactly the same.
+        Vec tb(2 * 640);
+        for (size_t i = 0; i < 640; ++i) tb[i] = dx.data[i];
+        fp_array t0 = view(tb.data(), 2, shape, nullptr), t1 = view(tb.data() + 5, 2, shape, nullptr);
+        CHECK(fp_jvp(op, ws, &t0, 0.0, nullptr, &t1) == FP_EINVAL);
+        CHECK_OK(fp_jvp(op, ws, &t0, 0.0, nullptr, &t0));
+        CHECK(std::equal(d1.data.begin(), d1.data.end(), tb.begin()));
+        // vjp: the same pair.
+        Arr gx({10, 64});
+        double gg;
+        CHECK_OK(fp_vjp(op, ws, &dx.a, &gx.a, &gg, nullptr));
+        for (size_t i = 0; i < 640; ++i) tb[i] = dx.data[i];
+        CHECK(fp_vjp(op, ws, &t0, &t1, &gg, nullptr) == FP_EINVAL);
+        CHECK_OK(fp_vjp(op, ws, &t0, &t0, &gg, nullptr));
+        CHECK(std::equal(gx.data.begin(), gx.data.end(), tb.begin()));
+        fp_workspace_free(ws);
+    }
+    // fp_prox_steps: the steps inside out's byte range.
+    {
+        Arr x({8, 16}, randn(128));
+        Vec obuf(128, 0.0);
+        const int64_t shape[2] = {8, 16}, sshape[1] = {8};
+        fp_array out = view(obuf.data(), 2, shape, nullptr), steps = view(obuf.data() + 3, 1, sshape, nullptr);
+        for (int i = 0; i < 8; ++i) obuf[3 + i] = 0.5;
+        CHECK(fp_prox_steps(soft, &steps, &x.a, &out, nullptr, nullptr) == FP_EINVAL);
+    }
+    // fp_value: out overlapping x.
+    {
+        Vec buf = randn(64);
+        const int64_t shape[2] = {8, 8}, bshape[1] = {8};
+        fp_array x = view(buf.data(), 2, shape, nullptr), out = view(buf.data() + 8, 1, bshape, nullptr);
+        CHECK(fp_value(soft, &x, nullptr, &out) == FP_EINVAL);
+    }
+    fp_op_free(soft);
+    fp_op_free(tv1d);
+    fp_op_free(aniso);
+}
+
+// Descriptors whose entry count or offset span exceeds 2^60 - 1 (audit A2).
+static void test_descriptor_bounds() {
+    fp_op *op;
+    CHECK_OK(fp_op_soft(0.5, nullptr, &op));
+    Vec small(64, 1.0);
+    const int64_t B32 = int64_t{1} << 32, B62 = int64_t{1} << 62, B40 = int64_t{1} << 40;
+    struct Bad {
+        std::vector<int64_t> shape, strides;  // empty strides: C order
+        bool null_data;
+    };
+    const std::vector<Bad> bad = {
+        {{B32, B32}, {}, true},
+        {{B32 + 1, B32}, {}, false},
+        {{3, B62}, {}, false},
+        {{B62 + 1, 4}, {0, 1}, false},
+        {{B40, B40, 0}, {}, false},
+        {{2, 4}, {INT64_MIN, 1}, false},
+        {{2, 2}, {int64_t{1} << 60, 1}, false},
+    };
+    for (const Bad &b : bad) {
+        fp_array x = view(b.null_data ? nullptr : small.data(), static_cast<int>(b.shape.size()), b.shape.data(),
+                          b.strides.empty() ? nullptr : b.strides.data());
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws = nullptr;
+        CHECK(fp_workspace_create(op, &x, &o, &ws) == FP_ESHAPE && ws == nullptr);
+        CHECK(fp_prox(op, 0.7, &x, &x, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        CHECK(fp_prox_conj(op, 0.7, &x, &x, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        double v = 0.0;
+        const int64_t one[1] = {1};
+        fp_array vo = view(&v, 1, one, nullptr);
+        CHECK(fp_value(op, &x, nullptr, &vo) == FP_ESHAPE);
+    }
+    // Broadcast and empty inputs stay valid.
+    {
+        const int64_t shape[2] = {1000, 4}, st[2] = {0, 1};
+        fp_array x = view(small.data(), 2, shape, st);
+        Arr z({1000, 4});
+        CHECK_OK(fp_prox(op, 0.7, &x, &z.a, nullptr, nullptr, nullptr));
+        for (const std::vector<int64_t> &sh : {std::vector<int64_t>{0, 5}, std::vector<int64_t>{5, 0}}) {
+            fp_array e = view(small.data(), 2, sh.data(), nullptr);
+            CHECK_OK(fp_prox(op, 0.7, &e, &e, nullptr, nullptr, nullptr));
+        }
+    }
+    fp_op_free(op);
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -2701,6 +2873,8 @@ int main() {
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();
+    test_aliasing();
+    test_descriptor_bounds();
     test_float32();
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;
