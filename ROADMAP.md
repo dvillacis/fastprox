@@ -149,7 +149,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 An audit of master at d67de78 for robustness and speed found 56 items, each
 reproduced and specified (problem, design, constraints, tests, acceptance) in
 [docs/audit-2026-10.md](docs/audit-2026-10.md), with the decisions that span
-items and the open questions. The correctness, safety and scaling items and
+items and the decisions on its open questions (2026-10-22). The correctness, safety and scaling items and
 the documentation items gate 1.0.0, released through 1.0.0rc2 (A11); the
 speed items follow in 1.0.x. An item whose design departs from the spec adds
 its row to the decisions table when it lands.
@@ -182,7 +182,7 @@ its row to the decisions table when it lands.
 - [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
 - [ ] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)
 - [ ] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
-- [ ] P1: Second-order reverse mode in the PyTorch wrappers (`_Prox`, `_DeviceTV`, `_SpectralProx`) — [spec](docs/audit-2026-10.md#p1)
+- [ ] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)
 - [ ] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
 - [ ] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
 - [ ] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)
@@ -218,6 +218,10 @@ its row to the decisions table when it lands.
 - [ ] P9: JAX: compile once per operator instead of dispatching eagerly — [spec](docs/audit-2026-10.md#p9)
 - [ ] P10: Keep the derivative structure only when a derivative can follow (PyTorch and JAX forward) — [spec](docs/audit-2026-10.md#p10)
 - [ ] P11: Trim per-call Python overhead — [spec](docs/audit-2026-10.md#p11)
+
+**Second order in PyTorch (1.0.x)**
+
+- [ ] P1: exact second-order reverse mode through the linear part and where the Jacobian is locally constant, NaN elsewhere — [spec](docs/audit-2026-10.md#p1)
 
 ## 1.x — GPU backend
 
