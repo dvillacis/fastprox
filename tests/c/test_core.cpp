@@ -2460,6 +2460,207 @@ static void test_errors_and_special_values() {
     fp_op_free(op);
 }
 
+// Kept calls that do no work (audit A3): empty batches and sigma = 0 in the
+// conjugate save a point whose derivatives work; steps are checked even on
+// an empty batch.
+static void test_kept_empty_and_identity() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    auto bits_equal = [](const Vec &a, const Vec &b) {
+        return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0;
+    };
+    std::vector<std::pair<const char *, std::function<fp_status(fp_op **)>>> makers = {
+        {"soft", [](fp_op **o) { return fp_op_soft(1.0, nullptr, o); }},
+        {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }},
+        {"tv_iso", [](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }},
+    };
+    for (auto &mk : makers) {
+        fp_op *op;
+        CHECK_OK(mk.second(&op));
+        const int64_t P = fp_op_nparams(op);
+        for (std::vector<int64_t> shape : {std::vector<int64_t>{0, 5}, {3, 0}, {0, 4, 4}}) {
+            Arr x(shape), z(shape), dz(shape);
+            fp_options o = opts(-1, 0, 1);
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_prox(op, 0.7, &x.a, &z.a, &o, ws, nullptr));
+            CHECK_OK(fp_jvp(op, ws, &x.a, 1.0, nullptr, &dz.a));
+            Arr gp({std::max<int64_t>(P, 1)}, Vec(static_cast<size_t>(std::max<int64_t>(P, 1)), 7.0));
+            double gg = 5.0;
+            CHECK_OK(fp_vjp(op, ws, &x.a, &dz.a, &gg, P > 0 ? &gp.a : nullptr));
+            CHECK(gg == 0.0);
+            if (P > 0)
+                for (double v : gp.data) CHECK(v == 0.0);
+            int64_t count = -1;
+            if (std::strcmp(mk.first, "tv_iso") != 0) {
+                CHECK_OK(fp_workspace_kinks(ws, 1e-12, nullptr, &count));
+                CHECK(count == 0);
+                I8 side(shape, std::vector<int64_t>(shape.size(), 1), 0);
+                CHECK_OK(fp_workspace_set_branch(ws, &side.a, 0.0));
+            }
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+    // sigma = 0: y itself, and the identity's derivatives with a NaN sigma-derivative.
+    std::vector<std::pair<std::vector<int64_t>, std::function<fp_status(fp_op **)>>> conj = {
+        {{3}, [](fp_op **o) { return fp_op_soft(1.0, nullptr, o); }},
+        {{3}, [](fp_op **o) { return fp_op_l2_ball(0.7, o); }},
+        {{4, 4}, [](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }},
+    };
+    for (auto &c : conj) {
+        fp_op *op;
+        CHECK_OK(c.second(&op));
+        const std::vector<int64_t> &shape = c.first;
+        const int64_t n = shape.size() == 1 ? shape[0] : shape[0] * shape[1];
+        Arr y(shape, n == 3 ? Vec{0.5, 2.0, -3.0} : randn(n)), z(shape), dx(shape, randn(n)), dz(shape),
+            g(shape, randn(n)), gx(shape);
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox_conj(op, 0.0, &y.a, &z.a, &o, ws, nullptr));
+        CHECK(bits_equal(z.data, y.data));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a));
+        CHECK(bits_equal(dz.data, dx.data));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 1.0, nullptr, &dz.a));
+        for (double v : dz.data) CHECK(std::isnan(v));
+        double gg = 0.0;
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, nullptr));
+        CHECK(bits_equal(gx.data, g.data) && std::isnan(gg));
+        if (fp_op_nparams(op) == 0 && n == 3) {
+            int64_t count = -1;
+            I8 m({3}, {1}, 3);
+            m.data.assign(3, 9);
+            CHECK_OK(fp_workspace_kinks(ws, 1.0, &m.a, &count));
+            CHECK(count == 0 && m.data == std::vector<int8_t>(3, 0));
+            I8 side({3}, {1}, 3);
+            CHECK_OK(fp_workspace_set_branch(ws, &side.a, 0.0));
+        }
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    (void)nan;
+    // Steps are checked on an empty batch too.
+    fp_op *scad;
+    CHECK_OK(fp_op_scad(0.5, 3.7, nullptr, &scad));
+    Arr e({0}), e2({0});
+    CHECK(fp_prox(scad, 10.0, &e.a, &e2.a, nullptr, nullptr, nullptr) == FP_EPARAM);
+    fp_op_free(scad);
+    fp_op *tv;
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+    Arr x30({3, 0}), z30({3, 0}), steps({3}, {1.0, -1.0, 2.0});
+    CHECK(fp_prox_steps(tv, &steps.a, &x30.a, &z30.a, nullptr, nullptr) == FP_EPARAM);
+    steps.data[1] = 1.0;
+    CHECK_OK(fp_prox_steps(tv, &steps.a, &x30.a, &z30.a, nullptr, nullptr));
+    fp_op_free(tv);
+}
+
+// Image operators ignore fp_options.axis (audit A5).
+static void test_image_axis_ignored() {
+    const int64_t chain[] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12,
+                             12, 13, 13, 14, 14, 15};
+    std::vector<std::pair<std::vector<int64_t>, std::function<fp_status(fp_op **)>>> ops = {
+        {{4, 4}, [](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }},
+        {{4, 4}, [](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }},
+        {{16}, [&](fp_op **o) { return fp_op_graph_tv(16, 15, chain, nullptr, o); }},
+    };
+    for (auto &c : ops) {
+        fp_op *op;
+        CHECK_OK(c.second(&op));
+        Arr x(c.first, randn(16)), z0(c.first), z(c.first), dz(c.first);
+        fp_options o = opts(-1);
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &z0.a, &o, nullptr, nullptr));
+        for (int axis : {5, 0}) {
+            o.axis = axis;
+            CHECK_OK(fp_prox(op, 0.4, &x.a, &z.a, &o, nullptr, nullptr));
+            CHECK(std::memcmp(z.data.data(), z0.data.data(), 16 * sizeof(double)) == 0);
+        }
+        fp_workspace *ws;
+        o.axis = 7;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        o.axis = -1;
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &z.a, &o, ws, nullptr));
+        fp_workspace_free(ws);
+        o = opts(-1, 0, 1);
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        o.axis = 0;
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &x.a, 0.0, nullptr, &dz.a));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
+// Counts too large to allocate (audit A7).
+static void test_huge_counts() {
+    const int64_t groups[4] = {0, 0, 1, 1};
+    fp_op *op = reinterpret_cast<fp_op *>(&op);
+    CHECK(fp_op_group_l2(1.0, INT64_MAX / 2, groups, 2, nullptr, &op) == FP_EPARAM && op == nullptr);
+    op = reinterpret_cast<fp_op *>(&op);
+    CHECK(fp_op_group_huber(1.0, 1.0, INT64_MAX / 2, groups, 2, nullptr, &op) == FP_EPARAM && op == nullptr);
+    const int64_t ptr[2] = {0, INT64_MAX / 2}, idx[1] = {0};
+    CHECK(fp_op_tree_l2(1.0, 1, ptr, idx, nullptr, &op) == FP_EPARAM);
+    CHECK(fp_op_tree_l2(1.0, INT64_MAX, ptr, idx, nullptr, &op) == FP_EPARAM);
+    double one = 1.0;
+    int64_t shape[1] = {int64_t{1} << 62}, stride[1] = {0};
+    fp_array w{&one, FP_F64, 1, shape, stride, FP_DEVICE_CPU};
+    CHECK(fp_op_soft(1.0, &w, &op) == FP_ESHAPE);
+}
+
+// A failed fp_workspace_set_branch leaves an earlier override (audit A9).
+static void test_failed_branch_keeps_override() {
+    const int64_t edge[2] = {0, 1};
+    struct Case {
+        std::vector<int64_t> shape, sides;
+        Vec x;
+        double gamma;
+        std::function<fp_status(fp_op **)> make;
+    };
+    std::vector<Case> cases = {
+        {{4}, {4}, {1.0, 0.3, -2.0, -1.0}, 1.0, [](fp_op **o) { return fp_op_soft(1.0, nullptr, o); }},
+        {{2}, {2}, {0.0, 1.0}, 0.5, [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }},
+        {{2, 2}, {2, 2}, {0.0, 1.0, 0.0, 1.0}, 0.5, [](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }},
+        {{2}, {1}, {0.0, 1.0}, 0.5, [&](fp_op **o) { return fp_op_graph_tv(2, 1, edge, nullptr, o); }},
+    };
+    for (auto &c : cases) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        const int64_t n = static_cast<int64_t>(c.x.size());
+        Arr x(c.shape, c.x), z(c.shape), dx(c.shape, randn(n)), dz(c.shape);
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
+        auto jvp = [&] {
+            CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a));
+            return dz.data;
+        };
+        const Vec D = jvp();
+        size_t ns = 1;
+        for (int64_t v : c.sides) ns *= static_cast<size_t>(v);
+        std::vector<int64_t> st(c.sides.size(), 1);
+        for (int i = static_cast<int>(c.sides.size()) - 2; i >= 0; --i) st[i] = st[i + 1] * c.sides[i + 1];
+        I8 plus(c.sides, st, ns), minus(c.sides, st, ns), bad(c.sides, st, ns);
+        plus.data.assign(ns, 1);
+        minus.data.assign(ns, -1);
+        CHECK_OK(fp_workspace_set_branch(ws, &plus.a, 1e-6));
+        const Vec Ap = jvp();
+        CHECK_OK(fp_workspace_set_branch(ws, &minus.a, 1e-6));
+        const Vec Am = jvp();
+        const bool use_plus = Ap != D;
+        CHECK(use_plus || Am != D);  // the point is at a kink
+        I8 &side = use_plus ? plus : minus;
+        CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-6));
+        const Vec A = jvp();
+        bad.data = side.data;
+        bad.data[ns - 1] = 2;
+        CHECK(fp_workspace_set_branch(ws, &bad.a, 1e-6) == FP_EPARAM);
+        const Vec B = jvp();
+        CHECK(std::memcmp(A.data(), B.data(), A.size() * sizeof(double)) == 0);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
 static void test_float32() {
     fp_op *op;
     CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
@@ -3034,6 +3235,10 @@ int main() {
     test_no_allocation();
     test_concurrent_callers();
     test_errors_and_special_values();
+    test_kept_empty_and_identity();
+    test_image_axis_ignored();
+    test_huge_counts();
+    test_failed_branch_keeps_override();
     test_aliasing();
     test_descriptor_bounds();
     test_conj_extremes();

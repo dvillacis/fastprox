@@ -158,11 +158,11 @@ its row to the decisions table when it lands.
 
 - [x] A1: Conjugate prox at small σ, and steps that overflow inside the kernels — [spec](docs/audit-2026-10.md#a1)
 - [x] A2: Shape-product and offset overflow in `to_arr` / `Arr::numel` — [spec](docs/audit-2026-10.md#a2)
-- [ ] A3: Kept calls that do no work leave derivatives unavailable — [spec](docs/audit-2026-10.md#a3)
-- [ ] A5: Image operators validate and compare `fp_options.axis`, which they claim to ignore — [spec](docs/audit-2026-10.md#a5)
-- [ ] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
+- [x] A3: Kept calls that do no work leave derivatives unavailable — [spec](docs/audit-2026-10.md#a3)
+- [x] A5: Image operators validate and compare `fp_options.axis`, which they claim to ignore — [spec](docs/audit-2026-10.md#a5)
+- [x] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
 - [ ] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
-- [ ] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
+- [x] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
 - [x] A12: Enum arguments and fields outside their enumeration (added 2026-10-22) — [spec](docs/audit-2026-10.md#a12)
 - [x] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
 - [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
@@ -309,3 +309,5 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 | 2026-10-22 | `out` may alias the input only exactly (the same data, shape and strides): any other overlap of an output's byte range with an input's, or a stride-0 output dimension of extent > 1, returns FP_EINVAL before any work (spec Section 4: "out may alias x"). The test is conservative, so disjoint interleaved views are rejected too. The same rule holds for dx/dout, g/gx, the steps of fp_prox_steps and fp_value's out. The Python package retries with a copy of the input instead, so Python callers see no change | `fastprox.h`, `src/core/layout.hpp`, `src/api/api.cpp`, `docs/api.md` |
 | 2026-10-22 | fp_prox_conj evaluates y − prox_g(y) for positively homogeneous g and cone indicators: exact for every σ > 0, σ-derivative 0, image duals at unit step. For the other operators it returns FP_EPARAM when 1/σ overflows or leaves the step range, or when some y_i/σ overflows: always checked in float32 for σ < 1, and in float64 only for σ < 2^-64, since a check for every σ < 1 cost 15–30% on cheap conjugates (above 2^-64, float64 entries beyond ~1e289 may give ±inf/NaN). Every call returns FP_EPARAM when γ·step_scale() > 2^960 | `src/api/api.cpp`, `src/core/op.hpp`, `src/core/driver.hpp`, `src/ops/*`, `fastprox.h`, `docs/api.md` |
 | 2026-10-22 | Weighted isotonic regression rejects weights with min/max below 1e-100 (FP_EPARAM), as the weighted ℓ1 ball does: the weights are stored scaled by their largest power of two, and such ratios would underflow | `src/ops/isotonic.cpp`, `fastprox.h` |
+| 2026-10-23 | After fp_prox_conj with σ = 0 and keep_structure, derivatives are those of the identity and the σ-derivative is NaN; kept empty batches give empty derivatives (spec: derivatives need a saved structure) | `src/api/api.cpp`, `fastprox.h`, `docs/api.md` |
+| 2026-10-23 | std::length_error is reported as FP_ENOMEM (spec: any exception other than bad_alloc is FP_EINTERNAL); integer counts of the group constructors and of tree l2 above 2^60 − 1 are FP_EPARAM | `src/api/api.cpp`, `fastprox.h`, `docs/spec.md` |

@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Kept calls that do no work now give derivatives (audit A3). Two kinds of call returned `FP_OK` but left no saved point, so `fp_jvp` and `fp_vjp` then returned `FP_EINVAL`:
+  - an empty batch with `keep_structure`. Its derivatives now return `FP_OK` and write nothing, with zero gradients;
+  - `fp_prox_conj` at σ = 0. Its derivatives are now those of the identity, with a NaN σ-derivative, which is not defined there for every operator.
+
+  Steps are now checked on empty batches too. Before, a SCAD step that violated a > 1 + γ, or negative steps in `fp_prox_steps` on x of shape (3, 0), were accepted.
+- Image operators (TV in 2 and 3 dimensions, graph and tree TV) ignore `fp_options.axis`, as documented (audit A5). Before, `fp_prox` rejected axis 5 with `FP_EINVAL`, and a workspace created with the default axis rejected a call with axis 0.
+- Sizes too large to allocate return `FP_ENOMEM` and not `FP_EINTERNAL` (audit A7). The `n` of the group constructors and the counts of `fp_op_tree_l2` above 2⁶⁰ − 1 are now `FP_EPARAM`, checked before the pointer arithmetic that was undefined for them.
+- A failed `fp_workspace_set_branch` leaves an earlier override in place (audit A9). Elementwise operators dropped it on an invalid side, while row and image operators kept it. A row operator's override also survives an allocation failure in the next call.
 - Graph TV: the dual and gap at large steps (audit T6). The flow of a live edge was read as γwₑ − residual, which loses it below an ulp of γwₑ. On a 16×16 grid with tol 0, the result was:
   - at γ = 1e10: a dual residual ‖x − z − q‖∞ of 2.7e-6;
   - at γ = 1e15: a gap of 0.33;

@@ -14,8 +14,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -27,6 +29,8 @@ fp_status guard(F &&f) noexcept {
     try {
         return f();
     } catch (const std::bad_alloc &) {
+        return FP_ENOMEM;
+    } catch (const std::length_error &) {  // a size beyond max_size() (audit A7)
         return FP_ENOMEM;
     } catch (...) {
         return FP_EINTERNAL;
@@ -209,7 +213,13 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.image_numel = N;
         w.n = N;
         w.rows = N > 0 ? w.numel / N : 0;
-        if (w.numel == 0) return FP_OK;
+        if (w.numel == 0) {  // a kept empty point still reports its (zero) gradients
+            if (keep) {
+                w.tot.resize(static_cast<size_t>(op.nparams() + 2));
+                w.dparams.resize(static_cast<size_t>(op.nparams()) + 1);
+            }
+            return FP_OK;
+        }
         const int64_t B = w.rows;
         w.image_sets = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(B, w.nthreads)));
         w.image_bytes = image_staging_bytes(N) + round64(op.image_bytes(ishape));
@@ -297,6 +307,27 @@ fp_status step_ok(const fp_op &op, double g) noexcept {
     return op.check_step(g);
 }
 
+// dst = src entry by entry through both arrays' strides, or every entry of
+// dst = fill (FP_I8: 0) when src is null. memmove: dst may alias src exactly.
+void copy_array(const Arr *src, const Arr &dst, double fill) noexcept {
+    if (dst.numel() == 0) return;  // for_runs divides by every extent
+    const int64_t *st[2] = {dst.strides, src ? src->strides : dst.strides};
+    const ElemPlan p = make_elem_plan(dst.ndim, dst.shape, 0, false, 2, st);
+    // Byte offsets stay signed: strides may be negative.
+    const int64_t item = static_cast<int64_t>(dst.itemsize());
+    const float f32 = static_cast<float>(fill);
+    const int8_t i8 = 0;
+    const void *fv = dst.dtype == FP_F32 ? static_cast<const void *>(&f32)
+                     : dst.dtype == FP_I8 ? static_cast<const void *>(&i8)
+                                          : static_cast<const void *>(&fill);
+    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
+        for (int64_t i = 0; i < len; ++i)
+            std::memmove(dst.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item,
+                         src ? src->data + (off[1] + i * p.stride[1][p.ndim - 1]) * item : fv,
+                         static_cast<size_t>(item));
+    });
+}
+
 fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *oa,
                     const fp_options *opt, fp_workspace *ws, fp_info *info, bool conj,
                     const fp_array *sa = nullptr) {
@@ -312,7 +343,8 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     // Before any change to ws, so that a rejected call keeps its structure.
     if (fp_status s = check_output(&x, out)) return s;
     int axis;
-    if (norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
+    if (op->image_ndim()) axis = x.ndim - 1;  // fp_options.axis is ignored (audit A5)
+    else if (norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
     const bool keep = o.keep_structure != 0;
     if (keep && !ws) return FP_EINVAL;
     Steps steps;
@@ -333,6 +365,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
             if (ws->shape[d] != x.shape[d]) return FP_ESHAPE;
         if (keep && !ws->keep) return FP_EINVAL;
         ws->valid = false;
+        ws->identity = false;
         ws->steps_on = false;
         ws->branch_on = false;  // a branch override belongs to the point it was set for
         ws->override_on = false;
@@ -349,26 +382,56 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if (x.ndim < k) return FP_ESHAPE;
         if (!(o.tol >= 0.0) || !finite(o.tol) || o.max_iter < 1) return FP_EPARAM;
     }
-    if (x.numel() == 0) return FP_OK;
+    // The steps, before any work and before the empty batch returns (audit A3).
+    // A positively homogeneous g gives y - sigma prox_{g/sigma}(y/sigma) =
+    // y - prox_g(y): computed at gamma = sigma = 1, exact for every sigma > 0.
+    const bool homog = conj && op->conj_homogeneous();
+    const bool identity = conj && step == 0.0;  // prox_{0 g*} is the identity
+    const double gamma = !conj ? step : (homog ? 1.0 : 1.0 / step);
+    const double sigma = !conj ? 0.0 : (homog ? 1.0 : step);
+    const Steps *sp = sa ? &steps : nullptr;
+    if (sp) {
+        // Every step, counted over the steps array: ws->rows is 0 for x of
+        // shape (3, 0).
+        int64_t count = 1;
+        for (int d = 0; d < steps.ndim; ++d) count *= steps.shape[d];
+        for (int64_t r = 0; r < count; ++r) {
+            const double v = steps.at(r);
+            if (!finite(v) || v < 0) return FP_EPARAM;
+            if (fp_status s = step_ok(*op, v)) return s;
+        }
+    } else if (identity) {
+    } else if (conj && !homog && !finite(gamma)) {
+        return FP_EPARAM;  // 1 / sigma overflows
+    } else if (fp_status s = step_ok(*op, gamma)) {
+        return s;
+    }
+    // A kept call saves its point for the derivatives.
+    auto save_point = [&](bool steps_on) {
+        ws->valid = true;
+        ws->identity = identity;
+        ws->conj = conj;
+        ws->conj_homog = homog;
+        ws->gamma = gamma;
+        ws->sigma = sigma;
+        ws->tie = o.tie;
+        ws->steps_on = steps_on;
+    };
+    if (x.numel() == 0) {  // an empty point: its derivatives are empty
+        if (keep) save_point(false);
+        return FP_OK;
+    }
     if (k) {
         if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
     } else if (fp_status s = op->check_n(x.shape[axis])) {
         return s;
     }
 
-    // sigma = 0 in the conjugate: prox_{0 g*} is the identity.
-    if (conj && step == 0.0) {
-        Arr src = x;
-        const int64_t *st[2] = {x.strides, out.strides};
-        const ElemPlan p = make_elem_plan(x.ndim, x.shape, axis, false, 2, st);
-        // Byte offsets stay signed: strides may be negative.
-        const int64_t item = static_cast<int64_t>(x.itemsize());
-        p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
-            for (int64_t i = 0; i < len; ++i)
-                std::memmove(out.data + (off[1] + i * p.stride[1][p.ndim - 1]) * item,
-                             src.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item,
-                             static_cast<size_t>(item));
-        });
+    // sigma = 0 in the conjugate: y itself, and with keep the identity's
+    // derivatives (the sigma-derivative NaN).
+    if (identity) {
+        copy_array(&x, out, 0.0);
+        if (keep) save_point(false);
         return FP_OK;
     }
 
@@ -376,40 +439,15 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if (fp_status s = build_workspace(*op, x, axis, nt, false, local)) return s;
         ws = local.get();
     }
-    // A positively homogeneous g gives y - sigma prox_{g/sigma}(y/sigma) =
-    // y - prox_g(y): computed at gamma = sigma = 1, exact for every sigma > 0.
-    const bool homog = conj && op->conj_homogeneous();
-    const double gamma = !conj ? step : (homog ? 1.0 : 1.0 / step);
-    const double sigma = !conj ? 0.0 : (homog ? 1.0 : step);
-    const Steps *sp = sa ? &steps : nullptr;
-    if (sp) {
-        // Every step before any work; a kept call saves them for the derivatives.
-        for (int64_t r = 0; r < ws->rows; ++r) {
-            const double v = steps.at(r);
-            if (!finite(v) || v < 0) return FP_EPARAM;
-            if (fp_status s = step_ok(*op, v)) return s;
-        }
-        if (keep)
-            for (int64_t r = 0; r < ws->rows; ++r) ws->steps.data()[r] = steps.at(r);
-    } else if (conj && !homog && !finite(gamma)) {
-        return FP_EPARAM;  // 1 / sigma overflows
-    } else if (fp_status s = step_ok(*op, gamma)) {
-        return s;
-    }
+    if (sp && keep)
+        for (int64_t r = 0; r < ws->rows; ++r) ws->steps.data()[r] = steps.at(r);
     if (k) {
         fp_status s = x.dtype == FP_F32
                           ? image_prox_driver<float>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
                                                      o.tol, o.max_iter, info, sp)
                           : image_prox_driver<double>(*op, x, out, gamma, conj, sigma, *ws, nt, keep,
                                                       o.tol, o.max_iter, info, sp);
-        if ((s == FP_OK || s == FP_ENOTCONV) && keep) {
-            ws->valid = true;
-            ws->conj = conj;
-            ws->conj_homog = homog;
-            ws->gamma = gamma;
-            ws->sigma = sigma;
-            ws->steps_on = sp != nullptr;
-        }
+        if ((s == FP_OK || s == FP_ENOTCONV) && keep) save_point(sp != nullptr);
         return s;
     }
     int64_t ties = 0;
@@ -417,15 +455,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
                       ? prox_driver<float>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties, sp)
                       : prox_driver<double>(*op, x, out, axis, gamma, conj, sigma, *ws, nt, keep, o.tie, &ties, sp);
     if (info) info->ties = ties;
-    if (s == FP_OK && keep) {
-        ws->valid = true;
-        ws->conj = conj;
-        ws->conj_homog = homog;
-        ws->gamma = gamma;
-        ws->sigma = sigma;
-        ws->tie = o.tie;
-        ws->steps_on = sp != nullptr;
-    }
+    if (s == FP_OK && keep) save_point(sp != nullptr);
     return s;
 }
 
@@ -470,6 +500,11 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
     if (dpa && P > 0) {
         if (fp_status s = read_exact(dpa, P, ws->dparams.data())) return s;
         dp = ws->dparams.data();
+    }
+    if (ws->identity) {  // J = I; the sigma-derivative is not defined for every g
+        if (dgamma != 0.0) copy_array(nullptr, out, std::numeric_limits<double>::quiet_NaN());
+        else copy_array(dxa ? &dx : nullptr, out, 0.0);
+        return FP_OK;
     }
     if (ws->numel == 0) return FP_OK;
     const Arr *dxp = dxa ? &dx : nullptr;
@@ -572,6 +607,12 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
     }
     double *tot = ws->tot.data();
     for (int64_t k = 0; k < P + 2; ++k) tot[k] = 0.0;
+    if (ws->identity) {  // gx = g, no parameter gradient, the sigma-derivative NaN
+        copy_array(&g, gx, 0.0);
+        if (ggamma) *ggamma = std::numeric_limits<double>::quiet_NaN();
+        if (gpa && P > 0) return write_exact(gpa, P, tot);
+        return FP_OK;
+    }
     if (ws->numel > 0) {
         fp_status s;
         if (op->image_ndim())
@@ -717,7 +758,9 @@ fp_status kinks_impl(const fp_workspace *ws, double tol, fp_array *ma, int64_t *
     const bool f32 = ws->dtype == FP_F32;
     const fp_op &op = *ws->op;
     int64_t c = 0;
-    if (ws->numel == 0) c = 0;
+    if (ws->identity) {  // no kinks: a zero mask
+        if (mp) copy_array(nullptr, *mp, 0.0);
+    } else if (ws->numel == 0) c = 0;
     else if (op.elementwise()) c = f32 ? kinks_driver<float>(op, *ws, tol, mp) : kinks_driver<double>(op, *ws, tol, mp);
     else if (ws->image_ndim) c = f32 ? image_kinks_driver<float>(op, *ws, tol, mp) : image_kinks_driver<double>(op, *ws, tol, mp);
     else c = f32 ? row_kinks_driver<float>(op, *ws, tol, mp) : row_kinks_driver<double>(op, *ws, tol, mp);
@@ -759,11 +802,12 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
         return;
     }
     const int64_t n = ws.n;
+    // Allocated before the codes change, so that bad_alloc leaves them (audit A9).
+    std::vector<double> xb(side ? static_cast<size_t>(n) : 0), zb(side ? static_cast<size_t>(n) : 0);
+    std::vector<std::max_align_t> scr(side ? op.scratch_bytes(n) / sizeof(std::max_align_t) + 1 : 0);
     if (!ws.override_on) std::memcpy(ws.code_default.data(), ws.code.data(), static_cast<size_t>(ws.numel));
     else std::memcpy(ws.code.data(), ws.code_default.data(), static_cast<size_t>(ws.numel));
     if (!side) return;
-    std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
-    std::vector<std::max_align_t> scr(op.scratch_bytes(n) / sizeof(std::max_align_t) + 1);
     for (int64_t r = 0; r < ws.rows; ++r) {
         const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
         for (int64_t i = 0; i < n; ++i) {
@@ -828,25 +872,26 @@ fp_status set_branch_impl(fp_workspace *ws, const fp_array *sa, double tol) {
     if (!(tol >= 0.0) || !finite(tol)) return FP_EPARAM;
     Arr a;
     if (fp_status s = kink_arrays(ws, sa, &a, true)) return s;
+    if (ws->identity || ws->numel == 0) return FP_OK;  // no kinks to override
     if (!ws->op->elementwise()) return set_structure_branch(*ws, a, tol);
-    // Into the workspace in C order, the order of the saved entries.
+    // Into the workspace in C order, the order of the saved entries: checked
+    // first, so that a failed call leaves an earlier override (audit A9).
     const int64_t *st[1] = {a.strides};
     const ElemPlan p = make_elem_plan(a.ndim, a.shape, ws->axis, false, 1, st);
     const int8_t *src = reinterpret_cast<const int8_t *>(a.data);
     int8_t *dst = ws->branch.data();
     const int64_t s0 = p.stride[0][p.ndim - 1];
     bool ok = true;
-    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t pos, int64_t, int64_t) {
+    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
         for (int64_t i = 0; i < len; ++i) {
             const int8_t v = src[off[0] + i * s0];
             ok = ok && v >= -1 && v <= 1;
-            dst[pos + i] = v;
         }
     });
-    if (!ok) {
-        ws->branch_on = false;
-        return FP_EPARAM;
-    }
+    if (!ok) return FP_EPARAM;
+    p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t pos, int64_t, int64_t) {
+        for (int64_t i = 0; i < len; ++i) dst[pos + i] = src[off[0] + i * s0];
+    });
     ws->branch_on = true;
     ws->branch_tol = tol;
     return FP_OK;
@@ -922,7 +967,8 @@ fp_status group_radial(F make_scalar, const char *name, int64_t n, const int64_t
     *out = nullptr;
     std::vector<int64_t> g;
     if (groups) {
-        if (n < 1) return FP_EPARAM;
+        // Bounded before groups + n is formed (audit A7).
+        if (n < 1 || n > kMaxElems) return FP_EPARAM;
         g.assign(groups, groups + n);
     }
     Vec c;
@@ -983,7 +1029,7 @@ FP_API fp_status fp_op_group_l2(double lambda, int64_t n, const int64_t *groups,
         *out = nullptr;
         std::vector<int64_t> g;
         if (groups) {
-            if (n < 1) return FP_EPARAM;
+            if (n < 1 || n > fp::kMaxElems) return FP_EPARAM;  // before groups + n (audit A7)
             g.assign(groups, groups + n);
         }
         Vec c;
@@ -1023,10 +1069,11 @@ FP_API fp_status fp_op_tree_l2(double l1, int64_t ngroups, const int64_t *group_
         if (!out) return FP_EINVAL;
         *out = nullptr;
         if (ngroups < 0 || (!group_ptr && ngroups > 0)) return FP_EPARAM;
+        if (ngroups > fp::kMaxElems - 1) return FP_EPARAM;  // before group_ptr + ngroups + 1 (audit A7)
         std::vector<int64_t> ptr(1, 0), idx;
         if (ngroups > 0) {
             ptr.assign(group_ptr, group_ptr + ngroups + 1);
-            if (ptr[0] != 0 || ptr.back() < 0) return FP_EPARAM;
+            if (ptr[0] != 0 || ptr.back() < 0 || ptr.back() > fp::kMaxElems) return FP_EPARAM;
             if (ptr.back() > 0 && !group_idx) return FP_EPARAM;
             for (int64_t g = 0; g < ngroups; ++g)
                 if (ptr[g + 1] < ptr[g]) return FP_EPARAM;
@@ -1336,7 +1383,8 @@ FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like, cons
         fp::Arr x;
         if (fp_status s = fp::to_arr(like, x)) return s;
         int axis;
-        if (fp::norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
+        if (op->image_ndim()) axis = x.ndim - 1;  // fp_options.axis is ignored (audit A5)
+        else if (fp::norm_axis(o.axis, x.ndim, axis)) return FP_EINVAL;
         if (const int k = op->image_ndim()) {
             if (x.ndim < k) return FP_ESHAPE;
             if (x.numel() > 0)
