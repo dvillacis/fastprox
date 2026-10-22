@@ -554,3 +554,34 @@ def test_errors():
 def test_version_matches_metadata():
     from importlib.metadata import version
     assert fp.__version__ == version("fastprox")
+
+
+def test_isotonic_extremes():
+    """Block means instead of sums (audit K8): no overflow near DBL_MAX, and
+    weights stored over their largest power of two."""
+    np.testing.assert_allclose(fp.Isotonic().prox(np.array([1.5e308, 1.5e308, 0.0])), [1e308] * 3, rtol=2.0 ** -52)
+    np.testing.assert_array_equal(np.abs(fp.Isotonic().prox(np.array([1e308, -1e308]))), [0.0, 0.0])
+    for w in ([1e300, 1e-300, 1.0], [1.0, 1e-101]):
+        with pytest.raises(ValueError):
+            fp.Isotonic(np.array(w))
+    fp.Isotonic(np.array([1.0, 1e-100]))
+    # Weight gradients scale as 1 / the weights' scale; the prox does not move.
+    rng = np.random.default_rng(12)
+    x, w, g = rng.normal(size=12), rng.uniform(0.5, 2.0, 12), rng.normal(size=12)
+    res = []
+    for s in (1.0, 2.0 ** 300):
+        op = fp.Isotonic(w * s)
+        z, ctx = op.prox(x, keep=True)
+        res.append((z, op.vjp(ctx, g)[1].params))
+    np.testing.assert_array_equal(res[1][0], res[0][0])
+    np.testing.assert_allclose(res[1][1] * 2.0 ** 300, res[0][1], rtol=1e-14)
+
+
+def test_degenerate_box_bounds():
+    """Box and l1 over a box with lo = hi: the entry is fixed (audit K11)."""
+    op = fp.Box([0.0, 0.5], [1.0, 0.5])
+    _, ctx = op.prox(np.array([0.3, 0.5]), keep=True)
+    np.testing.assert_array_equal(op.jvp(ctx, np.ones(2)), [1.0, 0.0])
+    op = fp.L1Box(0.1, [0.0, 0.5], [1.0, 0.5])
+    _, ctx = op.prox(np.array([0.3, 0.6]), keep=True)
+    np.testing.assert_array_equal(op.jvp(ctx, np.ones(2)), [1.0, 0.0])

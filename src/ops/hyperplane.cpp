@@ -65,26 +65,43 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr uint8_t kFreeE = 0, kLoE = 1, kHiE = 2, kStateMask = 3, kInactive = 4;
 
 // a, lo and hi each hold one value or one per entry.
+// Scaled solves (audit K7) read the bounds times sc, a power of two: P_C is
+// homogeneous, P_{tC}(t x) = t P_C(x) with tC = {a^T z = t b, t lo <= z <= t hi}.
 struct Plane {
     const double *a, *lo, *hi;
     bool sa, sl, sh;  // scalar
     double b;
     bool unbounded = false;  // every bound infinite
+    double bmax = 0.0;       // the largest finite |lo_i|, |hi_i|
+    double sc = 1.0;         // the bounds' scale in a Scaled solve
     double A(int64_t i) const noexcept { return sa ? a[0] : a[i]; }
     double L(int64_t i) const noexcept { return sl ? lo[0] : lo[i]; }
     double H(int64_t i) const noexcept { return sh ? hi[0] : hi[i]; }
+    template <bool S>
+    double Ls(int64_t i) const noexcept { return S ? sc * L(i) : L(i); }
+    template <bool S>
+    double Hs(int64_t i) const noexcept { return S ? sc * H(i) : H(i); }
 };
+
+// The largest finite |v_i| (0 for none).
+inline double finite_max(const Vec &v) noexcept {
+    double m = 0.0;
+    for (double x : v)
+        if (std::isfinite(x)) m = std::max(m, std::fabs(x));
+    return m;
+}
 
 inline double clip(double v, double l, double h) noexcept { return std::min(std::max(v, l), h); }
 
 // The range [bot, top] of a^T z over the box (ends may be infinite).
+template <bool S = false>
 inline void plane_range(const Plane &p, int64_t n, double &bot, double &top) noexcept {
     bot = top = 0.0;
     for (int64_t i = 0; i < n; ++i) {
         const double ai = p.A(i);
         if (ai == 0.0) continue;
-        top += ai > 0 ? ai * p.H(i) : ai * p.L(i);
-        bot += ai > 0 ? ai * p.L(i) : ai * p.H(i);
+        top += ai > 0 ? ai * p.Hs<S>(i) : ai * p.Ls<S>(i);
+        bot += ai > 0 ? ai * p.Ls<S>(i) : ai * p.Hs<S>(i);
     }
 }
 
@@ -98,6 +115,7 @@ inline double inside(double L, double R) noexcept {
 // mu with phi(mu) = b for a feasible plane (bp holds 2n doubles), from
 // mu = 0 and then start if finite. With ineq, returns false when the box
 // projection meets a^T z <= b (mu = 0).
+template <bool S>
 inline bool plane_solve(const Plane &p, bool ineq, const double *x, int64_t n, double *bp, double &mu,
                         double start = kInf) noexcept {
     constexpr int kNewtonMax = 40;
@@ -122,7 +140,7 @@ inline bool plane_solve(const Plane &p, bool ineq, const double *x, int64_t n, d
         // is finite, so a_i times it is never 0 * inf, and a_i = 0 adds 0.
         double c = 0.0, s1 = 0.0, s2 = 0.0;
         for (int64_t i = 0; i < n; ++i) {
-            const double ai = p.A(i), xi = x[i], l = p.L(i), h = p.H(i);
+            const double ai = p.A(i), xi = x[i], l = p.Ls<S>(i), h = p.Hs<S>(i);
             const double v = xi - mu * ai;
             const bool lo = v < l, hi = v > h, fr = !(lo || hi);
             c += fr ? 0.0 : ai * (lo ? l : h);
@@ -157,8 +175,8 @@ inline bool plane_solve(const Plane &p, bool ineq, const double *x, int64_t n, d
         // bound, halves them; with none left phi is linear there.
         int64_t m = 0;
         for (int64_t i = 0; i < n; ++i) {
-            const double ai = p.A(i), l = p.L(i), h = p.H(i);
-            if (ai == 0.0) continue;
+            const double ai = p.A(i), l = p.Ls<S>(i), h = p.Hs<S>(i);
+            if (ai == 0.0 || l == h) continue;  // l = h never changes state
             const double e = (x[i] - (ai > 0 ? h : l)) / ai, f = (x[i] - (ai > 0 ? l : h)) / ai;
             if (e > L && e < R) bp[m++] = e;
             if (f > L && f < R) bp[m++] = f;
@@ -180,6 +198,7 @@ constexpr int64_t kSampleMin = 8192, kSampleStride = 16;
 // recursively), or inf when that problem is infeasible. A start near the
 // root saves passes where Newton from 0 creeps up a long tail. buf holds 2n
 // doubles.
+template <bool S>
 inline double plane_start(const Plane &p, const double *x, int64_t n, double *buf) noexcept {
     const int64_t m = n / kSampleStride;
     double *xs = buf, *as = xs + m, *ls = as + m, *hs = ls + m;
@@ -191,40 +210,69 @@ inline double plane_start(const Plane &p, const double *x, int64_t n, double *bu
         if (!p.sh) hs[j] = p.hi[i];
     }
     Plane q{p.sa ? p.a : as, p.sl ? p.lo : ls, p.sh ? p.hi : hs, p.sa, p.sl, p.sh,
-            p.b * static_cast<double>(m) / static_cast<double>(n), false};
+            p.b * static_cast<double>(m) / static_cast<double>(n), false, p.bmax, p.sc};  // raw bounds, p's scale
     double bot, top;
-    plane_range(q, m, bot, top);
+    plane_range<S>(q, m, bot, top);
     if (!(q.b > bot && q.b < top)) return kInf;
     double *rest = hs + m;  // 2n - 4m >= 2m doubles
     double mu = 0.0;
-    if (m >= kSampleMin) plane_solve(q, false, xs, m, rest, mu, plane_start(q, xs, m, rest));
-    else plane_solve(q, false, xs, m, rest, mu);
+    if (m >= kSampleMin) plane_solve<S>(q, false, xs, m, rest, mu, plane_start<S>(q, xs, m, rest));
+    else plane_solve<S>(q, false, xs, m, rest, mu);
     return std::isfinite(mu) ? mu : kInf;
 }
 
-// z = P_C(x) with the states in code (if given); x in double.
-template <class T>
-inline void plane_project(const Plane &p, bool ineq, const double *x, T *z, int64_t n, double *bp,
-                          uint8_t *code) noexcept {
+template <bool S, class T>
+inline void plane_project_at(const Plane &p, bool ineq, const double *x, T *z, int64_t n, double *bp,
+                             uint8_t *code, int k) noexcept {
     double mu = 0.0;
-    const double start = n >= kSampleMin && !p.unbounded ? plane_start(p, x, n, bp) : kInf;
-    const bool active = plane_solve(p, ineq, x, n, bp, mu, start);
+    const double start = n >= kSampleMin && !p.unbounded ? plane_start<S>(p, x, n, bp) : kInf;
+    const bool active = plane_solve<S>(p, ineq, x, n, bp, mu, start);
     for (int64_t i = 0; i < n; ++i) {
-        const double v = x[i] - mu * p.A(i), l = p.L(i), h = p.H(i);
-        z[i] = static_cast<T>(clip(v, l, h));
-        if (code) code[i] = v < l ? kLoE : (v > h ? kHiE : kFreeE);
+        const double v = x[i] - mu * p.A(i), l = p.Ls<S>(i), h = p.Hs<S>(i);
+        z[i] = static_cast<T>(S ? std::ldexp(clip(v, l, h), k) : clip(v, l, h));  // back by 2^k
+        if (code) code[i] = (v < l || (v == l && l == h)) ? kLoE : (v > h ? kHiE : kFreeE);
     }
     if (code && !active) code[0] |= kInactive;
 }
 
+// The exponent k of the scale 2^-k for a problem of magnitude M (max |x|, |b|
+// and the finite bounds), or 0 when M is in [2^-960, 2^960], where no sum of
+// n < 2^62 terms over- or underflows (audit K7). 2^k itself may overflow
+// (k = 1024 near DBL_MAX), so results go back with ldexp.
+inline int plane_scale(double M) noexcept {
+    if (!(M > 0.0) || (M >= 0x1p-960 && M <= 0x1p960)) return 0;
+    int k;
+    std::frexp(M, &k);
+    return k;
+}
+
+// z = P_C(x) with the states in code (if given); x in double, scratch that
+// is rescaled in place when xmax = max |x_i| is far from unit scale.
+template <class T>
+inline void plane_project(const Plane &p, bool ineq, double *x, T *z, int64_t n, double *bp, uint8_t *code,
+                          double xmax) noexcept {
+    const int k = plane_scale(std::max({xmax, std::fabs(p.b), p.bmax}));
+    if (k == 0) {
+        plane_project_at<false>(p, ineq, x, z, n, bp, code, 0);
+        return;
+    }
+    for (int64_t i = 0; i < n; ++i) x[i] = std::ldexp(x[i], -k);  // exact but for subnormal results
+    Plane ps = p;
+    ps.b = std::ldexp(p.b, -k);
+    ps.sc = std::ldexp(1.0, -k);
+    plane_project_at<true>(ps, ineq, x, z, n, bp, code, k);
+}
+
 // Copies a row into double; kRowNonFinite on an infinity, nan set on NaN.
 template <class T>
-inline int load_row(const T *x, double *v, int64_t n, bool &nan) noexcept {
+inline int load_row(const T *x, double *v, int64_t n, bool &nan, double &vmax) noexcept {
     nan = false;
+    vmax = 0.0;
     for (int64_t i = 0; i < n; ++i) {
         const double xi = static_cast<double>(x[i]);
         if (std::isinf(xi)) return kRowNonFinite;
         nan = nan || std::isnan(xi);
+        vmax = std::max(vmax, std::fabs(xi));
         v[i] = xi;
     }
     return kRowOk;
@@ -240,11 +288,14 @@ struct HyperBox final : RowOp<HyperBox> {
         : a(std::move(aa)), lo(std::move(l)), hi(std::move(h)), b(bb), inv_s(1.0 / s), ineq(in) {
         unbounded = std::all_of(lo.begin(), lo.end(), [](double v) { return v == -kInf; }) &&
                     std::all_of(hi.begin(), hi.end(), [](double v) { return v == kInf; });
+        bmax = std::max(finite_max(lo), finite_max(hi));
     }
 
     bool unbounded;
+    double bmax;
     Plane plane() const noexcept {
-        return Plane{a.data(), lo.data(), hi.data(), a.size() == 1, lo.size() == 1, hi.size() == 1, b, unbounded};
+        return Plane{a.data(), lo.data(), hi.data(), a.size() == 1, lo.size() == 1, hi.size() == 1, b, unbounded,
+                     bmax};
     }
     const char *name() const noexcept override { return ineq ? "halfspace" : "hyperplane"; }
     double step_scale() const noexcept override { return 0.0; }
@@ -282,13 +333,14 @@ struct HyperBox final : RowOp<HyperBox> {
     int prox(const T *xin, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
         double *x = static_cast<double *>(scr);
         bool nan;
-        if (load_row(xin, x, n, nan) != kRowOk) return kRowNonFinite;
+        double xmax;
+        if (load_row(xin, x, n, nan, xmax) != kRowOk) return kRowNonFinite;
         if (nan) {
             fill_nan(z, n);
             if (code) std::memset(code, 0, static_cast<size_t>(n));
             return kRowOk;
         }
-        plane_project(plane(), ineq, x, z, n, x + n, code);
+        plane_project(plane(), ineq, x, z, n, x + n, code, xmax);
         return kRowOk;
     }
 
@@ -296,21 +348,25 @@ struct HyperBox final : RowOp<HyperBox> {
     template <class T>
     void saved_mu(const T *x, const uint8_t *code, int64_t n, double &mu, double &den) const noexcept {
         const Plane p = plane();
-        double num = -b;
         mu = den = 0.0;
         if (code[0] & kInactive) return;
+        // The sums in units scaled by t, as in plane_project (t = 1: exact).
+        double xmax = 0.0;
+        for (int64_t i = 0; i < n; ++i) xmax = std::max(xmax, std::fabs(static_cast<double>(x[i])));
+        const int k = plane_scale(std::max({xmax, std::fabs(b), bmax}));
+        double num = -std::ldexp(b, -k);
         for (int64_t i = 0; i < n; ++i) {
             const double ai = p.A(i);
             if (ai == 0.0) continue;
             const uint8_t st = code[i] & kStateMask;
-            if (st == kLoE) num += ai * p.L(i);
-            else if (st == kHiE) num += ai * p.H(i);
+            if (st == kLoE) num += ai * std::ldexp(p.L(i), -k);
+            else if (st == kHiE) num += ai * std::ldexp(p.H(i), -k);
             else {
-                num += ai * static_cast<double>(x[i]);
+                num += ai * std::ldexp(static_cast<double>(x[i]), -k);
                 den += ai * ai;
             }
         }
-        if (den > 0.0) mu = num / den;
+        if (den > 0.0) mu = std::ldexp(num / den, k);
     }
 
     template <class T>
@@ -402,7 +458,8 @@ struct SumLargest final : RowOp<SumLargest> {
     int prox(const T *xin, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
         double *x = static_cast<double *>(scr);
         bool nan;
-        if (load_row(xin, x, n, nan) != kRowOk) return kRowNonFinite;
+        double xmax;
+        if (load_row(xin, x, n, nan, xmax) != kRowOk) return kRowNonFinite;
         const double c = gamma * lambda;
         if (nan || c == 0.0) {
             if (nan) fill_nan(z, n);
@@ -413,12 +470,14 @@ struct SumLargest final : RowOp<SumLargest> {
         if (absolute)
             for (int64_t i = 0; i < n; ++i) x[i] = std::fabs(x[i]);
         const bool big = c > 1.0;  // project x / c onto C, else x onto cC
-        if (big)
+        if (big) {
             for (int64_t i = 0; i < n; ++i) x[i] /= c;
+            xmax /= c;  // an upper bound is enough for the scale
+        }
         const double one = 1.0, zero = 0.0, cap = big ? 1.0 : c;
-        const Plane p{&one, &zero, &cap, true, true, true, cap * static_cast<double>(k)};
+        const Plane p{&one, &zero, &cap, true, true, true, cap * static_cast<double>(k), false, cap};
         double *proj = x + n;
-        plane_project(p, absolute, x, proj, n, x + 2 * n, code);
+        plane_project(p, absolute, x, proj, n, x + 2 * n, code, xmax);
         for (int64_t i = 0; i < n; ++i) {
             const double xi = static_cast<double>(xin[i]), pi = big ? c * proj[i] : proj[i];
             z[i] = static_cast<T>(xi - (absolute ? std::copysign(pi, xi) : pi));

@@ -540,25 +540,80 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
 struct LogPen final : ElemOp<LogPen> {
     static constexpr bool kTies = true;
     double lambda, eps;
-    LogPen(double l, double e) : lambda(l), eps(e) {}
+    bool eps_mid;  // eps in [2^-500, 2^499]: log_root's usual path needs only a <= 2^499
+    LogPen(double l, double e) : lambda(l), eps(e), eps_mid(e >= 0x1p-500 && e <= 0x1p499) {}
     const char *name() const noexcept override { return "log"; }
     double step_scale() const noexcept override { return lambda; }  // the kernel forms gamma lambda only
     int spectral() const noexcept override { return kSpectralBoth; }
     int64_t nparams() const noexcept override { return 2; }  // (lambda, eps)
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 
-    double mag(double ax, double lam, int tie, bool &tied, bool &on) const noexcept {
+    // The positive root r of z^2 + (eps - a) z + (lam - a eps) = 0, the
+    // stationarity condition z - a + lam / (eps + z) = 0 (0 when there is none
+    // or it is not positive; a, lam >= 0), and df = F(r) - F(0) = r (r/2 - a) +
+    // lam log(1 + r/eps), of which only the sign is read (audit K3). Far from
+    // unit scale both run on (a, eps, r) 2^-k and lam 2^-2k, which leaves them
+    // unchanged but for a positive factor: (a + eps)^2 overflowed beyond 1e154
+    // and r (r/2 - a) underflowed into a spurious tie. For a < eps the root is
+    // 2 (a eps - lam) / ((eps - a) + sqrt(D)), the same root without the
+    // cancellation of (a - eps) + sqrt(D); fma is correctly rounded.
+    struct Root {
+        double r, df;
+    };
+    FP_INLINE Root log_root(double a, double lam) const noexcept {
+        // a + eps in [2^-500, 2^500]; lam <= 2^960 by the step range (fp_prox).
+        if (!(eps_mid && a <= 0x1p499)) return log_root_scaled(a, lam);
+        const double S = a + eps;
+        // root_at at t = 1, written out.
+        const double D = S * S - 4.0 * lam;
+        if (!(D >= 0.0)) return {0.0, 0.0};
+        const double q = std::sqrt(D);
+        double r;
+        if (a >= eps) {
+            r = 0.5 * ((a - eps) + q);
+        } else {
+            const double num = std::fma(a, eps, -lam);
+            if (!(num > 0.0)) return {0.0, 0.0};
+            r = 2.0 * num / ((eps - a) + q);
+        }
+        if (!(r > 0.0)) return {0.0, 0.0};
+        return {r, r * (0.5 * r - a) + lam * std::log1p(r / eps)};
+    }
+    // Out of line, so that the usual path stays small and inlined.
+    FP_COLD Root log_root_scaled(double a, double lam) const noexcept {
+        int k;
+        std::frexp(std::max(a, eps), &k);
+        // lam 2^-2k may be +inf: no root then, as 4 lam > S^2.
+        return root_at(std::ldexp(a, -k), std::ldexp(eps, -k), std::ldexp(lam, -2 * k), std::ldexp(1.0, -k));
+    }
+    // The root and df in units scaled by t (a power of two; 1 unscaled).
+    static Root root_at(double ah, double eh, double lh, double t) noexcept {
+        const double Sh = ah + eh, D = Sh * Sh - 4.0 * lh;
+        if (!(D >= 0.0)) return {0.0, 0.0};
+        const double q = std::sqrt(D);
+        double rh;
+        if (ah >= eh) {
+            rh = 0.5 * ((ah - eh) + q);
+        } else {
+            const double num = std::fma(ah, eh, -lh);  // a eps - lam: a positive root needs > 0
+            if (!(num > 0.0)) return {0.0, 0.0};      // (and skips the division below the breakpoint)
+            rh = 2.0 * num / ((eh - ah) + q);
+        }
+        if (!(rh > 0.0)) return {0.0, 0.0};
+        return {t == 1.0 ? rh : rh / t, rh * (0.5 * rh - ah) + lh * std::log1p(rh / eh)};
+    }
+
+    // Per entry; inlined, or tied and on go through memory (40% here).
+    FP_INLINE double mag(double ax, double lam, int tie, bool &tied, bool &on) const noexcept {
         tied = false;
         on = false;
         if (lam == 0.0) {
             on = ax > 0.0;
             return ax;
         }
-        const double disc = (ax + eps) * (ax + eps) - 4.0 * lam;
-        if (!(disc >= 0.0)) return 0.0;
-        const double r = 0.5 * ((ax - eps) + std::sqrt(disc));
+        const Root rt = log_root(ax, lam);
+        const double r = rt.r, df = rt.df;  // df: F(r) - F(0), up to a positive factor
         if (!(r > 0.0)) return 0.0;
-        const double df = r * (0.5 * r - ax) + lam * std::log1p(r / eps);  // F(r) - F(0)
         if (df < 0.0) {
             on = true;
             return r;
@@ -574,7 +629,7 @@ struct LogPen final : ElemOp<LogPen> {
     double value1(double x, int64_t, double) const noexcept { return lambda * std::log1p(std::fabs(x) / eps); }
 
     template <class T>
-    T prox1(T x, double gamma, int64_t, int tie, bool &tied) const noexcept {
+    FP_INLINE T prox1(T x, double gamma, int64_t, int tie, bool &tied) const noexcept {
         const double xd = static_cast<double>(x);
         if (std::isnan(xd)) {
             tied = false;
@@ -603,32 +658,28 @@ struct LogPen final : ElemOp<LogPen> {
         e.np = 2;
         e.pi[0] = 0;
         e.pi[1] = 1;
-        const double lam = gamma * lambda, u = eps + r;
-        const double den = 1.0 - lam / (u * u);
+        // kappa = lam / u^2 as (lam / u) / u: u^2 over- or underflows where
+        // kappa (<= 1 on this branch) does not.
+        const double lam = gamma * lambda, u = eps + r, kappa = lam / u / u;
+        const double den = 1.0 - kappa;
         e.j = 1.0 / den;
         e.dg = -lambda * s / u / den;
         e.pv[0] = -gamma * s / u / den;
-        e.pv[1] = lam * s / (u * u) / den;
+        e.pv[1] = kappa * s / den;
         return e;
     }
     // The root r(a) of the stationarity condition on the nonzero branch, a >=
     // 2 sqrt(lam) - eps (0 below that).
-    double branch(double a, double lam) const noexcept {
-        const double disc = (a + eps) * (a + eps) - 4.0 * lam;
-        return disc >= 0.0 ? std::fmax(0.0, 0.5 * ((a - eps) + std::sqrt(disc))) : 0.0;
-    }
+    double branch(double a, double lam) const noexcept { return log_root(a, lam).r; }
     // The breakpoint in |x| (since 0.3): lam / eps where the map is
     // continuous (lam <= eps^2, the branch starts at 0), else the tie, where
     // F(r(a)) - F(0) = r (r / 2 - a) + lam log(1 + r / eps), decreasing in a
     // (its derivative is -r), crosses 0; by bisection, cached per thread.
     double breakpoint(double lam) const noexcept {
-        if (lam <= eps * eps) return lam / eps;
+        if (lam / eps <= eps) return lam / eps;  // lam <= eps^2, without its underflow
         thread_local double c_lam = -1.0, c_eps = -1.0, c_t = 0.0;
         if (c_lam == lam && c_eps == eps) return c_t;
-        auto df = [&](double a) {
-            const double r = branch(a, lam);
-            return r * (0.5 * r - a) + lam * std::log1p(r / eps);
-        };
+        auto df = [&](double a) { return log_root(a, lam).df; };
         double lo = 2.0 * std::sqrt(lam) - eps, hi = std::fmax(2.0 * lo, lo + eps);
         for (int it = 0; it < 200 && df(hi) > 0.0; ++it) hi *= 2.0;
         for (int it = 0; it < 200 && hi - lo > 2.220446049250313e-16 * hi; ++it) {
@@ -658,7 +709,7 @@ struct LogPen final : ElemOp<LogPen> {
             return e;
         }
         if (lam == 0.0) return branch_deriv(std::fabs(x), pc.s, gamma);  // as deriv1
-        const double a = std::fmax(std::fabs(x), lam > eps * eps ? breakpoint(lam) : 0.0);
+        const double a = std::fmax(std::fabs(x), lam / eps > eps ? breakpoint(lam) : 0.0);
         return branch_deriv(branch(a, lam), pc.s, gamma);
     }
     int kink1(double x, double gamma, int64_t, double tol, Kink &k) const noexcept {

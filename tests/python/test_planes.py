@@ -254,3 +254,44 @@ def test_errors():
             v[pos] = np.inf
             with pytest.raises(ValueError):
                 f(v)
+
+
+@pytest.mark.parametrize("box", [True, False])
+@pytest.mark.parametrize("k", [-1000, 980, 1000])
+def test_scaled_planes(box, k):
+    """P_{tC}(t x) = t P_C(x): the sums a^T x overflowed for entries near
+    DBL_MAX / n (audit K7); the solver now rescales by a power of two."""
+    rng = np.random.default_rng(11)
+    t = 2.0 ** k
+    for _ in range(5):
+        a, b, lo, hi = plane_problem(rng, 9, box=box)
+        x = rng.normal(scale=3, size=9)
+        for op, opt in ((fp.Hyperplane(a, b, lo, hi), fp.Hyperplane(a, b * t, lo * t, hi * t)),
+                        (fp.HalfSpace(a, b, lo, hi), fp.HalfSpace(a, b * t, lo * t, hi * t))):
+            z = op.prox(x)
+            np.testing.assert_allclose(opt.prox(x * t) / t, z, rtol=8 * 2.0 ** -52, atol=8 * 2.0 ** -52 * np.abs(z).max())
+    x = np.array([1.4e308, 1.4e308])
+    np.testing.assert_array_equal(fp.project_hyperplane(x, np.ones(2), 0.0), [0.0, 0.0])
+    np.testing.assert_array_equal(fp.project_hyperplane(x, np.ones(2), 0.0, -1.5e308, 1.5e308), [0.0, 0.0])
+
+
+def test_sum_largest_near_max():
+    y = np.array([1e308, 5e307, -3.0])
+    np.testing.assert_array_equal(fp.prox_sum_largest(y, 1.0, 1), [1e308 - 1.0, 5e307, -3.0])
+
+
+def test_degenerate_bounds():
+    """An entry with lo = hi is fixed: its Jacobian is 0, also on the bound
+    (audit K11); the free piece does not exist there."""
+    x = np.array([0.25, 0.5, 0.25])
+    lo, hi = np.array([0.0, 0.5, 0.0]), np.array([1.0, 0.5, 1.0])
+    op = fp.Hyperplane(np.ones(3), 1.0, lo, hi)
+    z, ctx = op.prox(x, keep=True)
+    np.testing.assert_array_equal(op.jvp(ctx, np.array([0.0, 1.0, 0.0])), [0.0, 0.0, 0.0])
+    h = 1e-7
+    for side in (1, -1):  # one-sided differences in x_1
+        e = np.array([0.0, side * h, 0.0])
+        np.testing.assert_allclose((op.prox(x + e) - z) / h, 0.0, atol=1e-9)
+    g = np.random.default_rng(3).normal(size=3)
+    dx = np.random.default_rng(4).normal(size=3)
+    assert abs(g @ op.jvp(ctx, dx) - op.vjp(ctx, g)[0] @ dx) <= 1e-14 * (1 + abs(g @ op.jvp(ctx, dx)))

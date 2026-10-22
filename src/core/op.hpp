@@ -29,6 +29,17 @@
 #include <emmintrin.h>
 #endif
 
+// Out of line and cold: a rare path kept out of the hot code that calls it.
+// FP_INLINE: inlined even past the compiler's size threshold, for a per-entry
+// function whose reference arguments would otherwise go through memory.
+#if defined(_MSC_VER)
+#define FP_COLD __declspec(noinline)
+#define FP_INLINE __forceinline
+#else
+#define FP_COLD __attribute__((noinline, cold))
+#define FP_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace fp {
 
 // Derivative of one entry of an elementwise prox:
@@ -342,7 +353,7 @@ inline double indicator(double violation, double atol) noexcept {
 template <class D>
 struct ElemCall {
     template <class T>
-    static T prox(const D &d, T x, double gamma, int64_t w, int tie, bool &tied) noexcept {
+    FP_INLINE static T prox(const D &d, T x, double gamma, int64_t w, int tie, bool &tied) noexcept {
         if constexpr (D::kTies) return d.template prox1<T>(x, gamma, w, tie, tied);
         else return d.template prox1<T>(x, gamma, w);
     }
@@ -752,13 +763,6 @@ inline bool sumsq_in_range(double S) noexcept {
     std::memcpy(&b, &S, sizeof b);
     return b - lo <= hi - lo;
 }
-
-// Out of line and cold: a rare path kept out of the hot code that calls it.
-#if defined(_MSC_VER)
-#define FP_COLD __declspec(noinline)
-#else
-#define FP_COLD __attribute__((noinline, cold))
-#endif
 
 // Group norms sqrt(sum_{i in g} x_i^2) from the plain sums of squares S_g,
 // which nrm holds on entry; x(i), i < n, the entries and group(i) < G their

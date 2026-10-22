@@ -218,7 +218,9 @@ struct Box final : ElemOp<Box> {
     // clipped to the upper bound. Kinks 1 at x = lower, 2 at x = upper.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double, int64_t i) const noexcept {
-        return {x < lo[li(i)] ? 0 : (x > hi[hj(i)] ? 2 : 1), 1.0};
+        // An entry with lo = hi is fixed: no inside piece (audit K11).
+        const double l = lo[li(i)], h = hi[hj(i)];
+        return {(x < l || (x == l && l == h)) ? 0 : (x > h ? 2 : 1), 1.0};
     }
     ElemDeriv deriv_piece(double, double, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
@@ -375,8 +377,9 @@ struct L1Box final : ElemOp<L1Box> {
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
         const double tau = gamma * lambda * w[at(w, i)];
         const double y = std::copysign(pos(std::fabs(x) - tau), x);
-        if (y < lo[at(lo, i)]) return {2, sgn(x)};
-        if (y > hi[at(hi, i)]) return {3, sgn(x)};
+        const double l = lo[at(lo, i)], h = hi[at(hi, i)];
+        if (y < l || (y == l && l == h)) return {2, sgn(x)};  // lo = hi: fixed (audit K11)
+        if (y > h) return {3, sgn(x)};
         return {!(tau > 0.0) || std::fabs(x) > tau ? 1 : 0, sgn(x)};
     }
     ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {

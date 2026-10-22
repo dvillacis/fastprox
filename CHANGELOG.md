@@ -23,6 +23,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Row kernels far from unit scale, and fixed box entries (audit K3, K7, K8, K11).
+  - **Log penalty (K3).** The root of the stationarity condition no longer cancels for |x| < ε: λ = 1e-20, ε = 1, x = 3e-20 gave 0 where the root is 2e-20, and λ = 1e-14 was 5.5% off. It now matches 80-digit references to within 4 ulp. The root also no longer overflows: [1e200, 1e154, 1e155] gave [0, 1e154, 0]. Its derivative avoids λ/u².
+  - **Hyperplane, half-space and the sums of the largest entries (K7).** Σ aᵢxᵢ no longer overflows for entries near DBL_MAX/n. `project_hyperplane([1.4e308, 1.4e308], [1, 1], 0)` gave [−inf, −inf]; the solver now rescales by a power of two. The projection is exactly homogeneous, from 2⁻¹⁰⁰⁰ to 2¹⁰⁰⁰.
+  - **Isotonic regression (K8).** Block sums that overflow are redone on block means: `isotonic([1.5e308, 1.5e308, 0])` gave inf. Weight ratios below 1e-100 are rejected (`FP_EPARAM`), as for the weighted ℓ1 ball.
+  - **Box, ℓ1 over a box and hyperplane (K11).** An entry with lo = hi is fixed, also when x lies on it: its Jacobian was 1, now 0.
+
+  Speeds are unchanged; the overflow paths are taken only when needed. Tested in `test_nonconvex.py`, `test_planes.py` and `test_operators.py`. (K9, an overflow in 1D TV's constant mean, can no longer be reached with the step range of A1.)
 - `fp_prox_conj` at small σ and steps that overflow inside kernels (audit A1). For σ < 5.6e-309, 1/σ overflowed: soft thresholding returned NaN with `FP_OK`, and row operators returned `FP_EINVAL` for the same call. At σ = 1e-300, group ℓ2, tree ℓ2 and image TV returned wrong values with `FP_OK`, and float32 failed from σ = 1e-100. The fixes:
   - **Homogeneous operators.** For a positively homogeneous g or a cone indicator (soft thresholding, the ℓ2, group, tree and ℓ∞ norms, max, the sums of the largest entries, every TV, the orthant, the second-order cone, isotonic regression), the conjugate is now y − prox_g(y). That is exact and the same for every σ > 0, with σ-derivative 0. It changes results for σ ≠ 1 at rounding level. For image operators the workspace dual after the call is now that of the unit-step problem, so a warm start seeded from an earlier `fp_prox_conj` at another σ starts from a scaled dual.
   - **Other operators.** They return `FP_EPARAM` when 1/σ or some y/σ overflows: float32 is checked for σ < 1, float64 for σ < 2⁻⁶⁴.

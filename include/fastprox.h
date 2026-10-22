@@ -201,7 +201,8 @@ FP_API fp_status fp_op_hyperplane(const fp_array *a, double b, double lo, double
 FP_API fp_status fp_op_soc(fp_op **out);
 
 /* Projection onto the monotone cone (isotonic regression by PAVA), minimising
- * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0.
+ * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0, with
+ * min/max >= 1e-100 (since 1.0).
  * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL). */
 FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op **out);
 

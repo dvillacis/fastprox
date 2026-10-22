@@ -749,7 +749,8 @@ class HalfSpace(Hyperplane):
 
 class Isotonic(Operator):
     r"""Projection onto the monotone cone along the axis (pool-adjacent-
-    violators), minimising $\sum_i w_i (z_i - x_i)^2$. Parameters: weights."""
+    violators), minimising $\sum_i w_i (z_i - x_i)^2$. Parameters: weights,
+    all > 0 with min/max >= 1e-100 (since 1.0)."""
 
     def __init__(self, weights=None, increasing=True):
         w = _vec(weights)

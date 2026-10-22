@@ -476,7 +476,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | --- | --- | --- |
 | soft thresholding, elastic net | $\lvert x_i \rvert$ equal to a positive threshold | thresholded: 0 |
 | Huber | $\lvert x_i \rvert = \delta + \gamma\lambda$ | inner (quadratic) branch: $\delta/(\delta + \gamma\lambda)$ |
-| box, nonnegative orthant | $x_i$ on a bound | interior: 1 |
+| box, nonnegative orthant | $x_i$ on a bound | interior: 1 (an entry with $\mathrm{lo}_i = \mathrm{hi}_i$ is fixed: 0, *since 1.0*) |
 | group ℓ2, ℓ2 norm | $\lVert x_g \rVert$ equal to the threshold | group set to zero: 0 |
 | ℓ2 ball | $\lVert x \rVert = r$ | inside: identity |
 | simplex, ℓ1 ball | $x_i$ (or $\lvert x_i \rvert / w_i$) equal to the threshold $\tau$ | entry off the support |
@@ -485,12 +485,12 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | ℓ∞ norm | $\lVert x \rVert_1 = \gamma\lambda$ | $z = 0$: 0 |
 | maximum | $x_i = \tau$ | entry not clipped: 1 |
 | sum of the k largest | $x_i - \mu$ on 0 or $\gamma\lambda$ (an end of the scaled cap) | entry at the shared level $\mu$ |
-| hyperplane, half-space ∩ box | $x_i - \mu a_i$ on a bound | interior (free) |
+| hyperplane, half-space ∩ box | $x_i - \mu a_i$ on a bound | interior (free), unless $\mathrm{lo}_i = \mathrm{hi}_i$ (fixed, *since 1.0*) |
 | half-space ∩ box | $a^\top P_{\mathrm{box}}(x) = b$ | box projection (constraint inactive) |
 | second-order cone | $\lVert y \rVert = t$ (on the cone), or the origin | inside: identity |
 | second-order cone | $\lVert y \rVert = -t > 0$ (on the polar cone) | $z = 0$: 0 |
 | log barrier | none for $\gamma\lambda > 0$; at $\gamma = 0$, $x_i = 0$ | 1 |
-| ℓ1 over a box | $\lvert x_i \rvert$ equal to the threshold; $\operatorname{soft}(x_i)$ on a bound | thresholded: 0; interior (soft's Jacobian) |
+| ℓ1 over a box | $\lvert x_i \rvert$ equal to the threshold; $\operatorname{soft}(x_i)$ on a bound | thresholded: 0; interior (soft's Jacobian), unless $\mathrm{lo}_i = \mathrm{hi}_i$ (fixed: 0, *since 1.0*) |
 | group Huber, SCAD, MCP | $\lVert x_g \rVert$ at a breakpoint of the scalar map | the scalar map's rule (Huber: inner branch; SCAD, MCP: the branch below) |
 | group Huber, SCAD, MCP | $x_g = 0$ | $\varphi'(0) I$, the limit of $\varphi(s)/s$ |
 | tree-structured group ℓ2 | $\lVert z_g \rVert$ equal to the threshold at a shrink; $\lvert x_i \rvert$ at the ℓ1 threshold | group set to zero; thresholded |
