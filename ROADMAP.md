@@ -180,7 +180,7 @@ its row to the decisions table when it lands.
 - [x] K11: A degenerate bound lo = hi is treated as free — [spec](docs/audit-2026-10.md#k11)
 - [x] T1: Anisotropic TV: flat edges at tiny bounds λ_e — [spec](docs/audit-2026-10.md#t1)
 - [x] T5: Image TV: overflow of ‖x‖² and of the gap (power-of-two rescaling) — [spec](docs/audit-2026-10.md#t5)
-- [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
+- [x] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
 - [x] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)
 - [x] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
 - [x] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)

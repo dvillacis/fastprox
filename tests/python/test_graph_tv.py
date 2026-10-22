@@ -294,3 +294,29 @@ def test_power_of_two_scale(k):
     path = fp.GraphTV(4, np.array([[0, 1], [1, 2], [2, 3]]))
     _, ctx = path.prox(np.array([0.0, 1, 1, 3]) * 2.0**k, 0.5 * 2.0**k, keep=True)
     assert ctx.kinks(1e-12 * 2.0**k).tolist() == [0, 1, 0]
+
+
+@pytest.mark.parametrize("gamma", [1e10, 1e17, 1e20])
+def test_dual_at_large_steps(gamma):
+    """The flow of a live edge was read as gamma w_e - residual, which lost it
+    below an ulp of gamma w_e: at gamma >= 1e17, |x - z - q| was 2.8 and the
+    gap 121 with converged set (audit T6). The engine now sums its net flow."""
+    x = np.random.default_rng(5).standard_normal(256)
+    z, info = fp.GraphTV(256, grid_edges((16, 16))).solve(x, gamma, tol=0.0)
+    q = np.reshape(info.dual, -1)
+    assert np.max(np.abs(x - z - q)) <= 1e-12 * np.max(np.abs(x))
+    assert info.gap <= 1e-20 * (x @ x)
+
+
+def test_dual_at_the_step_bound():
+    """gamma w_e at the top of the step range (2^960): the dual and gap stay
+    finite, and the Jacobian of the fully fused graph is the mean."""
+    w = np.full(3, 1e10)
+    op = fp.GraphTV(4, np.array([[0, 1], [1, 2], [2, 3]]), w)
+    x = np.array([0.0, 1.0, 3.0, -2.0])
+    gamma = 0.5 * 2.0**960 / 1e10
+    z, info = op.solve(x, gamma, tol=0.0)
+    assert np.all(np.isfinite(info.dual)) and np.isfinite(info.gap)
+    np.testing.assert_allclose(z, np.full(4, x.mean()), rtol=1e-15)
+    _, ctx = op.prox(x, gamma, keep=True)
+    np.testing.assert_allclose(op.jvp(ctx, np.ones(4)), np.ones(4), rtol=1e-15)

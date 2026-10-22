@@ -51,7 +51,7 @@ class EIBFS {
     // Bytes of working memory for graph g, at the alignment of max_align_t.
     static size_t bytes(const Graph &g) noexcept {
         const size_t n = static_cast<size_t>(g.n), m2 = 2 * static_cast<size_t>(g.m);
-        return rnd(sizeof(T) * n) + rnd(sizeof(T) * m2) + 9 * rnd(sizeof(Index) * n) + 3 * rnd(n);
+        return rnd(sizeof(T) * n) + 2 * rnd(sizeof(T) * m2) + 9 * rnd(sizeof(Index) * n) + 3 * rnd(n);
     }
 
     // mem: bytes(g) bytes aligned to alignof(std::max_align_t), kept by the
@@ -62,6 +62,8 @@ class EIBFS {
         tr_ = reinterpret_cast<T *>(c);
         c += rnd(sizeof(T) * n);
         r_ = reinterpret_cast<T *>(c);
+        c += rnd(sizeof(T) * m2);
+        p_ = reinterpret_cast<T *>(c);
         c += rnd(sizeof(T) * m2);
         Index **arrs[9] = {&d_, &par_, &cur_, &list_[0], &list_[1], &list_[2], &list_[3], &oq_[0], &oq_[1]};
         for (Index **a : arrs) {
@@ -81,8 +83,12 @@ class EIBFS {
         const Index a = g_.arc[e];
         r_[a] = cap_uv;
         r_[g_.sister[a]] = cap_vu;
+        if (track_) p_[a] = p_[g_.sister[a]] = 0;
     }
     void init_terminal(Index p, T cap) noexcept { tr_[p] = cap; }
+    // Keep the net flow of every arc (flow()), before init_edge: one more
+    // store per arc of each augmenting path.
+    void track_flow() noexcept { track_ = true; }
     void start() noexcept {}
 
     // Changes between solves (the forests are rebuilt by each solve).
@@ -100,6 +106,10 @@ class EIBFS {
     uint8_t tree(Index p) const noexcept { return side_[p]; }
     T terminal(Index p) const noexcept { return tr_[p]; }
     T residual(Index a) const noexcept { return r_[a]; }
+    // With track_flow, the net flow along arc a since init_edge (set_edge
+    // leaves it), summed from what each augmentation pushed: cap - residual(a)
+    // loses it below an ulp of a large capacity (audit T6).
+    T flow(Index a) const noexcept { return p_[a] - p_[g_.sister[a]]; }
 
     // Routes excess to deficits until no residual path joins them; returns
     // the flow added. With nodes, only those count of them (no residual arc
@@ -233,10 +243,12 @@ class EIBFS {
         flow_ += delta;
 
         r_[a] -= delta;
+        if (track_) p_[a] += delta;
         r_[g_.sister[a]] += delta;
         for (x = v; par_[x] != kRoot;) {
             const Index pa = par_[x], b = g_.sister[pa];
             r_[b] -= delta;
+            if (track_) p_[b] += delta;
             r_[pa] += delta;
             if (!(r_[b] > 0)) orphan(kS, x);
             x = g_.head[pa];
@@ -246,6 +258,7 @@ class EIBFS {
         for (x = w; par_[x] != kRoot;) {
             const Index pa = par_[x];
             r_[pa] -= delta;
+            if (track_) p_[pa] += delta;
             r_[g_.sister[pa]] += delta;
             if (!(r_[pa] > 0)) orphan(kT, x);
             x = g_.head[pa];
@@ -339,7 +352,7 @@ class EIBFS {
     }
 
     const Graph &g_;
-    T *tr_, *r_;
+    T *tr_, *r_, *p_;  // terminal residuals, arc residuals, pushed along each arc
     Index *d_, *par_, *cur_;
     Index *list_[4];  // front and next lists of S and T
     Index *oq_[2];    // orphan queues of S and T (rings)
@@ -352,6 +365,7 @@ class EIBFS {
     const int32_t *nodes_ = nullptr;
     int64_t count_ = 0;
     T flow_ = 0;
+    bool track_ = false;
 };
 
 }  // namespace maxflow

@@ -137,7 +137,7 @@ class MaxFlow {
 
     // Bytes of working memory for graph g, at the alignment of max_align_t.
     static size_t bytes(const Graph &g) noexcept {
-        return round(sizeof(Node) * static_cast<size_t>(g.n)) + round(sizeof(T) * 2 * static_cast<size_t>(g.m)) +
+        return round(sizeof(Node) * static_cast<size_t>(g.n)) + 2 * round(sizeof(T) * 2 * static_cast<size_t>(g.m)) +
                4 * round(sizeof(Index) * static_cast<size_t>(g.n));
     }
 
@@ -149,6 +149,8 @@ class MaxFlow {
         nd_ = reinterpret_cast<Node *>(c);
         c += round(sizeof(Node) * static_cast<size_t>(g.n));
         r_ = reinterpret_cast<T *>(c);
+        c += round(sizeof(T) * 2 * static_cast<size_t>(g.m));
+        p_ = reinterpret_cast<T *>(c);
         c += round(sizeof(T) * 2 * static_cast<size_t>(g.m));
         oq_ = reinterpret_cast<Index *>(c);
         c += round(sizeof(Index) * static_cast<size_t>(g.n));
@@ -164,8 +166,12 @@ class MaxFlow {
         const Index a = g_.arc[e];
         r_[a] = cap_uv;
         r_[g_.sister[a]] = cap_vu;
+        if (track_) p_[a] = p_[g_.sister[a]] = 0;
     }
     void init_terminal(Index p, T cap) noexcept { nd_[p].tr = cap; }
+    // Keep the net flow of every arc (flow()), before init_edge: one more
+    // store per arc of each augmenting path.
+    void track_flow() noexcept { track_ = true; }
 
     // Drops the trees and plants the roots: every node with terminal residual.
     void start() noexcept {
@@ -238,6 +244,10 @@ class MaxFlow {
     uint8_t tree(Index p) const noexcept { return nd_[p].tree; }
     T terminal(Index p) const noexcept { return nd_[p].tr; }
     T residual(Index a) const noexcept { return r_[a]; }
+    // With track_flow, the net flow along arc a since init_edge (set_edge
+    // leaves it), summed from what each augmentation pushed: cap - residual(a)
+    // loses it below an ulp of a large capacity.
+    T flow(Index a) const noexcept { return p_[a] - p_[g_.sister[a]]; }
 
   private:
     static constexpr Index kNone = -1;      // free: no parent
@@ -360,6 +370,7 @@ class MaxFlow {
             p = g_.head[x.parent];
         }
         r_[a] -= d;
+        if (track_) p_[a] += d;
         r_[g_.sister[a]] += d;
         for (Index p = u;;) {
             Node &x = nd_[p];
@@ -370,6 +381,7 @@ class MaxFlow {
             }
             const Index pa = x.parent, down = g_.sister[pa], up = g_.head[pa];
             r_[down] -= d;
+            if (track_) p_[down] += d;
             r_[pa] += d;
             if (r_[down] == 0) orphan(p);
             p = up;
@@ -383,6 +395,7 @@ class MaxFlow {
             }
             const Index pa = x.parent, up = g_.head[pa];
             r_[pa] -= d;
+            if (track_) p_[pa] += d;
             r_[g_.sister[pa]] += d;
             if (r_[pa] == 0) orphan(p);
             p = up;
@@ -563,10 +576,11 @@ class MaxFlow {
 
     const Graph &g_;
     Node *nd_ = nullptr;
-    T *r_ = nullptr;
+    T *r_ = nullptr, *p_ = nullptr;  // arc residuals, pushed along each arc
     Index *oq_ = nullptr, *fq_ = nullptr, *gcur_ = nullptr, *acur_ = nullptr;
     Index qhead_ = -1, qtail_ = -1, ohead_ = 0, ocount_ = 0, fcount_ = 0;
     uint32_t time_ = 1;
+    bool track_ = false;
 };
 
 }  // namespace fp::maxflow
