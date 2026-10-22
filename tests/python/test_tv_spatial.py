@@ -178,3 +178,16 @@ def test_torch_and_jax_wrappers(iso):
                     order=1, modes=["rev"], eps=1e-6 if iso else 1e-8)
     finally:
         jax.config.update("jax_enable_x64", old)
+
+
+def test_nan_image_certificate():
+    """An image holding a NaN is not solved: a NaN gap and converged still
+    True; the other images are unaffected (audit A8)."""
+    xb = image((2, 8, 9), 3)
+    xb[0, 1, 1] = np.nan
+    zb, info = fp.tv_aniso(xb, 0.4)
+    z1, i1 = fp.tv_aniso(xb[1], 0.4)
+    assert np.isnan(info.gap) and info.converged and info.iters == i1.iters
+    assert np.isnan(zb[0]).all() and np.array_equal(zb[1], z1)
+    _, info2 = fp.tv_aniso(xb, 0.4, warm_start=info.dual)
+    assert np.isnan(info2.gap)

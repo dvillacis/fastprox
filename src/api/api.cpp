@@ -920,8 +920,11 @@ void dual_copy(fp_workspace &ws, const Arr &a, bool to_ws) noexcept {
             p.offsets(r, off);
             double *dual = ws.dual.data() + (static_cast<size_t>(r) * static_cast<size_t>(k) + static_cast<size_t>(b)) * static_cast<size_t>(N);
             T *img = base + off[0];
-            if (to_ws)
-                p.for_each(0, [&](int64_t i, int64_t o) { dual[i] = static_cast<double>(img[o]); });
+            if (to_ws)  // NaN, which get returns for an image that held one, as 0 (audit A8)
+                p.for_each(0, [&](int64_t i, int64_t o) {
+                    const double v = static_cast<double>(img[o]);
+                    dual[i] = std::isnan(v) ? 0.0 : v;
+                });
             else
                 p.for_each(0, [&](int64_t i, int64_t o) { img[o] = static_cast<T>(dual[i]); });
         }
@@ -939,13 +942,13 @@ fp_status dual_impl(fp_workspace *ws, const fp_array *aa, bool to_ws) {
     if (!to_ws)
         if (fp_status s = check_output(nullptr, a)) return s;
     if (ws->numel == 0) return FP_OK;
-    if (to_ws) {  // a seed must be finite
+    if (to_ws) {  // a seed must not be infinite; NaN entries are stored as 0
         bool ok = true;
         if (a.dtype == FP_F32) dual_copy<float>(*ws, a, true);
         else dual_copy<double>(*ws, a, true);
         const double *d = ws->dual.data();
         const size_t m = ws->dual.size();
-        for (size_t i = 0; i < m; ++i) ok = ok && std::isfinite(d[i]);
+        for (size_t i = 0; i < m; ++i) ok = ok && !std::isinf(d[i]);
         if (!ok) {
             ws->dual_valid = false;
             return FP_EINVAL;

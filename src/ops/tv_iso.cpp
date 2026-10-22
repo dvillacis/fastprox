@@ -311,6 +311,7 @@ struct TVIso final : ImageOp<TVIso> {
             for (int64_t i = 0; i < N; ++i) zout[i] = std::numeric_limits<T>::quiet_NaN();
             std::fill(q, q + k * N, std::numeric_limits<double>::quiet_NaN());
             if (c.save) save(g, c, wa, d, d, nullptr);
+            c.gap = std::numeric_limits<double>::quiet_NaN();  // not solved (audit A8)
             return kRowOk;
         }
         // Far from unit scale, solve at a power-of-two scale (image_util.hpp),

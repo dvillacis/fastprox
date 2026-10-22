@@ -278,7 +278,10 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
  * with the last iterate written). Its dual is kept in the workspace. Images
  * far from unit scale are solved rescaled by a power of two (since 1.0), so
  * prox(c x, c gamma) = c prox(x, gamma) for c = 2^k up to rounding; the gap
- * may then be +inf when it exceeds the largest double. */
+ * may then be +inf when it exceeds the largest double. An image containing a
+ * NaN is not solved: its output and dual are NaN, it adds NaN to fp_info.gap
+ * and no iterations, and it does not by itself make the call FP_ENOTCONV
+ * (since 1.0). */
 FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out);
 
 /* Anisotropic TV with edge weights (since 0.3):
@@ -297,7 +300,7 @@ FP_API fp_status fp_op_tv_aniso_weighted(int ndim, const fp_array *axis_weights,
  * last entry), batched over the others; the weights scale each axis inside
  * the norm (e.g. voxel spacing). axis_weights: NULL (w = 1), length 1, or
  * ndim, all >= 0. theta = (w_0, ..., w_{ndim-1}). Iterative, as
- * fp_op_tv_aniso. The dual u in the workspace has |u_p|_2 <= gamma and
+ * fp_op_tv_aniso, NaN images included. The dual u in the workspace has |u_p|_2 <= gamma and
  * z = x - sum_a w_a D_a^T u_a. Derivatives solve a linear system by conjugate
  * gradients (fp_workspace_set_deriv_tol, fp_workspace_deriv_info). */
 FP_API fp_status fp_op_tv_iso(int ndim, const fp_array *axis_weights, fp_op **out);
@@ -324,7 +327,10 @@ FP_API fp_status fp_op_tv_iso_weighted(int ndim, const fp_array *axis_weights, c
  * solves (FP_ENOTCONV after max_iter, every unfinished part at its mean).
  * The workspace dual (shape (1, *x.shape)) is q = D^T f, with z = x - q at
  * the solution; warm starts have no effect. jvp and vjp are exact: averages
- * over the regions where z is constant. */
+ * over the regions where z is constant. A signal containing a NaN is not
+ * solved: its output and dual are NaN, it adds NaN to fp_info.gap and no
+ * iterations, and it does not by itself make the call FP_ENOTCONV (since
+ * 1.0). */
 FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges,
                                 const fp_array *edge_weights, fp_op **out);
 
@@ -334,7 +340,8 @@ FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges,
  * dynamic programming (Kolmogorov, Pock and Rolinek), O(n log n): exact up
  * to rounding, tol and max_iter are ignored, fp_info.iters is 1 and gap the
  * duality gap with the dual flow, which on a tree is determined by z. The
- * workspace dual and the derivatives are those of fp_op_graph_tv. */
+ * workspace dual, the derivatives and NaN signals (iters 0) are those of
+ * fp_op_graph_tv. */
 FP_API fp_status fp_op_tree_tv(int64_t n, int64_t m, const int64_t *edges,
                                const fp_array *edge_weights, fp_op **out);
 
@@ -354,7 +361,9 @@ FP_API void      fp_workspace_free(fp_workspace *ws);
  * shape (ndim, *x.shape) whose blocks q_a are feasible for the conjugate of
  * the term along axis a, with z = x - sum_a q_a at the solution. get copies
  * out the dual of the last call (FP_EINVAL before any call); set seeds it
- * (FP_EINVAL if it is not finite), and the next call starts from it; with
+ * (FP_EINVAL if an entry is +-Inf; NaN entries, which get returns for an
+ * image that held a NaN, are stored as 0, since 1.0), and the next call
+ * starts from it; with
  * set_warm(ws, 1) every call starts from the dual left by the previous one.
  * A starting dual that is not feasible is first made so (clipped to the
  * operator's bounds), so any seed gives a valid certificate. Other

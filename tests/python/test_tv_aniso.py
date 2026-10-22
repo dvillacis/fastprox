@@ -227,8 +227,8 @@ def test_warm_starts():
 def test_infeasible_warm_start(shape, k):
     """A warm dual is made feasible before use. Unchecked, q = (x - mean(x),
     0, ...) gives z = mean(x) with gap 0, a wrong point certified at once. Random and huge duals must not break the result either, nor the NaN
-    dual a NaN image leaves for the next warm call; a non-finite seed is
-    rejected."""
+    dual a NaN image leaves for the next warm call. A NaN seed entry is
+    stored as 0 (since 1.0, audit A8); an infinite one is rejected."""
     x = image(shape, 11)
     op = fp.TVAniso(k)
     z0, _ = op.solve(x, 0.4, tol=1e-12, max_iter=100000)
@@ -250,6 +250,8 @@ def test_infeasible_warm_start(shape, k):
         check(z, info)
     nonfinite = rng.normal(size=(k, *shape))
     nonfinite[0, 2, 3] = np.nan
+    check(*op.solve(x, 0.4, tol=1e-12, max_iter=100000, warm_start=nonfinite))
+    nonfinite[0, 2, 3] = np.inf
     with pytest.raises(ValueError):
         op.solve(x, 0.4, warm_start=nonfinite)
     xn = x.copy()

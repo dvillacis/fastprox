@@ -23,6 +23,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Images holding a NaN, in TV in 2 and 3 dimensions, graph TV and tree TV (audit A8):
+  - **Certificate.** Such an image used to report a perfect certificate: gap 0, `converged`, and 0 iterations (1 for tree TV). It now reports a NaN gap and 0 iterations, and does not by itself make the call `FP_ENOTCONV`, since more iterations cannot fix it. `fp_info.gap`, a sum over the batch, is then NaN, and `IterInfo.converged` stays True.
+  - **Dual.** The NaN dual that `fp_workspace_get_dual` returns for such an image was rejected by `fp_workspace_set_dual`. Now `set` stores NaN entries as 0 and rejects only ±Inf, so a dual read back can always be set again, including as Python's `warm_start=`.
+
+  Tested in `test_core.cpp` (`test_nan_images`), `test_tv_iso.py`, `test_tv_spatial.py` and `test_graph_tv.py`.
 - Kept calls that do no work now give derivatives (audit A3). Two kinds of call returned `FP_OK` but left no saved point, so `fp_jvp` and `fp_vjp` then returned `FP_EINVAL`:
   - an empty batch with `keep_structure`. Its derivatives now return `FP_OK` and write nothing, with zero gradients;
   - `fp_prox_conj` at σ = 0. Its derivatives are now those of the identity, with a NaN σ-derivative, which is not defined there for every operator.

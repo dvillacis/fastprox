@@ -203,3 +203,17 @@ def test_not_converged_and_errors():
     xb[1, 2, 3] = np.nan
     zb, _ = fp.tv_iso(xb, 0.5)
     assert np.isnan(zb[1]).all() and not np.isnan(zb[[0, 2]]).any()
+
+
+def test_nan_image_certificate_and_dual():
+    """An image holding a NaN is not solved: a NaN gap, converged still True,
+    and its NaN dual is accepted back by warm_start= (audit A8)."""
+    xb = image((2, 10, 12), 9)
+    xb[1, 2, 3] = np.nan
+    zb, info = fp.tv_iso(xb, 0.5)
+    assert np.isnan(info.gap) and info.converged
+    assert np.isnan(info.dual[:, 1]).all() and np.isfinite(info.dual[:, 0]).all()
+    xc = image((2, 10, 12), 9)
+    z1, _ = fp.tv_iso(xc, 0.5, warm_start=info.dual)
+    z2, _ = fp.tv_iso(xc, 0.5, warm_start=np.nan_to_num(info.dual, nan=0.0))
+    assert np.array_equal(z1, z2) and np.isfinite(z1).all()
