@@ -70,7 +70,7 @@ typedef enum {
     FP_EINVAL,   /* invalid argument, non-finite input, missing structure */
     FP_EDTYPE,   /* unsupported or mismatched dtype */
     FP_ESHAPE,   /* mismatched shapes or parameter lengths */
-    FP_ENOMEM,   /* std::bad_alloc caught at the API layer */
+    FP_ENOMEM,   /* out of memory, or a size too large to allocate */
     FP_ENOTCONV, /* iterative operator stopped before tol */
     FP_EPARAM,   /* invalid operator parameter or step */
     FP_EINTERNAL, /* any other C++ exception, caught */
@@ -271,7 +271,7 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
 
 /* Anisotropic TV of an image: g(z) = sum over the last ndim axes a of
  * w_a * (1D TV of z along a), for ndim = 2 or 3. It acts on the last ndim axes
- * and is batched over the others (fp_options.axis is ignored). axis_weights:
+ * and is batched over the others (fp_options.axis is ignored, any value). axis_weights:
  * NULL (w = 1), length 1, or ndim, all >= 0. theta = (w_0, ..., w_{ndim-1}).
  * Iterative: fp_info reports the duality gap, and the call stops when the gap
  * of every image is at most tol * ||x||^2 / 2 (FP_ENOTCONV after max_iter,
@@ -314,7 +314,7 @@ FP_API fp_status fp_op_tv_iso_weighted(int ndim, const fp_array *axis_weights, c
 
 /* Graph TV (since 0.3): g(z) = sum_e w_e |z_u - z_v| over the m edges
  * e = (u, v) of a graph on n nodes. It acts on the last axis, of length n,
- * and is batched over the others (fp_options.axis is ignored). edges: 2m
+ * and is batched over the others (fp_options.axis is ignored, any value). edges: 2m
  * node indices (u_0, v_0, u_1, v_1, ...) with u != v; repeated edges add.
  * edge_weights: NULL (w = 1), length 1, or m, all >= 0. theta = w.
  * By parametric max-flow, each part of the graph cut at its mean value: the
@@ -436,7 +436,9 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  * side at their first entry (-1: inside, or the group zeroed; +1: the
  * projection with tau = 0, or the shrink). It applies to the fp_jvp and fp_vjp calls
  * on this workspace until the next prox call or fp_workspace_set_branch(ws,
- * NULL, 0). */
+ * NULL, 0). On failure (FP_EPARAM for a value outside -1..1 or a bad tol,
+ * FP_ESHAPE, FP_EINVAL) the workspace is unchanged: an override set earlier
+ * still applies (since 1.0). */
 FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,
                                     int64_t *count);
 FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol);
@@ -454,7 +456,9 @@ FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side,
  * finite, >= 0, and at most 2^960 (about 2.4e289) divided by the operator's
  * largest parameter (lambda, a weight, ...; projections ignore gamma):
  * FP_EPARAM otherwise (since 1.0). On error the contents of out are
- * unspecified.
+ * unspecified. The step is checked even on an empty batch, and an empty
+ * batch with keep_structure saves an empty point: derivatives return FP_OK
+ * and write nothing, gradients 0 (since 1.0).
  * ---------------------------------------------------------------------- */
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
                          fp_array *out, const fp_options *opt,
@@ -474,7 +478,10 @@ FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_
                                fp_array *out, const fp_options *opt, fp_workspace *ws);
 
 /* prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y/sigma), sigma >= 0; sigma = 0
- * returns y. When g is positively homogeneous (soft thresholding, l2 and group
+ * returns y. With keep_structure, the derivatives there are those of the
+ * identity: J = I and zero parameter gradients. The sigma-derivative, which
+ * is not defined there for every operator, is NaN (fp_vjp's ggamma; fp_jvp's
+ * output when dgamma != 0; since 1.0). When g is positively homogeneous (soft thresholding, l2 and group
  * l2, tree l2, l-inf, max, the sums of the largest entries, every TV operator)
  * or the indicator of a cone (nonnegative orthant, second-order cone, monotone
  * cone), g* is the indicator of a set C and the result, y - prox_g(y), is the

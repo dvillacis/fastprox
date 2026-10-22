@@ -625,7 +625,9 @@ SCD subspaces of each entry:
   $(\operatorname{prox}(x + h e_i) - \operatorname{prox}(x))/h$ and −1 of the
   backward one, in $x$ and, along the same piece, in $\gamma$ and $\theta$. The
   override lasts until the next prox call or `fp_workspace_set_branch(ws,
-  NULL, 0)`.
+  NULL, 0)`. On failure (`FP_EPARAM` for a value outside −1..1 or a bad
+  `tol`, `FP_ESHAPE`, `FP_EINVAL`) the workspace is unchanged: an override
+  set earlier still applies (since 1.0).
 - In Python: `ctx.kinks(tol)` returns the mask, and `jvp` and `vjp` take
   `branch=` (an array or scalar of −1, 0, 1) and `kink_tol=`, for that call
   only.
@@ -721,7 +723,10 @@ fp_workspace_free(ws);
   and $(\partial z/\partial\theta)^\top g$, summed over the batch. `dtheta` and
   `gtheta` are vectors of length `fp_op_nparams(op)`.
 - Derivatives use the structure saved by the last prox call that had
-  `keep_structure` set; without it they return `FP_EINVAL`.
+  `keep_structure` set; without it they return `FP_EINVAL`. An empty batch
+  with `keep_structure` saves an empty point: derivatives return `FP_OK` and
+  write nothing, gradients 0 (since 1.0). Steps are checked on an empty
+  batch too.
 - After `fp_prox_conj`, derivatives are those of the conjugate prox and $\gamma$
   reads as $\sigma$.
 - A workspace is used by one call at a time; use one per thread.
@@ -883,7 +888,7 @@ fp_vjp_device(op, ws, &g, &gx, &ggamma, &gtheta);  /* ggamma: a 0-d array */
 
 `fp_prox_conj(op, σ, y, out, ...)` computes
 $\operatorname{prox}_{\sigma g^\ast}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$.
-$\sigma = 0$ returns $y$.
+$\sigma = 0$ returns $y$. With `keep_structure`, the derivatives there are those of the identity: $J = I$ and zero parameter gradients. The $\sigma$-derivative, which is not defined there for every operator, is NaN (`fp_vjp`'s `ggamma`; `fp_jvp`'s output when `dgamma` ≠ 0). For a smooth $g^\ast$ it would be $-\nabla g^\ast(y)$; for a homogeneous $g$ the conjugate jumps from $y$ to $P_C(y)$ (since 1.0, audit A3).
 
 Since 1.0 the computation depends on the operator (audit A1).
 
@@ -898,7 +903,7 @@ Since 1.0 the computation depends on the operator (audit A1).
 | `FP_EINVAL` | invalid argument, ±Inf in the input of an operator where it is undefined, missing saved structure, mismatched workspace |
 | `FP_EDTYPE` | dtype other than float32/float64, or mismatched dtypes |
 | `FP_ESHAPE` | mismatched shapes or parameter lengths |
-| `FP_ENOMEM` | out of memory |
+| `FP_ENOMEM` | out of memory, or a requested size too large to allocate |
 | `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), a step beyond the operator's range ($\gamma$ times its largest parameter above $2^{960}$, since 1.0), a $\sigma$ too small for the conjugate's formula, or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
 | `FP_EINTERNAL` | any other internal error |
 | `FP_EDEVICE` | (*since 1.1*) a device error, from the call or from earlier work on its stream |

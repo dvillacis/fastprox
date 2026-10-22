@@ -264,7 +264,7 @@ Calls flow down: a binding converts its array type to a strided descriptor, the 
 
 - **A plain-C boundary for reach.** A C ABI is callable from every language this community uses (Python, Julia, MATLAB, R, Fortran, Rust) without a runtime, and C++ name mangling and STL layouts differ between compilers. So the public header `fastprox.h` is C: no classes, no templates, no STL types, no references, wrapped in `extern "C"`.
 - **C++17 inside for safety and genericity.** Function templates on the scalar type generate the float32 and float64 kernels from one source. `std::vector` and RAII own the variable-size structures (max-flow graphs, search trees, tree-TV heaps), so error paths cannot leak. `constexpr` and `if constexpr` replace preprocessor tricks.
-- **No exceptions across the boundary.** Internal code may throw, including `std::bad_alloc` from containers. Every extern "C" entry point wraps its body in `try { … } catch (const std::bad_alloc&) { return FP_ENOMEM; } catch (...) { return FP_EINTERNAL; }`, so an exception never reaches a C, Julia, MATLAB or Rust caller. Hot kernels are `noexcept` and do not allocate.
+- **No exceptions across the boundary.** Internal code may throw, including `std::bad_alloc` from containers. Every extern "C" entry point wraps its body in `try { … } catch (const std::bad_alloc&) { return FP_ENOMEM; } catch (const std::length_error&) { return FP_ENOMEM; } catch (...) { return FP_EINTERNAL; }`, so an exception never reaches a C, Julia, MATLAB or Rust caller. Hot kernels are `noexcept` and do not allocate.
 - **No heavy dependencies.** No Eigen, no Boost and no BLAS. The operators need only loops over contiguous memory, and avoiding these libraries keeps builds simple and avoids version conflicts inside MATLAB and Python processes.
 - **Static libstdc++ on Linux.** The shared library links libstdc++ and libgcc statically (`-static-libstdc++ -static-libgcc`) and hides all non-API symbols. MATLAB ships its own, often older, libstdc++, and a mex file that needs a newer one fails to load; static linking removes that conflict. macOS (libc++) and Windows (MSVC runtime) use the platform runtime.
 - **Threads.** OpenMP over rows inside the C++ core; the C API exposes only a thread count.
@@ -450,7 +450,7 @@ typedef struct {            /* strided n-d array, strides in elements */
 
 typedef enum {
     FP_OK = 0, FP_EINVAL, FP_EDTYPE, FP_ESHAPE,
-    FP_ENOMEM,              /* std::bad_alloc caught at the API layer */
+    FP_ENOMEM,              /* out of memory, or a size too large to allocate */
     FP_ENOTCONV,            /* iterative op stopped before tol */
     FP_EPARAM,              /* e.g. SCAD parameter too small for gamma */
     FP_EINTERNAL            /* any other C++ exception, caught */
@@ -506,7 +506,7 @@ FP_API int         fp_abi_version(void);
 
 **C API rules**
 
-- **Boundary pattern.** Each extern "C" function checks its arguments, dispatches on `dtype` to `kernel<float>` or `kernel<double>`, and wraps the call in try/catch. `std::bad_alloc` becomes FP\_ENOMEM and any other exception becomes FP\_EINTERNAL. Constructors return a status and write the handle through an out-pointer, so allocation failures are reported, not hidden in a NULL.
+- **Boundary pattern.** Each extern "C" function checks its arguments, dispatches on `dtype` to `kernel<float>` or `kernel<double>`, and wraps the call in try/catch. `std::bad_alloc` and `std::length_error` become FP\_ENOMEM and any other exception becomes FP\_EINTERNAL. Constructors return a status and write the handle through an out-pointer, so allocation failures are reported, not hidden in a NULL.
 - **Opaque handles.** `fp_op` and `fp_workspace` are incomplete types in C; inside, they are C++ classes holding `std::vector` members and released by their destructors in `fp_op_free` and `fp_workspace_free`. Callers never see an STL type, a reference or a template.
 - **Ownership.** The library never frees caller memory. Operators copy their parameter arrays at creation. Workspaces own all scratch memory and are reused across calls, so a loop of prox calls allocates nothing after the first.
 - **Threads.** `fp_op` is immutable and safe to share. `fp_workspace` is not shared between concurrent calls; it holds one scratch region per OpenMP thread. Results are bit-identical for any value of `threads`.
