@@ -146,7 +146,7 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 
 ## 1.0 — audit of 2026-10-22
 
-An audit of master at d67de78 for robustness and speed found 56 items, each
+An audit of master at d67de78 for robustness and speed found 56 items (57 with A12, added the same day), each
 reproduced and specified (problem, design, constraints, tests, acceptance) in
 [docs/audit-2026-10.md](docs/audit-2026-10.md), with the decisions that span
 items and the decisions on its open questions (2026-10-22). The correctness, safety and scaling items and
@@ -163,6 +163,7 @@ its row to the decisions table when it lands.
 - [ ] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
 - [ ] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
 - [ ] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
+- [x] A12: Enum arguments and fields outside their enumeration (added 2026-10-22) — [spec](docs/audit-2026-10.md#a12)
 - [ ] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
 - [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
 - [ ] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)

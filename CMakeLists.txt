@@ -129,9 +129,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND BUILD_SHARED_LIBS)
 endif()
 
 if(FASTPROX_SANITIZE AND NOT MSVC)
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  # UBSan reports are fatal, so that the sanitizer job fails on them.
+  add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
-  target_compile_options(fastprox PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_compile_options(fastprox PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=undefined
+                         -fno-omit-frame-pointer)
   target_link_options(fastprox PUBLIC -fsanitize=address,undefined)
 endif()
 
