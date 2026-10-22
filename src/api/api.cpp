@@ -248,6 +248,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         }
         return FP_OK;
     }
+    // A row runs on one thread: no more scratch regions than rows (audit C2).
+    if (!elem) w.nthreads = static_cast<int>(std::min<int64_t>(w.nthreads, std::max<int64_t>(w.rows, 1)));
     if (!elem && w.numel > 0) {
         w.thread_bytes = row_thread_bytes(op, w.n, item);
         w.scratch.resize(mul_size(w.thread_bytes, static_cast<size_t>(w.nthreads)) / sizeof(double) + 1);
@@ -272,8 +274,10 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
     return FP_OK;
 }
 
+// Capped at max_threads() (audit C3): absurd requests created thousands of
+// permanent pool threads.
 int resolve_threads(const fp_options &o) noexcept {
-    return o.threads > 0 ? o.threads : default_threads();
+    return std::min(o.threads > 0 ? o.threads : default_threads(), max_threads());
 }
 
 // The steps of fp_prox_steps: an array of the batch shape, x's shape without
@@ -582,7 +586,9 @@ fp_status spectral_jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_sp
     fp_status e = ws->dtype == FP_F32 ? jvp_driver<float>(*op, *ws, &da, dgamma, dp, db)
                                       : jvp_driver<double>(*op, *ws, &da, dgamma, dp, db);
     if (e) return e;
-    const size_t need = spectral_doubles(ws->n) * static_cast<size_t>(ws->nthreads);
+    // One scratch region per thread the matrices can use (audit C2).
+    const size_t need =
+        spectral_doubles(ws->n) * static_cast<size_t>(std::min<int64_t>(ws->nthreads, std::max<int64_t>(ws->rows, 1)));
     if (ws->spectral.size() < need) ws->spectral.resize(need);
     return ws->dtype == FP_F32
                ? spectral_driver<float>(*op, *ws, svd, s, z, a, b, ra ? &r : nullptr, ws->spectral.data())

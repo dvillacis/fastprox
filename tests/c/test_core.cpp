@@ -22,6 +22,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <dirent.h>
+#endif
 #if defined(__SANITIZE_THREAD__)
 #define FP_TSAN 1
 #elif defined(__has_feature)
@@ -34,15 +39,18 @@
 // Not under ThreadSanitizer, whose runtime defines these operators itself on
 // Linux; the no-allocation test then checks nothing.
 static std::atomic<long> g_allocs{0};
+static std::atomic<long long> g_alloc_bytes{0};  // bytes requested (audit C2)
 #ifndef FP_TSAN
 void *operator new(std::size_t n) {
     ++g_allocs;
+    g_alloc_bytes += static_cast<long long>(n);
     if (void *p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
 // libstdc++'s std::get_temporary_buffer (std::stable_sort) uses this form.
 void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
     ++g_allocs;
+    g_alloc_bytes += static_cast<long long>(n);
     return std::malloc(n ? n : 1);
 }
 void operator delete(void *p) noexcept { std::free(p); }
@@ -3314,6 +3322,67 @@ static void test_descriptor_bounds() {
     fp_op_free(op);
 }
 
+// Row scratch is sized for the threads the rows can use (audit C2).
+static void test_row_scratch_bytes() {
+#ifndef FP_TSAN
+    fp_op *op;
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op));
+    for (int64_t rows : {1, 3}) {
+        Arr x({rows, int64_t{1} << 16});
+        auto bytes = [&](int threads) {
+            fp_options o = opts(-1, threads, 0);
+            fp_workspace *ws;
+            const long long before = g_alloc_bytes.load();
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            const long long b = g_alloc_bytes.load() - before;
+            fp_workspace_free(ws);
+            return b;
+        };
+        const long long one = bytes(1), all = bytes(0), many = bytes(64);
+        CHECK(all <= 1.2 * rows * one && many <= 1.2 * rows * one);
+    }
+    fp_op_free(op);
+#endif
+}
+
+// Threads in this process, or -1 where they cannot be counted.
+static int process_threads() {
+#if defined(__APPLE__)
+    thread_act_array_t list;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS) return -1;
+    for (mach_msg_type_number_t i = 0; i < count; ++i) mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(list), count * sizeof(thread_act_t));
+    return static_cast<int>(count);
+#elif defined(__linux__)
+    int n = 0;
+    if (DIR *d = opendir("/proc/self/task")) {
+        while (dirent *e = readdir(d))
+            if (e->d_name[0] != '.') ++n;
+        closedir(d);
+        return n;
+    }
+    return -1;
+#else
+    return -1;
+#endif
+}
+
+// fp_options.threads is capped at 4 x the CPUs (audit C3). Run last: it
+// grows the pool for the rest of the process.
+static void test_thread_cap() {
+    fp_op *op;
+    CHECK_OK(fp_op_soft(1.0, nullptr, &op));
+    const int64_t n = int64_t{1} << 22;  // 256 chunks
+    Arr x({n}, randn(n)), z({n});
+    fp_options o = opts(-1, 100000, 0);
+    CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, nullptr, nullptr));
+    const int t = process_threads();
+    const unsigned hw = std::thread::hardware_concurrency();
+    if (t >= 0 && hw > 0) CHECK(t <= 4 * static_cast<int>(hw) + 2);
+    fp_op_free(op);
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -3343,6 +3412,8 @@ int main() {
     test_descriptor_bounds();
     test_conj_extremes();
     test_float32();
+    test_row_scratch_bytes();
+    test_thread_cap();  // last: it grows the pool
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;
 }

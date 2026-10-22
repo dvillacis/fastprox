@@ -42,6 +42,7 @@ namespace fp {
 #ifdef FASTPROX_NO_THREADS
 
 int default_threads() noexcept { return 1; }
+int max_threads() noexcept { return 1; }
 
 void parallel_run(int, int64_t count, int64_t, ChunkFn fn, void *ctx) noexcept {
     if (count > 0) fn(ctx, 0, 0, count);
@@ -82,6 +83,16 @@ long process_id() noexcept {
 // Spin this long before sleeping, so that back-to-back calls (a solver loop)
 // find their workers awake, as OpenMP runtimes do.
 constexpr auto kSpin = std::chrono::microseconds(50);
+
+// Set while this thread runs pieces of a pool job, so that a nested
+// parallel_run runs serially instead of locking run_m_ again (audit C10:
+// try_lock on a mutex the caller holds is undefined).
+thread_local bool t_in_job = false;
+struct InJob {
+    bool prev = t_in_job;
+    InJob() noexcept { t_in_job = true; }
+    ~InJob() { t_in_job = prev; }
+};
 
 inline void cpu_relax() noexcept {
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
@@ -144,6 +155,7 @@ class Pool {
 
   private:
     void work(int tid) noexcept {
+        const InJob in_job;
         for (;;) {
             const int64_t b = next_.fetch_add(grain_, std::memory_order_relaxed);
             if (b >= count_) return;
@@ -219,19 +231,28 @@ Pool *get_pool() noexcept {
 
 }  // namespace
 
+int max_threads() noexcept {
+    static const int n = std::clamp(4 * available_cpus(), 1, 4096);
+    return n;
+}
+
 int default_threads() noexcept {
     static const int n = [] {
-        if (int t = env_threads("FASTPROX_NUM_THREADS")) return t;
-        if (int t = env_threads("OMP_NUM_THREADS")) return t;
-        return available_cpus();
+        if (int t = env_threads("FASTPROX_NUM_THREADS")) return std::min(t, max_threads());
+        if (int t = env_threads("OMP_NUM_THREADS")) return std::min(t, max_threads());
+        return std::min(available_cpus(), max_threads());
     }();
     return n;
 }
 
 void parallel_run(int nt, int64_t count, int64_t grain, ChunkFn fn, void *ctx) noexcept {
     if (count <= 0) return;
+    if (t_in_job) {  // nested inside a job: serially, on this thread (audit C10)
+        fn(ctx, 0, 0, count);
+        return;
+    }
     grain = std::max<int64_t>(grain, 1);
-    nt = static_cast<int>(std::min<int64_t>(nt, (count + grain - 1) / grain));
+    nt = static_cast<int>(std::min<int64_t>({nt, (count + grain - 1) / grain, max_threads()}));
     if (nt > 1) {
         Pool *p = get_pool();
         if (p && p->run(nt, count, grain, fn, ctx)) return;

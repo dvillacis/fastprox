@@ -165,9 +165,9 @@ its row to the decisions table when it lands.
 - [x] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
 - [x] A12: Enum arguments and fields outside their enumeration (added 2026-10-22) — [spec](docs/audit-2026-10.md#a12)
 - [x] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
-- [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
-- [ ] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)
-- [ ] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
+- [x] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
+- [x] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)
+- [x] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
 - [x] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
 - [x] K2: Squared norms overflow or underflow (L2Ball, GroupL2, TreeL2, GroupRadial, SOC) — [spec](docs/audit-2026-10.md#k2)
 - [x] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
@@ -311,3 +311,4 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 | 2026-10-22 | Weighted isotonic regression rejects weights with min/max below 1e-100 (FP_EPARAM), as the weighted ℓ1 ball does: the weights are stored scaled by their largest power of two, and such ratios would underflow | `src/ops/isotonic.cpp`, `fastprox.h` |
 | 2026-10-23 | After fp_prox_conj with σ = 0 and keep_structure, derivatives are those of the identity and the σ-derivative is NaN; kept empty batches give empty derivatives (spec: derivatives need a saved structure) | `src/api/api.cpp`, `fastprox.h`, `docs/api.md` |
 | 2026-10-23 | std::length_error is reported as FP_ENOMEM (spec: any exception other than bad_alloc is FP_EINTERNAL); integer counts of the group constructors and of tree l2 above 2^60 − 1 are FP_EPARAM | `src/api/api.cpp`, `fastprox.h`, `docs/spec.md` |
+| 2026-10-23 | fp_options.threads and the thread environment variables are capped at min(4096, 4 × the available CPUs) | `src/core/parallel.cpp`, `src/api/api.cpp`, `fastprox.h`, `docs/api.md` |

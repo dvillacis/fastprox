@@ -920,6 +920,10 @@ row for the others.
 ### Threads and determinism
 
 `opt.threads` sets the number of threads (0 = `fp_default_threads()`, 1 = serial).
+Thread counts above four times the CPUs the process may run on (and above 4096)
+are reduced to that cap, for `opt.threads` and for the environment variables
+alike (since 1.0). A row runs on one thread, so a row operator's workspace
+holds scratch for at most as many threads as it has rows.
 The default is the environment variable `FASTPROX_NUM_THREADS`, else the first
 number in `OMP_NUM_THREADS`, else the CPUs the process may run on; it is read
 once.

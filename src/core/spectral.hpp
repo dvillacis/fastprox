@@ -80,7 +80,7 @@ fp_status spectral_driver(const fp_op &op, const fp_workspace &ws, bool svd, con
     const int64_t ai = a.strides[nd - 1], aj = a.strides[nd], bi = b.strides[nd - 1], bj = b.strides[nd];
     const double eps = std::numeric_limits<T>::epsilon();
     const double qnan = std::numeric_limits<double>::quiet_NaN();
-    int nt = ws.nthreads;
+    int nt = static_cast<int>(std::min<int64_t>(ws.nthreads, rows));  // the scratch's regions (audit C2)
     if (rows == 1 || rows * k * k < kParallelMin) nt = 1;
     std::atomic<int> err{0};
 
