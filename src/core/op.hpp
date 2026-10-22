@@ -55,7 +55,50 @@ struct Piece {
 };
 
 // Status returned by row kernels.
-enum RowStatus : int { kRowOk = 0, kRowNonFinite = 1 };
+// kRowStepOverflow: in the conjugate, y_i / sigma left the range of the
+// array's dtype (FP_EPARAM).
+enum RowStatus : int { kRowOk = 0, kRowNonFinite = 1, kRowStepOverflow = 2 };
+
+// True when some finite y_i / sigma is beyond T's range (the conjugate's
+// staging; FP_EPARAM). After a false, every finite quotient converts to T
+// without the undefined conversion of an out-of-range double. NaN and +-inf
+// in y are not flagged. One branch-free pass on the bit patterns: an integer
+// OR keeps it vectorised, where a floating-point one would not.
+// |y| against sigma * lim shrunk by 2^-50: below it y / sigma is strictly
+// inside [-lim, lim], at the price of flagging the few quotients within
+// 2^-50 of lim. No division; |y| and the bound compare as integers (the
+// order of nonnegative doubles), so loops carrying the test still vectorise.
+// For sigma >= 1 no finite y exceeds it. NaN and +-inf are not flagged.
+struct StagingBound {
+    uint64_t bt;
+    StagingBound(double sigma, double lim) noexcept {
+        const double thr = sigma < 1.0 ? sigma * lim * (1.0 - 0x1p-50) : std::numeric_limits<double>::max();
+        std::memcpy(&bt, &thr, 8);
+    }
+    uint64_t exceeded(double y) const noexcept {
+        constexpr uint64_t abs = 0x7fffffffffffffffull, inf = 0x7ff0000000000000ull;
+        uint64_t by;
+        std::memcpy(&by, &y, 8);
+        by &= abs;
+        return static_cast<uint64_t>((by > bt) & (by < inf));
+    }
+};
+
+// Below this sigma the conjugate's staging checks y / sigma against T's
+// range (FP_EPARAM). Always in float32 (sigma < 1), where converting an
+// out-of-range quotient would be undefined. In float64 only below 2^-64 (a
+// decision of 2026-10-22: the check cost 15-30% on cheap conjugates): above
+// it only |y| > 2^960 can overflow, and gives +-inf or NaN in that output.
+template <class T>
+constexpr double kStagingCheck = std::is_same_v<T, double> ? 0x1p-64 : 1.0;
+
+template <class T>
+inline bool staging_overflows(const T *x, int64_t xs, int64_t len, double sigma) noexcept {
+    const StagingBound bound(sigma, std::numeric_limits<T>::max());
+    uint64_t bad = 0;
+    for (int64_t i = 0; i < len; ++i) bad |= bound.exceeded(static_cast<double>(x[i * xs]));
+    return bad != 0;
+}
 
 // One image handed to an image operator's prox (see fp_op::image_ndim). The
 // image is contiguous in C order. The kernel may spread its own work over nt
@@ -107,6 +150,15 @@ struct fp_op {
     // Validates the step the kernel will use (1/sigma after fp_prox_conj):
     // FP_EPARAM where the prox is not single-valued (SCAD, MCP).
     virtual fp_status check_step(double) const noexcept { return FP_OK; }
+    // True when g is positively homogeneous, g(t z) = t g(z) for t > 0, or the
+    // indicator of a cone: then prox_{gamma g}(t x) = t prox_{(gamma/t) g}(x),
+    // and fp_prox_conj evaluates y - sigma prox_{g/sigma}(y/sigma) as
+    // y - prox_g(y), the same for every sigma > 0 (audit A1).
+    virtual bool conj_homogeneous() const noexcept { return false; }
+    // An upper bound on the factors the kernel multiplies its step by (lambda,
+    // a weight, 1/delta, ...); 0 when it ignores the step (projections). The
+    // step range of every call is gamma step_scale() <= 2^960 (audit A1).
+    virtual double step_scale() const noexcept { return 1.0; }
     // Whether one row or image can use several threads on the CPU
     // (fp_op_device_check): elementwise maps, and image operators that say so.
     virtual bool splits_rows() const noexcept { return elementwise(); }
@@ -264,6 +316,12 @@ namespace fp {
 // Bits of fp_op::spectral(): absolutely symmetric maps act on both kinds.
 constexpr int kSpectralEig = 1, kSpectralSvd = 2, kSpectralBoth = kSpectralEig | kSpectralSvd;
 // Spectral use needs the same map for every entry: no weights, or equal ones.
+// The largest of v (0 when empty), for step_scale().
+inline double vmax(const std::vector<double> &v) noexcept {
+    double m = 0.0;
+    for (double x : v) m = std::max(m, x);
+    return m;
+}
 inline bool uniform(const std::vector<double> &w) noexcept {
     for (double v : w)
         if (v != w[0]) return false;
@@ -366,6 +424,10 @@ struct ElemOp : fp_op {
         int64_t ties = 0;
         bool tied = false;
         if (conj) {
+            // y / sigma can leave T's range only for sigma < 1 (never for the
+            // conj_homogeneous operators, at sigma = 1): see kStagingCheck.
+            if (sigma < kStagingCheck<T> && staging_overflows<T>(x, xs, len, sigma))
+                return -1;  // the driver's FP_EPARAM (ties are never negative)
             for (int64_t i = 0; i < len; ++i) {
                 const double y = static_cast<double>(x[i * xs]);
                 const T t = static_cast<T>(y / sigma);

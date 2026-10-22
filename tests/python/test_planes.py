@@ -190,11 +190,14 @@ def test_conjugates():
 
 def test_extreme_steps_and_scales():
     x = np.array([1e300, -1e300, 3.0, 2.0, 1e-300])
-    for g in (1e-310, 1e-300, 1e300):  # no x / (gamma lam) is formed
+    for g in (1e-310, 1e-300, 1e280):  # no x / (gamma lam) is formed
         for f in (lambda v: fp.prox_max(v, 1.0, g), lambda v: fp.prox_sum_largest(v, 1.0, 2, g),
                   lambda v: fp.prox_sum_largest(v, 1.0, 2, g, absolute=True)):
             z = f(x)
             assert np.all(np.isfinite(z))
+    # Beyond the step range, gamma lam > 2^960 (since 1.0): their threshold sums overflowed.
+    with pytest.raises(ValueError):
+        fp.prox_max(x, 1.0, 1e300)
     np.testing.assert_array_equal(fp.prox_max(x, 1.0, 1e-310), x)  # x_0 - 1e-310 rounds to x_0
     np.testing.assert_array_equal(fp.prox_max(np.array([1e-300, 0.0]), 1.0, 5e-301), [5e-301, 0.0])
     # The set does not change when (a, b) is scaled, nor does the projection.

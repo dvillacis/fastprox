@@ -23,6 +23,8 @@ struct Isotonic final : RowOp<Isotonic> {
     Isotonic(Vec ww, bool inc) : w(std::move(ww)), increasing(inc) {}
 
     const char *name() const noexcept override { return "isotonic"; }
+    double step_scale() const noexcept override { return 0.0; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (w.empty() || static_cast<int64_t>(w.size()) == n) ? FP_OK : FP_ESHAPE;

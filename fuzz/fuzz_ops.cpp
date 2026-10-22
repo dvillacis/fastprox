@@ -466,11 +466,13 @@ void run(const uint8_t *data, size_t size) {
     if (written && std::memcmp(z1.data(), z4.data(), static_cast<size_t>(numel) * item) != 0)
         fail("thread count changed the result");
 
-    // Finite moderate input, parameters and step: the output of a successful
-    // prox is finite. Moderate means far from overflow in the array's dtype.
+    // Finite moderate input and parameters, any finite step: the output of a
+    // successful prox has no NaN, and in float64 is finite (since 1.0, audit
+    // A1: steps beyond the operator's range and conjugates whose y / sigma
+    // overflow return FP_EPARAM instead). In float32 an exact result beyond
+    // FLT_MAX is +-inf. Moderate means far from overflow in the array's dtype.
     const double big = f32 ? 1e12 : 1e100;
-    if (written && std::isfinite(gamma) && gamma < 1e6 && b.max_param < big &&
-        !(conj && gamma < 1e-6)) {
+    if (written && std::isfinite(gamma) && b.max_param < big) {
         bool moderate = true;
         std::vector<double> xs;
         for (int64_t i = 0; i < total && moderate; ++i) {
@@ -488,7 +490,7 @@ void run(const uint8_t *data, size_t size) {
             for (int64_t i = 0; i < numel; ++i) {
                 const double v = f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[i])
                                      : reinterpret_cast<double *>(z1.data())[i];
-                if (!std::isfinite(v)) {
+                if (f32 ? std::isnan(v) : !std::isfinite(v)) {
                     std::fprintf(stderr, "x (raw buffer):");
                     for (int64_t k = 0; k < total; ++k)
                         std::fprintf(stderr, " %.9g", f32 ? static_cast<double>(reinterpret_cast<float *>(xbuf.data())[k])

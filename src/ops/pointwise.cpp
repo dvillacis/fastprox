@@ -43,6 +43,8 @@ struct Soft final : ElemOp<Soft> {
     Soft(double l, Vec ww) : lambda(l), w(std::move(ww)) {}
 
     const char *name() const noexcept override { return "soft"; }
+    double step_scale() const noexcept override { return lambda * vmax(w); }
+    bool conj_homogeneous() const noexcept override { return true; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     bool axis_params() const noexcept override { return w.size() > 1; }
@@ -97,6 +99,7 @@ struct ElasticNet final : ElemOp<ElasticNet> {
     ElasticNet(double a, double b) : l1(a), l2(b) {}
 
     const char *name() const noexcept override { return "elastic_net"; }
+    double step_scale() const noexcept override { return std::max(l1, l2); }
     int spectral() const noexcept override { return kSpectralBoth; }
     int64_t nparams() const noexcept override { return 2; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -135,6 +138,7 @@ struct Huber final : ElemOp<Huber> {
     Huber(double l, double d) : lambda(l), delta(d) {}
 
     const char *name() const noexcept override { return "huber"; }
+    double step_scale() const noexcept override { return lambda; }  // the kernel forms gamma lambda only
     int spectral() const noexcept override { return kSpectralBoth; }
     int64_t nparams() const noexcept override { return 2; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -183,6 +187,7 @@ struct Box final : ElemOp<Box> {
     Box(Vec a, Vec b) : lo(std::move(a)), hi(std::move(b)) {}
 
     const char *name() const noexcept override { return "box"; }
+    double step_scale() const noexcept override { return 0.0; }
     // Eigenvalue bounds; on singular values only the symmetric box [-c, c].
     int spectral() const noexcept override {
         if (!uniform(lo) || !uniform(hi)) return 0;
@@ -247,6 +252,8 @@ struct Box final : ElemOp<Box> {
 
 struct NonNeg final : ElemOp<NonNeg> {
     const char *name() const noexcept override { return "nonneg"; }
+    double step_scale() const noexcept override { return 0.0; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int spectral() const noexcept override { return kSpectralEig; }  // the PSD cone
     int64_t nparams() const noexcept override { return 0; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -282,6 +289,7 @@ struct LogBarrier final : ElemOp<LogBarrier> {
     explicit LogBarrier(double l) : lambda(l) {}
 
     const char *name() const noexcept override { return "log_barrier"; }
+    double step_scale() const noexcept override { return lambda; }
     int spectral() const noexcept override { return kSpectralEig; }  // -log det
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
@@ -333,6 +341,7 @@ struct L1Box final : ElemOp<L1Box> {
         : lambda(l), w(std::move(ww)), lo(std::move(a)), hi(std::move(b)) {}
 
     const char *name() const noexcept override { return "l1_box"; }
+    double step_scale() const noexcept override { return lambda * vmax(w); }
     int64_t nparams() const noexcept override {
         return static_cast<int64_t>(w.size() + lo.size() + hi.size());
     }

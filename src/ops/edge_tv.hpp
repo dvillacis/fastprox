@@ -84,6 +84,8 @@ struct Base : ImageOp<D> {
 
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     int image_ndim() const noexcept override { return 1; }
+    double step_scale() const noexcept override { return vmax(w); }
+    bool conj_homogeneous() const noexcept override { return true; }
     fp_status check_image(const int64_t *shape) const noexcept override {
         return shape[0] == n ? FP_OK : FP_ESHAPE;
     }

@@ -103,6 +103,8 @@ struct TVAniso final : ImageOp<TVAniso> {
     }
 
     const char *name() const noexcept override { return "tv_aniso"; }
+    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (beta.empty() ? 1.0 : vmax(beta)); }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(beta.size()); }
     int image_ndim() const noexcept override { return k; }
     bool splits_rows() const noexcept override { return true; }  // fibres in parallel

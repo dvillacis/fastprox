@@ -287,6 +287,16 @@ fp_status read_steps(const fp_op &op, const fp_array *sa, const Arr &x, int axis
     return FP_OK;
 }
 
+// The step range (audit A1): gamma times the operator's largest parameter at
+// most 2^960, which leaves 2^64 of headroom for the kernels' sums of scaled
+// thresholds and capacities; then the operator's own check (SCAD, MCP).
+constexpr double kMaxScaledStep = 0x1p960;
+fp_status step_ok(const fp_op &op, double g) noexcept {
+    const double s = op.step_scale();
+    if (s > 0.0 && !(g * s <= kMaxScaledStep)) return FP_EPARAM;
+    return op.check_step(g);
+}
+
 fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *oa,
                     const fp_options *opt, fp_workspace *ws, fp_info *info, bool conj,
                     const fp_array *sa = nullptr) {
@@ -366,19 +376,24 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if (fp_status s = build_workspace(*op, x, axis, nt, false, local)) return s;
         ws = local.get();
     }
-    const double gamma = conj ? 1.0 / step : step;
-    const double sigma = conj ? step : 0.0;
+    // A positively homogeneous g gives y - sigma prox_{g/sigma}(y/sigma) =
+    // y - prox_g(y): computed at gamma = sigma = 1, exact for every sigma > 0.
+    const bool homog = conj && op->conj_homogeneous();
+    const double gamma = !conj ? step : (homog ? 1.0 : 1.0 / step);
+    const double sigma = !conj ? 0.0 : (homog ? 1.0 : step);
     const Steps *sp = sa ? &steps : nullptr;
     if (sp) {
         // Every step before any work; a kept call saves them for the derivatives.
         for (int64_t r = 0; r < ws->rows; ++r) {
             const double v = steps.at(r);
             if (!finite(v) || v < 0) return FP_EPARAM;
-            if (fp_status s = op->check_step(v)) return s;
+            if (fp_status s = step_ok(*op, v)) return s;
         }
         if (keep)
             for (int64_t r = 0; r < ws->rows; ++r) ws->steps.data()[r] = steps.at(r);
-    } else if (fp_status s = op->check_step(gamma)) {
+    } else if (conj && !homog && !finite(gamma)) {
+        return FP_EPARAM;  // 1 / sigma overflows
+    } else if (fp_status s = step_ok(*op, gamma)) {
         return s;
     }
     if (k) {
@@ -390,6 +405,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if ((s == FP_OK || s == FP_ENOTCONV) && keep) {
             ws->valid = true;
             ws->conj = conj;
+            ws->conj_homog = homog;
             ws->gamma = gamma;
             ws->sigma = sigma;
             ws->steps_on = sp != nullptr;
@@ -404,6 +420,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     if (s == FP_OK && keep) {
         ws->valid = true;
         ws->conj = conj;
+        ws->conj_homog = homog;
         ws->gamma = gamma;
         ws->sigma = sigma;
         ws->tie = o.tie;
@@ -456,6 +473,7 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
     }
     if (ws->numel == 0) return FP_OK;
     const Arr *dxp = dxa ? &dx : nullptr;
+    if (ws->conj_homog) dgamma = 0.0;  // constant in sigma (y - prox_g(y))
     if (op->image_ndim())
         return ws->dtype == FP_F32 ? image_jvp_driver<float>(*op, *ws, dxp, dgamma, dp, out)
                                    : image_jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
@@ -565,7 +583,8 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
         if (s) return s;
     }
     if (ws->conj) {
-        tot[P] = tot[P + 1] + tot[P] / ws->sigma;
+        // Constant in sigma when computed as y - prox_g(y).
+        tot[P] = ws->conj_homog ? 0.0 : tot[P + 1] + tot[P] / ws->sigma;
         for (int64_t k = 0; k < P; ++k) tot[k] *= -ws->sigma;
     }
     if (ggamma) *ggamma = tot[P];

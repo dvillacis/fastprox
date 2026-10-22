@@ -127,6 +127,7 @@ struct fp_workspace {
     // State of the last prox call.
     bool valid = false;
     bool conj = false;
+    bool conj_homog = false;  // conj by y - prox_g(y): derivatives constant in sigma
     double gamma = 0.0;  // step used by the kernel (1/sigma in conjugate mode)
     double sigma = 0.0;
     int tie = 0;  // fp_tie rule of the last prox call

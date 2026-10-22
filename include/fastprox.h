@@ -449,8 +449,11 @@ FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side,
  * interleaved views of one buffer (x = a[0::2], out = a[1::2]) are rejected.
  * A dimension of extent > 1 with stride 0 in out is FP_EINVAL. The same rules
  * hold for dx and dout in fp_jvp, g and gx in fp_vjp, and x and out in
- * fp_value (since 1.0; before, such overlaps were undefined). On error the
- * contents of out are unspecified.
+ * fp_value (since 1.0; before, such overlaps were undefined). gamma must be
+ * finite, >= 0, and at most 2^960 (about 2.4e289) divided by the operator's
+ * largest parameter (lambda, a weight, ...; projections ignore gamma):
+ * FP_EPARAM otherwise (since 1.0). On error the contents of out are
+ * unspecified.
  * ---------------------------------------------------------------------- */
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
                          fp_array *out, const fp_options *opt,
@@ -469,7 +472,18 @@ FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
 FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_array *x,
                                fp_array *out, const fp_options *opt, fp_workspace *ws);
 
-/* prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y / sigma). */
+/* prox_{sigma g*}(y) = y - sigma prox_{g/sigma}(y/sigma), sigma >= 0; sigma = 0
+ * returns y. When g is positively homogeneous (soft thresholding, l2 and group
+ * l2, tree l2, l-inf, max, the sums of the largest entries, every TV operator)
+ * or the indicator of a cone (nonnegative orthant, second-order cone, monotone
+ * cone), g* is the indicator of a set C and the result, y - prox_g(y), is the
+ * projection onto C: the same for every sigma > 0, computed without scaling,
+ * and its derivative in sigma is 0 (since 1.0). For the other operators the
+ * formula is evaluated as written: 1/sigma must satisfy fp_prox's step range,
+ * and y_i / sigma must be finite in the array's dtype, else FP_EPARAM. That
+ * is checked for every sigma < 1 in float32, and in float64 for sigma < 2^-64;
+ * above that, only entries beyond about 1e289 can overflow, and their outputs
+ * are then +-inf or NaN. */
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_array *out, const fp_options *opt,
                               fp_workspace *ws, fp_info *info);

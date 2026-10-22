@@ -134,19 +134,23 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
         T *save = keep ? ws.xs<T>() : nullptr;
         if (p.numel < kParallelMin) nt = 1;
         std::atomic<int64_t> nties{0};  // integer sums: the same for any order
+        std::atomic<bool> ovf{false};
         parallel_for(nt, nch, 1, [&](int, int64_t c0, int64_t c1) {
             int64_t local = 0;
             p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
                            split_rows(rp, steps != nullptr, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
-                               local += op.prox_run(xd + off[0] + i0 * xs, xs, od + off[1] + i0 * os, os, m,
-                                                    steps ? steps->at(row) : gamma, widx + i0 * wstep, wstep,
-                                                    save ? save + pos + i0 : nullptr, conj, sigma, tie);
+                               const int64_t r = op.prox_run(xd + off[0] + i0 * xs, xs, od + off[1] + i0 * os, os, m,
+                                                             steps ? steps->at(row) : gamma, widx + i0 * wstep, wstep,
+                                                             save ? save + pos + i0 : nullptr, conj, sigma, tie);
+                               if (r < 0) ovf.store(true, std::memory_order_relaxed);  // y / sigma overflowed
+                               else local += r;
                            });
                        });
             nties.fetch_add(local, std::memory_order_relaxed);
         });
+        if (ovf.load()) return FP_EPARAM;
         if (ties) *ties = nties.load();
         return FP_OK;
     }
@@ -171,10 +175,14 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
             if (keep) staged = ws.xs<T>() + r * n;
             else if (conj || sx != 1 || (alias && distinct)) staged = buf.a;
             if (staged) {
-                if (conj)
+                if (conj) {  // checked where y / sigma can leave T's range (kStagingCheck)
+                    if (sigma < kStagingCheck<T> && staging_overflows<T>(xr, sx, n, sigma)) {
+                        err.fetch_or(kRowStepOverflow, std::memory_order_relaxed);
+                        continue;
+                    }
                     for (int64_t i = 0; i < n; ++i)
                         staged[i] = static_cast<T>(static_cast<double>(xr[i * sx]) / sigma);
-                else
+                } else
                     gather(xr, sx, staged, n);
                 in = staged;
             }
@@ -197,7 +205,8 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
             }
         }
     });
-    return err.load() ? FP_EINVAL : FP_OK;
+    const int e = err.load();
+    return (e & kRowStepOverflow) ? FP_EPARAM : (e ? FP_EINVAL : FP_OK);
 }
 
 // The kink tolerance in the units of the saved entries: the input, or y / sigma
@@ -588,9 +597,20 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         const T *in = xr;
         if (keep || conj || !p.contiguous[0] || x.data == out.data) {
             T *dst = keep ? ws.xs<T>() + r * N : sin;
-            if (conj)
+            if (conj) {
+                // No image operator gets here with sigma != 1 (conj_homogeneous);
+                // a check like the rows' guards future ones.
+                bool ovf = false;
+                if (sigma < kStagingCheck<T>) {
+                    const StagingBound bound(sigma, std::numeric_limits<T>::max());
+                    p.for_each(0, [&](int64_t, int64_t o) { ovf = ovf || bound.exceeded(static_cast<double>(xr[o])); });
+                }
+                if (ovf) {
+                    err.fetch_or(kRowStepOverflow, std::memory_order_relaxed);
+                    return;
+                }
                 p.for_each(0, [&](int64_t i, int64_t o) { dst[i] = static_cast<T>(static_cast<double>(xr[o]) / sigma); });
-            else
+            } else
                 p.for_each(0, [&](int64_t i, int64_t o) { dst[i] = xr[o]; });
             in = dst;
         }
@@ -636,7 +656,7 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
     }
 
     ws.seeded = false;
-    if (err.load()) return FP_EINVAL;
+    if (const int e = err.load()) return (e & kRowStepOverflow) ? FP_EPARAM : FP_EINVAL;
     ws.dual_valid = true;
     if (info) {
         double g = 0.0;

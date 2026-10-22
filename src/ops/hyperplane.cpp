@@ -247,6 +247,7 @@ struct HyperBox final : RowOp<HyperBox> {
         return Plane{a.data(), lo.data(), hi.data(), a.size() == 1, lo.size() == 1, hi.size() == 1, b, unbounded};
     }
     const char *name() const noexcept override { return ineq ? "halfspace" : "hyperplane"; }
+    double step_scale() const noexcept override { return 0.0; }
     int64_t nparams() const noexcept override {
         return 1 + static_cast<int64_t>(a.size() + lo.size() + hi.size());
     }
@@ -377,6 +378,8 @@ struct SumLargest final : RowOp<SumLargest> {
     SumLargest(double l, int64_t kk, bool abs) : lambda(l), k(kk), absolute(abs) {}
 
     const char *name() const noexcept override { return absolute ? "sum_largest_abs" : "sum_largest"; }
+    double step_scale() const noexcept override { return lambda; }
+    bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return 1; }
     // The sum of the k largest entries needs k <= n; for the absolute values
     // k >= n is the l1 norm.
