@@ -3,7 +3,8 @@
 //
 // On a live group (||x_g|| > tau_g = gamma lambda c_g) the prox is
 // z_g = (1 - tau_g/||x_g||) x_g and its Jacobian is (1 - c) I + c u u^T with
-// c = tau_g/||x_g||, u = x_g/||x_g||; killed groups have zero Jacobian.
+// c = tau_g/||x_g||, u = x_g/||x_g||; killed groups have zero Jacobian. A
+// group with tau_g = 0 is the identity, also at x_g = 0.
 //
 // Tree-structured group norms: g(z) = l1 ||z||_1 + sum_g eta_g ||z_g||_2 for
 // groups that are pairwise nested or disjoint. The prox is the composition of
@@ -35,6 +36,8 @@
 
 namespace fp {
 namespace {
+
+inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 
 struct GroupL2 final : RowOp<GroupL2> {
     double lambda;
@@ -83,8 +86,10 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t g = 0; g < G; ++g) {
             const double s = std::sqrt(scale[g]);
             const double tau = gamma * lambda * c[ci(g)];
-            // NaN norms give NaN scales, so the whole group becomes NaN.
-            scale[g] = s > tau ? 1.0 - tau / s : (s == s ? 0.0 : s);
+            // NaN norms give NaN scales, so the whole group becomes NaN. A
+            // zero threshold is the identity, also at x_g = 0, so its group is
+            // live there.
+            scale[g] = s != s ? s : (!(tau > 0.0) ? 1.0 : (s > tau ? 1.0 - tau / s : 0.0));
         }
         for (int64_t i = 0; i < n; ++i)
             z[i] = static_cast<T>(static_cast<double>(x[i]) * scale[group(i)]);
@@ -169,7 +174,10 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t g = 0; g < G; ++g) {
             const double s = a[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (live[g]) {
+            if (live[g] && !(s > 0.0)) {  // tau = 0 at x_g = 0: the identity
+                a[g] = 1.0;
+                b[g] = 0.0;
+            } else if (live[g]) {
                 const double cc = tau / s;
                 double coef = cc * b[g] / s - lambda * c[ci(g)] * dgamma;
                 if (dparams) coef -= gamma * lambda * dparams[ci(g)];
@@ -198,7 +206,10 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t g = 0; g < G; ++g) {
             const double s = a[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (live[g]) {
+            if (live[g] && !(s > 0.0)) {  // tau = 0 at x_g = 0: the identity
+                a[g] = 1.0;
+                b[g] = 0.0;
+            } else if (live[g]) {
                 const double cc = tau / s;
                 const double ug = b[g] / s;  // <u, g_g>
                 acc[ci(g)] += -gamma * lambda * ug;
@@ -291,8 +302,8 @@ struct TreeL2 final : RowOp<TreeL2> {
         const double tau1 = gamma * l1, dtau1 = l1 * dgamma + (dp ? gamma * dp[0] : 0.0);
         for (int64_t i = 0; i < n; ++i) {
             const double v = static_cast<double>(x[i]);
-            if (std::fabs(v) > tau1) {
-                const double sg = v > 0 ? 1.0 : -1.0;
+            if (!(tau1 > 0.0) || std::fabs(v) > tau1) {  // tau1 = 0: the identity
+                const double sg = sgn(v);
                 w[i] = v - sg * tau1;
                 t[i] = static_cast<double>(dx[i]) - sg * dtau1;
             } else {
@@ -301,7 +312,9 @@ struct TreeL2 final : RowOp<TreeL2> {
         }
         for (int64_t g : order) {
             const double s = norm(w, g), e = eta[ei(g)], tau = gamma * e;
-            if (s > tau) {
+            if (!(tau > 0.0) && !(s > 0.0)) {
+                // tau = 0 at w_g = 0: the identity, and w_g stays 0 for any tau
+            } else if (s > tau || !(tau > 0.0)) {
                 double wt = 0.0;
                 for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) wt += w[idx[k]] * t[idx[k]];
                 const double dtau = e * dgamma + (dp ? gamma * dp[1 + ei(g)] : 0.0);
@@ -343,7 +356,9 @@ struct TreeL2 final : RowOp<TreeL2> {
             double q = 0.0;
             for (int64_t k = 0; k < len; ++k) q += wb[k] * wb[k];
             const double s = std::sqrt(q), e = eta[ei(g)], tau = gamma * e;
-            if (s > tau) {
+            if (!(tau > 0.0) && !(s > 0.0)) {
+                // tau = 0 at w_g = 0: the identity, u passes unchanged
+            } else if (s > tau || !(tau > 0.0)) {
                 double wu = 0.0;
                 for (int64_t k = 0; k < len; ++k) wu += wb[k] * u[idx[ptr[g] + k]];
                 acc[1 + ei(g)] += -gamma * wu / s;
@@ -360,8 +375,8 @@ struct TreeL2 final : RowOp<TreeL2> {
         const double tau1 = gamma * l1;
         for (int64_t i = 0; i < n; ++i) {
             const double v = static_cast<double>(x[i]);
-            if (std::fabs(v) > tau1) {
-                const double sg = v > 0 ? 1.0 : -1.0;
+            if (!(tau1 > 0.0) || std::fabs(v) > tau1) {
+                const double sg = sgn(v);
                 acc[0] += -sg * gamma * u[i];
                 acc[P] += -sg * l1 * u[i];
                 gx[i] = static_cast<T>(u[i]);

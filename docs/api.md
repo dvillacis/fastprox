@@ -466,7 +466,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 
 | Operator | At the kink | Jacobian used |
 | --- | --- | --- |
-| soft thresholding, elastic net | $\lvert x_i \rvert$ equal to the threshold | thresholded: 0 |
+| soft thresholding, elastic net | $\lvert x_i \rvert$ equal to a positive threshold | thresholded: 0 |
 | Huber | $\lvert x_i \rvert = \delta + \gamma\lambda$ | inner (quadratic) branch: $\delta/(\delta + \gamma\lambda)$ |
 | box, nonnegative orthant | $x_i$ on a bound | interior: 1 |
 | group ℓ2, ℓ2 norm | $\lVert x_g \rVert$ equal to the threshold | group set to zero: 0 |
@@ -495,6 +495,11 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
 | SCAD, MCP | $\lvert x_i \rvert$ at a breakpoint | the branch below it (at $\gamma\lambda$: thresholded) |
 | isotropic TV | an entry with a vanishing gradient whose dual is on the sphere | not flat: $H_p$ from its gradient (flat only when the gradient is at the rounding level) |
+
+A zero threshold ($\lambda = 0$, $w_i = 0$, $c_g = 0$ or $\gamma = 0$) is not a
+kink: the map is the identity there and its Jacobian is 1 ($1/(1+\gamma\ell_2)$
+for the elastic net), also at $x_i = 0$, where $z$ does not move with $\gamma$
+or the parameters.
 
 The ℓ∞ rule is the reverse of the soft-thresholding rule. The ℓ∞ prox is
 $x - \gamma\lambda P(x/(\gamma\lambda))$, with $P$ the projection onto the ℓ1

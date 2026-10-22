@@ -290,6 +290,7 @@ struct OpCase {
     std::function<fp_status(fp_op **)> make;
     double gamma;
     bool smooth_away_from_kinks = true;
+    int64_t zero_entry = -1;  // set this entry of every row to exactly 0
 };
 
 static std::vector<OpCase> derivative_cases(int64_t n) {
@@ -298,6 +299,10 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
     for (auto &v : w) v = unif(0.5, 1.5);
     keep.emplace_back(std::vector<int64_t>{n}, w);
     fp_array *wn = &keep.back().a;
+    Vec w0(w);
+    w0[0] = 0.0;  // a zero weight: the identity at entry 0, which zero_entry puts at x = 0
+    keep.emplace_back(std::vector<int64_t>{n}, w0);
+    fp_array *wz = &keep.back().a;
     Vec we(static_cast<size_t>(n - 1));
     for (auto &v : we) v = unif(0.2, 1.5);
     keep.emplace_back(std::vector<int64_t>{n - 1}, we);
@@ -335,6 +340,8 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
     return {
         {"soft", [](fp_op **o) { return fp_op_soft(0.4, nullptr, o); }, 0.8},
         {"soft_w", [=](fp_op **o) { return fp_op_soft(0.4, wn, o); }, 0.8},
+        {"soft_w0_at_0", [=](fp_op **o) { return fp_op_soft(0.4, wz, o); }, 0.8, true, 0},
+        {"soft_lam0_at_0", [](fp_op **o) { return fp_op_soft(0.0, nullptr, o); }, 0.8, true, 0},
         {"elastic_net", [](fp_op **o) { return fp_op_elastic_net(0.3, 0.7, o); }, 0.9},
         {"huber", [](fp_op **o) { return fp_op_huber(0.6, 0.5, o); }, 0.7},
         {"box", [=](fp_op **o) { return fp_op_box(0, 0, la, ha, o); }, 1.0},
@@ -408,6 +415,8 @@ static void check_derivatives(const OpCase &c, bool conj) {
     CHECK_OK(c.make(&op));
     const int64_t P = fp_op_nparams(op);
     Arr x({rows, n}, randn(rows * n, 1.5)), z({rows, n});
+    if (c.zero_entry >= 0)
+        for (int64_t r = 0; r < rows; ++r) x.data[r * n + c.zero_entry] = 0.0;
     fp_options o = opts(-1, 0, 1);
     fp_workspace *ws;
     CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));

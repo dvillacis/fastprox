@@ -113,13 +113,15 @@ struct L0 final : ElemOp<L0> {
     ElemDeriv deriv1(double x, double gamma, int64_t i, int tie) const noexcept {
         ElemDeriv e;
         const double a = std::fabs(x), t = thr(gamma, i);
-        e.j = (a > t || (a == t && t > 0.0 && tie == FP_TIE_NONZERO)) ? 1.0 : 0.0;
+        e.j = (!(t > 0.0) || a > t || (a == t && tie == FP_TIE_NONZERO)) ? 1.0 : 0.0;
         return e;  // piecewise constant in gamma and w
     }
-    // Pieces: 0 zero, 1 the identity; the kink (since 0.3) is the tie |x| = t.
+    // Pieces: 0 zero, 1 the identity (everywhere when t = 0); the kink (since
+    // 0.3) is the tie |x| = t > 0.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
-        return {std::fabs(x) > thr(gamma, i) ? 1 : 0, sgn(x)};
+        const double t = thr(gamma, i);
+        return {!(t > 0.0) || std::fabs(x) > t ? 1 : 0, sgn(x)};
     }
     ElemDeriv deriv_piece(double, double, int64_t, Piece pc) const noexcept {
         ElemDeriv e;
@@ -408,7 +410,7 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
         const double ax = std::fabs(x), c = step(gamma, i), a = p;
         int id;
-        if (ax <= c * lambda && c > 0.0) id = 0;  // c = 0 is the identity
+        if (ax <= c * lambda && c * lambda > 0.0) id = 0;  // c lambda = 0 is the identity
         else if (ax <= (1.0 + c) * lambda) id = 1;
         else if (ax <= a * lambda) id = 2;
         else id = 3;
@@ -491,7 +493,10 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
         const double ax = std::fabs(x), c = step(gamma, i), b = p;
         int id;
-        if (ax <= c * lambda && c > 0.0) id = 0;  // c = 0 is the identity
+        // lambda = 0 is the identity; c = 0 (lambda > 0) is the linear piece
+        // with j = 1, which keeps its one-sided dz/dc.
+        if (!(lambda > 0.0)) id = 2;
+        else if (ax <= c * lambda && c > 0.0) id = 0;
         else if (ax <= b * lambda) id = 1;
         else id = 2;
         return {id, sgn(x)};
@@ -579,6 +584,9 @@ struct LogPen final : ElemOp<LogPen> {
         e.pi[0] = 0;
         e.pi[1] = 1;
         const double lam = gamma * lambda;
+        // lam = 0 is the identity, also at x = 0, where s = 0 zeroes the
+        // parameter terms.
+        if (lam == 0.0) return branch_deriv(std::fabs(x), sgn(x), gamma);
         bool tied, on;
         const double r = mag(std::fabs(x), lam, tie, tied, on);
         if (!on || r == 0.0) return e;
@@ -644,11 +652,7 @@ struct LogPen final : ElemOp<LogPen> {
             e.pi[1] = 1;
             return e;
         }
-        if (lam == 0.0) {
-            ElemDeriv e;
-            e.j = 1.0;
-            return e;
-        }
+        if (lam == 0.0) return branch_deriv(std::fabs(x), pc.s, gamma);  // as deriv1
         const double a = std::fmax(std::fabs(x), lam > eps * eps ? breakpoint(lam) : 0.0);
         return branch_deriv(branch(a, lam), pc.s, gamma);
     }
