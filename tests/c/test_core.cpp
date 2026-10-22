@@ -2607,6 +2607,105 @@ static void test_huge_counts() {
 }
 
 // A failed fp_workspace_set_branch leaves an earlier override (audit A9).
+// Images holding a NaN (audit A8): not solved, so a NaN gap and no
+// iterations, without making the call FP_ENOTCONV; their NaN dual can be set
+// back (stored as 0).
+static void test_nan_images() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::vector<int64_t> chain;
+    for (int64_t i = 0; i < 15; ++i) chain.insert(chain.end(), {i, i + 1});
+    struct Case {
+        const char *name;
+        std::vector<int64_t> shape;  // two images
+        int k;                       // dual blocks
+        bool iterative, warm;
+        std::function<fp_status(fp_op **)> make;
+    };
+    std::vector<Case> cases = {
+        {"tv_aniso", {2, 4, 4}, 2, true, true, [](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }},
+        {"tv_iso", {2, 4, 4}, 2, true, true, [](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }},
+        {"graph_tv", {2, 16}, 1, false, true, [&](fp_op **o) { return fp_op_graph_tv(16, 15, chain.data(), nullptr, o); }},
+        {"tree_tv", {2, 16}, 1, false, false, [&](fp_op **o) { return fp_op_tree_tv(16, 15, chain.data(), nullptr, o); }},
+    };
+    for (auto &c : cases) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        Vec x0(32);
+        for (int i = 0; i < 32; ++i) x0[static_cast<size_t>(i)] = 3.0 * std::sin(1.7 * (i % 16));
+        fp_options o = opts();
+        o.tol = 1e-10;
+        o.max_iter = 5000;
+        auto run = [&](const Vec &x, fp_info &info, fp_options &oo) {
+            Arr xa(c.shape, x), za(c.shape);
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &xa.a, &oo, &ws));
+            const fp_status st = fp_prox(op, 0.7, &xa.a, &za.a, &oo, ws, &info);
+            fp_info wi;
+            CHECK(fp_workspace_info(ws, &wi) == st);
+            CHECK((std::isnan(wi.gap) && std::isnan(info.gap)) || wi.gap == info.gap);
+            CHECK(wi.iters == info.iters);
+            fp_workspace_free(ws);
+            return st;
+        };
+        // Image 0 alone: its iterations.
+        std::vector<int64_t> one(c.shape.begin() + 1, c.shape.end());
+        Arr x1(one, Vec(x0.begin(), x0.begin() + 16)), z1(one);
+        fp_info i0;
+        CHECK_OK(fp_prox(op, 0.7, &x1.a, &z1.a, &o, nullptr, &i0));
+        Vec x = x0;
+        x[20] = nan;
+        fp_info info;
+        CHECK(run(x, info, o) == FP_OK);
+        CHECK(std::isnan(info.gap) && info.iters == i0.iters);
+        for (double &v : x) v = nan;
+        CHECK(run(x, info, o) == FP_OK);
+        CHECK(std::isnan(info.gap) && info.iters == 0);
+        if (c.iterative) {  // a real non-convergence is still reported
+            x = x0;
+            x[20] = nan;
+            fp_options o1 = o;
+            o1.max_iter = 1;
+            CHECK(run(x, info, o1) == FP_ENOTCONV);
+            fp_info clean;
+            Vec xc = x0;
+            CHECK(run(xc, clean, o1) == FP_ENOTCONV);
+            CHECK(std::isfinite(clean.gap));
+        }
+        if (c.warm) {  // the dual of a NaN image can be set back
+            x = x0;
+            x[20] = nan;
+            Arr xa(c.shape, x), za(c.shape), xc(c.shape, x0), zA(c.shape), zB(c.shape);
+            std::vector<int64_t> dshape = c.shape;
+            dshape.insert(dshape.begin(), c.k);
+            Arr dual(dshape);
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &xa.a, &o, &ws));
+            CHECK_OK(fp_workspace_set_warm(ws, 1));
+            CHECK_OK(fp_prox(op, 0.7, &xa.a, &za.a, &o, ws, nullptr));
+            CHECK_OK(fp_workspace_get_dual(ws, &dual.a));
+            const size_t N = 16;
+            bool img1_nan = true, img0_finite = true;
+            for (int b = 0; b < c.k; ++b)
+                for (size_t i = 0; i < N; ++i) {
+                    img0_finite = img0_finite && std::isfinite(dual.data[(b * 2 + 0) * N + i]);
+                    img1_nan = img1_nan && std::isnan(dual.data[(b * 2 + 1) * N + i]);
+                }
+            CHECK(img1_nan && img0_finite);
+            CHECK_OK(fp_workspace_set_dual(ws, &dual.a));
+            CHECK_OK(fp_prox(op, 0.7, &xc.a, &zA.a, &o, ws, nullptr));
+            Arr zeroed(dual);
+            for (double &v : zeroed.data) v = std::isnan(v) ? 0.0 : v;
+            CHECK_OK(fp_workspace_set_dual(ws, &zeroed.a));
+            CHECK_OK(fp_prox(op, 0.7, &xc.a, &zB.a, &o, ws, nullptr));
+            CHECK(std::memcmp(zA.data.data(), zB.data.data(), 32 * sizeof(double)) == 0);
+            zeroed.data[3] = INFINITY;
+            CHECK(fp_workspace_set_dual(ws, &zeroed.a) == FP_EINVAL);
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3239,6 +3338,7 @@ int main() {
     test_image_axis_ignored();
     test_huge_counts();
     test_failed_branch_keeps_override();
+    test_nan_images();
     test_aliasing();
     test_descriptor_bounds();
     test_conj_extremes();

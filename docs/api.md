@@ -263,8 +263,11 @@ image-by-image calls, for any thread count.
   regions (here from a gap tolerance of 1e-10, or sooner where the polish
   succeeds) the derivative is the exact one; at 1e-8 on 128² images its error
   was 2–5%, against 7–19% from a threshold on the jumps of $z$.
-- **Special values.** A NaN anywhere in an image makes that whole image NaN
-  (the rest of the batch is unaffected); ±Inf is rejected with `FP_EINVAL`.
+- **Special values.** A NaN anywhere in an image makes that whole image NaN,
+  and its dual; ±Inf is rejected with `FP_EINVAL`. Such an image is not
+  solved (*since 1.0*): it reports a NaN gap and 0 iterations and does not
+  count as unconverged. The rest of the batch is unaffected, and
+  `fp_info.gap`, a sum, is NaN.
   Images are limited to 2³¹ − 1 entries.
 - **Scale** (*since 1.0*). An image whose largest entry is outside
   $[2^{-64}, 2^{65})$ is solved rescaled by a power of two and scaled back,
@@ -420,7 +423,9 @@ batch.
   `fp_info.gap` is the duality gap of $(z, f)$, summed over the batch, and
   `fp_info.iters` the largest number of max-flow solves. The workspace dual, of
   shape `(1, *x.shape)`, is $q$, with $z = x - q$ at the solution. Warm starts
-  are accepted and have no effect.
+  are accepted and have no effect. A signal containing a NaN is NaN, with a
+  NaN dual; it reports a NaN gap and 0 iterations and does not count as
+  unconverged (*since 1.0*).
 - **Derivatives** are exact: $z$ is constant on the regions joined by edges
   with $\gamma w_e > 0$ and equal values (to rounding), and each region's
   value is its mean of $x$ minus $\gamma \sum_e w_e s_e / \lvert R \rvert$ over
@@ -770,7 +775,7 @@ fp_workspace_set_warm(ws, 1);        /* every call starts from the previous dual
 ```
 
 Only image operators have a dual; for other operators these return
-`FP_EINVAL`, as does `get` before any call. `set` rejects non-finite values.
+`FP_EINVAL`, as does `get` before any call. `set` rejects ±Inf and stores NaN entries as 0 (*since 1.0*), so a dual read by `get` can always be set back.
 
 ```c
 fp_workspace_set_deriv_tol(ws, 1e-8, 500);   /* CG of isotropic TV's fp_jvp/fp_vjp */

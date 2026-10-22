@@ -136,6 +136,9 @@ struct Base : ImageOp<D> {
                 std::fill(v.sgn, v.sgn + m, int8_t(0));
                 *v.nreg = n;
             }
+            // Not solved (audit A8): a NaN gap and no iterations, not unconverged.
+            c.gap = std::numeric_limits<double>::quiet_NaN();
+            c.iters = 0;
             done = true;
         } else if (n == 0) {
             if (c.save) *view(c.save).nreg = 0;

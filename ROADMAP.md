@@ -161,7 +161,7 @@ its row to the decisions table when it lands.
 - [x] A3: Kept calls that do no work leave derivatives unavailable — [spec](docs/audit-2026-10.md#a3)
 - [x] A5: Image operators validate and compare `fp_options.axis`, which they claim to ignore — [spec](docs/audit-2026-10.md#a5)
 - [x] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
-- [ ] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
+- [x] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
 - [x] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
 - [x] A12: Enum arguments and fields outside their enumeration (added 2026-10-22) — [spec](docs/audit-2026-10.md#a12)
 - [x] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)

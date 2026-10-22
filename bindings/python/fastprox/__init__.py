@@ -78,7 +78,9 @@ class IterInfo(NamedTuple):
     $\lVert z - z^* \rVert_2^2 \le 2\,\mathrm{gap}$ per image), the iterations
     (the maximum over the batch), whether every image reached the tolerance,
     and the dual of shape (ndim, *x.shape), which
-    ``warm_start=`` accepts back."""
+    ``warm_start=`` accepts back. ``gap`` is NaN when an image contains a NaN;
+    ``converged`` says whether no image stopped at ``max_iter`` (an image with
+    a NaN is not iterated and counts as finished)."""
 
     gap: float
     iters: int

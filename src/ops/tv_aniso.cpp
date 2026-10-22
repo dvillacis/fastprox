@@ -273,6 +273,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                 const double none[3] = {0.0, 0.0, 0.0};
                 structure(g, c, none, d, u);
             }
+            c.gap = std::numeric_limits<double>::quiet_NaN();  // not solved (audit A8)
             return kRowOk;
         }
 

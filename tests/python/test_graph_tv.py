@@ -320,3 +320,16 @@ def test_dual_at_the_step_bound():
     np.testing.assert_allclose(z, np.full(4, x.mean()), rtol=1e-15)
     _, ctx = op.prox(x, gamma, keep=True)
     np.testing.assert_allclose(op.jvp(ctx, np.ones(4)), np.ones(4), rtol=1e-15)
+
+
+def test_nan_signal_certificate():
+    """A signal holding a NaN is not solved: a NaN gap, no iterations, and
+    converged still True (audit A8)."""
+    e = np.stack([np.arange(15), np.arange(1, 16)], 1)
+    x = 3 * np.sin(1.7 * np.arange(16))
+    x[4] = np.nan
+    for Op in (fp.GraphTV, fp.TreeTV):
+        z, info = Op(16, e).solve(np.stack([x, np.nan_to_num(x)]), 0.7)
+        assert np.isnan(info.gap) and info.converged and np.isnan(z[0]).all() and np.isfinite(z[1]).all()
+        _, info = Op(16, e).solve(x, 0.7)
+        assert np.isnan(info.gap) and info.converged and info.iters == 0
