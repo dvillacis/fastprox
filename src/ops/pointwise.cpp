@@ -16,7 +16,8 @@
 // Kink convention (spec Section 7): an entry exactly at a threshold or bound
 // takes the Jacobian of the branch that contains the boundary, i.e. soft
 // thresholding treats |x| = tau as thresholded, and the box treats
-// x in [lo, hi] as interior.
+// x in [lo, hi] as interior. A zero threshold is not a kink: the map is the
+// identity there (soft) or a scaling (elastic net), also at x = 0.
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -58,10 +59,12 @@ struct Soft final : ElemOp<Soft> {
         const double tau = gamma * lambda * w[wi(i)];
         return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
     }
-    // Pieces: 0 thresholded, 1 shifted by -s tau. Kink 1 at |x| = tau.
+    // Pieces: 0 thresholded, 1 shifted by -s tau (the identity when tau = 0,
+    // where s = 0 at x = 0). Kink 1 at |x| = tau > 0.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
-        return {std::fabs(x) > gamma * lambda * w[wi(i)] ? 1 : 0, sgn(x)};
+        const double tau = gamma * lambda * w[wi(i)];
+        return {!(tau > 0.0) || std::fabs(x) > tau ? 1 : 0, sgn(x)};
     }
     ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
@@ -108,7 +111,8 @@ struct ElasticNet final : ElemOp<ElasticNet> {
     }
     ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
         ElemDeriv e;
-        if (std::fabs(x) > gamma * l1) {
+        const double tau = gamma * l1;
+        if (!(tau > 0.0) || std::fabs(x) > tau) {
             const double s = sgn(x);
             const double d = 1.0 + gamma * l2;
             const double z = (x - gamma * l1 * s) / d;
@@ -361,7 +365,7 @@ struct L1Box final : ElemOp<L1Box> {
         const double y = std::copysign(pos(std::fabs(x) - tau), x);
         if (y < lo[at(lo, i)]) return {2, sgn(x)};
         if (y > hi[at(hi, i)]) return {3, sgn(x)};
-        return {std::fabs(x) > tau ? 1 : 0, sgn(x)};
+        return {!(tau > 0.0) || std::fabs(x) > tau ? 1 : 0, sgn(x)};
     }
     ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
         ElemDeriv e;

@@ -167,7 +167,7 @@ its row to the decisions table when it lands.
 - [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
 - [ ] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)
 - [ ] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
-- [ ] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
+- [x] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
 - [ ] K2: Squared norms overflow or underflow (L2Ball, GroupL2, TreeL2, GroupRadial, SOC) — [spec](docs/audit-2026-10.md#k2)
 - [ ] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
 - [ ] K4: tv1d_l2 derivatives are not scaled, so they fail outside about 1e±103 — [spec](docs/audit-2026-10.md#k4)
