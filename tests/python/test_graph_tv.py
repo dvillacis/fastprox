@@ -251,3 +251,46 @@ def test_errors():
         op.prox(np.zeros(4), 1.0)
     with pytest.raises(ValueError):
         op.prox(np.zeros(3), 1.0, tol=-1.0)
+
+
+def test_value_range_overflow():
+    """max x - min x overflowed: tol 0 times inf made the stopping width NaN,
+    every part counted as done and GraphTV returned the mean, 0, with
+    converged set; TreeTV's gap was NaN (audit T9). Both now solve at a
+    power-of-two scale. GraphTV is accurate to 32 ulps of max |x|, so on
+    mixed magnitudes the small entries are checked at that scale."""
+    path = lambda n: np.stack([np.arange(n - 1), np.arange(1, n)], 1)
+    x = np.array([1e308, -1e308, 5e307, -5e307])
+    zg, ig = fp.GraphTV(4, path(4)).solve(x, 1e288)
+    zt, it = fp.TreeTV(4, path(4)).solve(x, 1e288)
+    np.testing.assert_allclose(zg, zt, rtol=1e-15)
+    np.testing.assert_allclose(zg, x, rtol=1e-15)
+    assert ig.converged and it.converged and not np.isnan(ig.gap) and not np.isnan(it.gap)
+    # The huge pair is fixed to rounding, so the rest is the path's prox with
+    # its first entry pulled down by gamma (the saturated edge to -1e308).
+    x = np.array([1e308, -1e308, 3.0, 1.0, 5.0, -2.0])
+    small = x[2:] - [0.7, 0, 0, 0]
+    zr, _ = fp.TreeTV(4, path(4)).solve(small, 0.7)
+    zt, it = fp.TreeTV(6, path(6)).solve(x, 0.7)
+    zg, ig = fp.GraphTV(6, path(6)).solve(x, 0.7)
+    np.testing.assert_allclose(zt[2:], zr, atol=1e-14)
+    np.testing.assert_allclose(zg, zt, rtol=0, atol=32 * np.finfo(float).eps * 1e308)
+    assert ig.converged and not np.isnan(ig.gap) and not np.isnan(it.gap)
+
+
+@pytest.mark.parametrize("k", [-1000, 900])
+def test_power_of_two_scale(k):
+    x = np.random.default_rng(5).standard_normal(256)
+    op = fp.GraphTV(256, grid_edges((16, 16)))
+    z1, _ = op.solve(x, 0.3)
+    zs, info = op.solve(x * 2.0**k, 0.3 * 2.0**k)
+    np.testing.assert_allclose(zs / 2.0**k, z1, rtol=1e-14, atol=1e-14)
+    assert info.converged
+    _, ctx1 = op.prox(x, 0.3, keep=True)
+    _, ctxs = op.prox(x * 2.0**k, 0.3 * 2.0**k, keep=True)
+    u = np.random.default_rng(6).standard_normal(256)
+    np.testing.assert_allclose(op.jvp(ctxs, u), op.jvp(ctx1, u), rtol=1e-14, atol=1e-14)
+    # The saved flow is unscaled with z, so kinks compare it with gamma w_e.
+    path = fp.GraphTV(4, np.array([[0, 1], [1, 2], [2, 3]]))
+    _, ctx = path.prox(np.array([0.0, 1, 1, 3]) * 2.0**k, 0.5 * 2.0**k, keep=True)
+    assert ctx.kinks(1e-12 * 2.0**k).tolist() == [0, 1, 0]

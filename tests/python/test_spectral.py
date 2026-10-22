@@ -254,3 +254,37 @@ def test_errors():
     with pytest.raises(ValueError, match="ctx"):
         fp.NuclearNorm().jvp(ctx, np.ones((3, 3)))
     assert repr(op).startswith("NuclearNorm(Soft(")
+
+
+def _nuclear_jvp_exact(U, s, V, lam, H):
+    """Ding, Sun, Sun and Toh's formula with quotients, for singular value
+    soft thresholding at distinct s."""
+    z = np.maximum(s - lam, 0.0)
+    A = U.T @ H @ V
+    with np.errstate(divide="ignore", invalid="ignore"):
+        Gp = (z[:, None] - z[None, :]) / (s[:, None] - s[None, :])
+    Gm = (z[:, None] + z[None, :]) / (s[:, None] + s[None, :])
+    B = Gp * (A + A.T) / 2 + Gm * (A - A.T) / 2
+    np.fill_diagonal(B, (s > lam) * np.diag(A))
+    return U @ B @ V.T
+
+
+@pytest.mark.parametrize("s, lam", [
+    (1 + 5e-6 * np.arange(200), 1 + 5.125e-4),
+    (np.concatenate([1 + 5e-6 * np.arange(100), 1.01 + 1e-3 * np.arange(100)]), 1 + 2.475e-4),
+])
+def test_chained_near_ties(s, lam):
+    """Values 5e-6 apart, under the band eps^(1/3) max|s|, chain into one
+    cluster 1e-3 wide; only pairs within the band take the averaged limit
+    (audit T7). The averaged limit gave 0.23 and 0.06 relative error. The
+    thresholds sit midway between two values: a breakpoint of the scalar
+    map within the band of a pair still takes the average there."""
+    s = np.sort(s)[::-1]
+    rng = np.random.default_rng(7)
+    U, _ = np.linalg.qr(rng.standard_normal((200, 200)))
+    V, _ = np.linalg.qr(rng.standard_normal((200, 200)))
+    H = np.random.default_rng(7).standard_normal((200, 200))
+    op = fp.NuclearNorm(lam)
+    _, ctx = op.prox_from(U, s, V.T, keep=True)
+    ref = _nuclear_jvp_exact(U, s, V, lam, H)
+    assert np.linalg.norm(op.jvp(ctx, H) - ref) <= 1e-8 * np.linalg.norm(ref)

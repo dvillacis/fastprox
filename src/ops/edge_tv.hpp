@@ -19,6 +19,7 @@
 #pragma once
 
 #include "core/op.hpp"
+#include "ops/image_util.hpp"
 #include "ops/ops.hpp"
 
 #include <algorithm>
@@ -141,6 +142,28 @@ struct Base : ImageOp<D> {
             done = true;
         }
         return kRowOk;
+    }
+
+    // Far from unit scale, solve at a power-of-two scale (image_util.hpp): d
+    // and gamma times 2^-e, unless a positive capacity would underflow there.
+    // Beyond 1e308 the value range itself overflowed (audit T9). Returns e.
+    int rescale(double *d, ImageCall &c) const noexcept {
+        int e = rescale_exponent(d, n, c.gamma);
+        const double g = std::ldexp(c.gamma, -e);
+        for (int64_t k = 0; k < m && e > 0; ++k)
+            if (c.gamma * we(k) > 0.0 && !(g * we(k) > 0.0)) e = 0;
+        if (e) {
+            scale2(d, n, -e);
+            c.gamma = std::ldexp(c.gamma, -e);
+        }
+        return e;
+    }
+    // Back to the input's scale: z, the dual, the gap and gamma.
+    void unscale(int e, double *zv, double gamma0, ImageCall &c) const noexcept {
+        scale2(zv, n, e);
+        scale2(c.dual, n, e);
+        c.gap = std::ldexp(c.gap, 2 * e);
+        c.gamma = gamma0;
     }
 
     // Gap of z with the flow f(e), and its divergence q into c.dual.
