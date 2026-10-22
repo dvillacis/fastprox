@@ -140,9 +140,84 @@ text is approved. BenchOpt moved past 1.0 on 2026-10-20 (After 1.0).
 - [~] ABI freeze; after this, only additions that keep the ABI until 2.0: an ABI check in CI (`abidiff` from libabigail against the 1.0 library), then 1.0.0rc1
   - [x] The check (2026-10-20): the `abi` CI job compares the library, built with debug information, against the last release (rc tags excluded; 0.5.0 until 1.0 is out) with `abidiff --no-added-syms`, on the types of `fastprox.h`; publishing waits for it. CMake requires `FP_ABI_VERSION` to equal the major version, which is the soname's. The policy is written in docs/api.md ("ABI stability"). Probed with a throwaway commit (#64): an added function passed, and a field added to `fp_info` failed the job (size 192 → 256 bits, through `fp_prox`)
   - [x] 1.0.0rc1: the version (`FP_VERSION_MAJOR` and `FP_ABI_VERSION` 1, soname `libfastprox.so.1`), a TestPyPI dry run, the tag and a GitHub release — Released (2026-10-20): `v1.0.0rc1` on cda044a, on PyPI as a pre-release (`pip install --pre fastprox`; plain `pip install` still gets 0.5.0) with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and ran in a clean environment. The `abi` job passed against v0.5.0
-  - [ ] 1.0.0 after some use of the rc, as for 0.3: the version without the suffix, the README's pre-release line removed, a TestPyPI dry run, the tag and a GitHub release
+  - [ ] 1.0.0 after some use of the rc and once the 1.0.0 items of the audit below have landed (through 1.0.0rc2, A11), as for 0.3: the version without the suffix, the README's pre-release line removed, a TestPyPI dry run, the tag and a GitHub release
   - [ ] At 1.0.0, in the conda-forge feedstock: `run_exports` from `x.x` to `x`, as the ABI then holds for every 1.x
 - [x] Release 0.5.1, a patch on 0.5.0 with the tv1d_l2 fix (#76), for `pip install fastprox` while 1.0 is a release candidate — Released (2026-10-21): `v0.5.1` on c636d21 of the `release/0.5.x` branch (cut from `v0.5.0`, the two fix commits cherry-picked), on PyPI with the same five wheels and the sdist, after a TestPyPI dry run whose wheel installed and passed the fuzz case in a clean environment; `pip install fastprox` gets it. The fix reaches 1.0.0 from master
+
+## 1.0 — audit of 2026-10-22
+
+An audit of master at d67de78 for robustness and speed found 56 items, each
+reproduced and specified (problem, design, constraints, tests, acceptance) in
+[docs/audit-2026-10.md](docs/audit-2026-10.md), with the decisions that span
+items and the open questions. The correctness, safety and scaling items and
+the documentation items gate 1.0.0, released through 1.0.0rc2 (A11); the
+speed items follow in 1.0.x. An item whose design departs from the spec adds
+its row to the decisions table when it lands.
+
+**Correctness, safety and scaling (gate 1.0.0)**
+
+- [ ] A1: Conjugate prox at small σ, and steps that overflow inside the kernels — [spec](docs/audit-2026-10.md#a1)
+- [ ] A2: Shape-product and offset overflow in `to_arr` / `Arr::numel` — [spec](docs/audit-2026-10.md#a2)
+- [ ] A3: Kept calls that do no work leave derivatives unavailable — [spec](docs/audit-2026-10.md#a3)
+- [ ] A5: Image operators validate and compare `fp_options.axis`, which they claim to ignore — [spec](docs/audit-2026-10.md#a5)
+- [ ] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
+- [ ] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
+- [ ] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
+- [ ] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
+- [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
+- [ ] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)
+- [ ] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
+- [ ] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
+- [ ] K2: Squared norms overflow or underflow (L2Ball, GroupL2, TreeL2, GroupRadial, SOC) — [spec](docs/audit-2026-10.md#k2)
+- [ ] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
+- [ ] K4: tv1d_l2 derivatives are not scaled, so they fail outside about 1e±103 — [spec](docs/audit-2026-10.md#k4)
+- [ ] K5: TreeL2 jvp and vjp: τ/s³ goes to inf for groups with ‖w_g‖ < 1e-103 — [spec](docs/audit-2026-10.md#k5)
+- [ ] K7: Hyperplane and half-space: Σ aᵢxᵢ overflows — [spec](docs/audit-2026-10.md#k7)
+- [ ] K8: Isotonic: block sums overflow; keep block means instead — [spec](docs/audit-2026-10.md#k8)
+- [ ] K9: TV1D `constant_mean` overflows — [spec](docs/audit-2026-10.md#k9)
+- [ ] K10: Huber derivative: c² underflows — [spec](docs/audit-2026-10.md#k10)
+- [ ] K11: A degenerate bound lo = hi is treated as free — [spec](docs/audit-2026-10.md#k11)
+- [ ] T1: Anisotropic TV: flat edges at tiny bounds λ_e — [spec](docs/audit-2026-10.md#t1)
+- [ ] T5: Image TV: overflow of ‖x‖² and of the gap (power-of-two rescaling) — [spec](docs/audit-2026-10.md#t5)
+- [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
+- [ ] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)
+- [ ] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
+- [ ] P1: Second-order reverse mode in the PyTorch wrappers (`_Prox`, `_DeviceTV`, `_SpectralProx`) — [spec](docs/audit-2026-10.md#p1)
+- [ ] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
+- [ ] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
+- [ ] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)
+- [ ] P5: Keep float32 for non-ndarray array-likes — [spec](docs/audit-2026-10.md#p5)
+- [ ] P6: Reject unknown names and wrong sizes in `dparams` — [spec](docs/audit-2026-10.md#p6)
+- [ ] P7: Clear error messages at the Python boundary (target: 1.0.0 (a), (b), (d); 1.1 (c-parity)) — [spec](docs/audit-2026-10.md#p7)
+- [ ] P8: Empty batches and NaN or Inf images: one contract across the C, PyTorch and JAX paths — [spec](docs/audit-2026-10.md#p8)
+
+**Documentation (1.0.0)**
+
+- [ ] A4: Docs: a prox call without `keep_structure` discards the kept point — [spec](docs/audit-2026-10.md#a4)
+- [ ] A6: An operator must outlive its workspaces (header text) — [spec](docs/audit-2026-10.md#a6)
+- [ ] A10: Derivative calls write the "const" workspace: one call per workspace at a time — [spec](docs/audit-2026-10.md#a10)
+- [ ] A11: Versioning: "since 1.1" notes on a tree versioned 1.0.0rc1 — [spec](docs/audit-2026-10.md#a11)
+- [ ] T10: Docs: graph TV derivatives with tol > 0 — [spec](docs/audit-2026-10.md#t10)
+- [ ] P12: Free-threaded CPython (3.13t, 3.14t) (target: 1.1 (wheels), 1.0.0 (a docs line)) — [spec](docs/audit-2026-10.md#p12)
+
+**Speed (1.0.x)**
+
+- [ ] C4: Vectorise the elementwise prox loops, contiguous and in place — [spec](docs/audit-2026-10.md#c4)
+- [ ] C5: Elementwise jvp and vjp: register accumulators, branch-free pieces, skip unrequested sums — [spec](docs/audit-2026-10.md#c5)
+- [ ] C6: Pool: close the job when its pieces are done, instead of waiting for every worker — [spec](docs/audit-2026-10.md#c6)
+- [ ] C7: Grain: pieces scaled to the thread count for prox and jvp — [spec](docs/audit-2026-10.md#c7)
+- [ ] C8: Strided operator axis: gather and scatter rows in tiles — [spec](docs/audit-2026-10.md#c8)
+- [ ] C9: Spin time as an environment knob — [spec](docs/audit-2026-10.md#c9)
+- [ ] C11: A core section in `bench/profile_kernels.cpp` — [spec](docs/audit-2026-10.md#c11)
+- [ ] K6: Lq: Newton stalls near the threshold (speed) — [spec](docs/audit-2026-10.md#k6)
+- [ ] K12: L2Ball jvp and vjp: fuse the passes and hoist the division (speed) — [spec](docs/audit-2026-10.md#k12)
+- [ ] T2: Isotropic TV: threaded derivative solves — [spec](docs/audit-2026-10.md#t2)
+- [ ] T3: Isotropic TV: integer divisions in the derivative loops — [spec](docs/audit-2026-10.md#t3)
+- [ ] T4: Graph and tree TV: small batches run serially — [spec](docs/audit-2026-10.md#t4)
+- [ ] T8: Anisotropic TV: serial `structure()` — [spec](docs/audit-2026-10.md#t8)
+- [ ] P9: JAX: compile once per operator instead of dispatching eagerly — [spec](docs/audit-2026-10.md#p9)
+- [ ] P10: Keep the derivative structure only when a derivative can follow (PyTorch and JAX forward) — [spec](docs/audit-2026-10.md#p10)
+- [ ] P11: Trim per-call Python overhead — [spec](docs/audit-2026-10.md#p11)
 
 ## 1.x — GPU backend
 
