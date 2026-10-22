@@ -9,7 +9,10 @@
  *   prox_{gamma g}(x) = argmin_z g(z) + 1/(2 gamma) ||z - x||^2,
  * applied along one axis of an n-d strided array and batched over the
  * others. Projections ignore gamma. Arrays are float32 or float64, strides
- * are counted in elements, and `out` may alias the input.
+ * are counted in elements, and `out` may be the input array itself (the same
+ * data pointer, shape and strides); an output that otherwise shares a byte
+ * with an input, or that has stride 0 on a dimension of extent > 1, is
+ * FP_EINVAL.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -49,7 +52,10 @@ typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3 } fp_dtype;
 typedef enum { FP_DEVICE_CPU = 0, FP_DEVICE_CUDA = 2 } fp_device;
 
 /* Strided n-d array descriptor. Strides are in elements, not bytes, and may
- * be negative. ndim may be 0 (a scalar). The library never frees `data`. */
+ * be negative. ndim may be 0 (a scalar). The library never frees `data`. The
+ * product of the extents (zero extents aside) and the largest element offset,
+ * sum_d (shape[d] - 1) |strides[d]|, must not exceed 2^60 - 1 (since 1.0;
+ * FP_ESHAPE otherwise). */
 typedef struct {
     void          *data;
     fp_dtype       dtype;
@@ -435,8 +441,16 @@ FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array
 FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol);
 
 /* ------------------------------------------------------------------------
- * Entry points. ws may be NULL unless opt->keep_structure is set; out may
- * alias x. On error the contents of out are unspecified.
+ * Entry points. ws may be NULL unless opt->keep_structure is set. out may be
+ * x itself (same data, shape and strides). Otherwise out must not intersect
+ * the byte range [lowest, highest byte] of x (or of the steps array, for
+ * fp_prox_steps): FP_EINVAL, checked before any work, so the workspace keeps
+ * the structure of its previous call. The test is conservative: two disjoint
+ * interleaved views of one buffer (x = a[0::2], out = a[1::2]) are rejected.
+ * A dimension of extent > 1 with stride 0 in out is FP_EINVAL. The same rules
+ * hold for dx and dout in fp_jvp, g and gx in fp_vjp, and x and out in
+ * fp_value (since 1.0; before, such overlaps were undefined). On error the
+ * contents of out are unspecified.
  * ---------------------------------------------------------------------- */
 FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
                          fp_array *out, const fp_options *opt,

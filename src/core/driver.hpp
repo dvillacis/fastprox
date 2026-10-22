@@ -20,6 +20,9 @@
 namespace fp {
 
 inline size_t round64(size_t b) noexcept { return (b + 63) / 64 * 64; }
+// a * b, or SIZE_MAX when it overflows: a buffer of that size fails to
+// allocate (FP_ENOMEM) instead of coming out short.
+inline size_t mul_size(size_t a, size_t b) noexcept { return a != 0 && b > SIZE_MAX / a ? SIZE_MAX : a * b; }
 
 // Rows handed to a thread at a time. Scheduling is dynamic so that fast and
 // slow cores (and rows of uneven cost) balance; rows are independent, so the
@@ -27,7 +30,10 @@ inline size_t round64(size_t b) noexcept { return (b + 63) / 64 * 64; }
 inline int64_t row_chunk(int64_t n) noexcept { return std::max<int64_t>(1, kChunk / std::max<int64_t>(n, 1)); }
 
 // Per-thread scratch for row operators: four rows of T, then kernel scratch.
+// SIZE_MAX for rows beyond 2^48 entries, whose byte counts (a few hundred
+// bytes per entry at most) could wrap; only stride-0 views reach them.
 inline size_t row_thread_bytes(const fp_op &op, int64_t n, size_t itemsize) noexcept {
+    if (n > (int64_t{1} << 48)) return SIZE_MAX;
     return round64(4 * static_cast<size_t>(n) * itemsize) + round64(op.scratch_bytes(n));
 }
 

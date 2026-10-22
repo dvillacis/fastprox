@@ -157,14 +157,14 @@ its row to the decisions table when it lands.
 **Correctness, safety and scaling (gate 1.0.0)**
 
 - [ ] A1: Conjugate prox at small σ, and steps that overflow inside the kernels — [spec](docs/audit-2026-10.md#a1)
-- [ ] A2: Shape-product and offset overflow in `to_arr` / `Arr::numel` — [spec](docs/audit-2026-10.md#a2)
+- [x] A2: Shape-product and offset overflow in `to_arr` / `Arr::numel` — [spec](docs/audit-2026-10.md#a2)
 - [ ] A3: Kept calls that do no work leave derivatives unavailable — [spec](docs/audit-2026-10.md#a3)
 - [ ] A5: Image operators validate and compare `fp_options.axis`, which they claim to ignore — [spec](docs/audit-2026-10.md#a5)
 - [ ] A7: Size errors reported as `FP_EINTERNAL` (`std::length_error`) — [spec](docs/audit-2026-10.md#a7)
 - [ ] A8: NaN images: the certificate they report, and a dual that cannot be set back — [spec](docs/audit-2026-10.md#a8)
 - [ ] A9: A failed `fp_workspace_set_branch` treats the earlier override differently by operator kind — [spec](docs/audit-2026-10.md#a9)
 - [x] A12: Enum arguments and fields outside their enumeration (added 2026-10-22) — [spec](docs/audit-2026-10.md#a12)
-- [ ] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
+- [x] C1: Reject overlapping outputs other than exact aliasing; reject stride-0 outputs — [spec](docs/audit-2026-10.md#c1)
 - [ ] C2: Size per-thread scratch for the threads a row operator can use — [spec](docs/audit-2026-10.md#c2)
 - [ ] C3: Cap `fp_options.threads` — [spec](docs/audit-2026-10.md#c3)
 - [ ] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
@@ -184,7 +184,7 @@ its row to the decisions table when it lands.
 - [ ] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)
 - [ ] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
 - [x] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)
-- [ ] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
+- [x] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
 - [ ] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
 - [ ] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)
 - [ ] P5: Keep float32 for non-ndarray array-likes — [spec](docs/audit-2026-10.md#p5)
@@ -306,3 +306,4 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 | 2026-10-20 | `fp_spectral_jvp` sizes its scratch (about 8k doubles per thread) on its first call and keeps it in the workspace, instead of in `fp_workspace_create` as the first design said. Sizing it at creation would add 16 bytes per entry to the workspace of every qualifying operator, soft thresholding on a long vector included; later calls still allocate nothing. The call also takes `dparams`, as `fp_jvp` does. |
 | 2026-10-20 | The device API's details, which the spec's sketch left open. The plugin is found through `FASTPROX_CUDA_PLUGIN` (a path; empty turns it off), then next to the library, then on the system's search path, and is accepted only when its table's version and build string match the library's. `fp_op_device_check` also takes `FP_DEVICE_CPU`, where `row_parallel_only` is 1 for every operator with rows except the elementwise maps and anisotropic TV. `fp_workspace_info` returns the call's status as well as its `fp_info`, so a device call can report `FP_ENOTCONV` without waiting. `fp_vjp_device` takes a float32 or float64 scalar. The stream functions return `FP_EINVAL` on CPU workspaces. |
 | 2026-10-21 | `fp_prox_steps` defines the derivatives that the spec left open. After it, `fp_jvp`'s scalar `dgamma` moves every step and `fp_vjp`'s `ggamma` is the sum over rows, so neither signature changes. A row's own step gradient comes from `fp_jvp` with `dgamma = 1`, summed against $g$ over the row. The steps are saved in a buffer of one double per row, sized with the saved structure when a workspace keeps it, so prox calls still never allocate. There is no conjugate form. Elementwise maps along an axis that is not the last run one entry at a time under per-row steps, since consecutive entries belong to different rows. |
+| 2026-10-22 | `out` may alias the input only exactly (the same data, shape and strides): any other overlap of an output's byte range with an input's, or a stride-0 output dimension of extent > 1, returns FP_EINVAL before any work (spec Section 4: "out may alias x"). The test is conservative, so disjoint interleaved views are rejected too. The same rule holds for dx/dout, g/gx, the steps of fp_prox_steps and fp_value's out. The Python package retries with a copy of the input instead, so Python callers see no change | `fastprox.h`, `src/core/layout.hpp`, `src/api/api.cpp`, `docs/api.md` |

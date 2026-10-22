@@ -662,8 +662,21 @@ typedef struct {
 } fp_array;
 ```
 
-The library never frees `data`. `out` may be the input array itself; other
-overlaps between input and output are undefined.
+The library never frees `data`. The product of the extents (zero extents
+aside) and the largest element offset, $\sum_d (\text{shape}_d - 1)
+\lvert\text{strides}_d\rvert$, must not exceed $2^{60} - 1$; larger
+descriptors return `FP_ESHAPE` (*since 1.0*).
+
+`out` may be the input array itself: the same data pointer, shape and
+strides, as in `fp_prox(op, g, &x, &x, ...)`. Any other overlap between the
+byte ranges of an input and an output returns `FP_EINVAL` before any work
+(*since 1.0*; before, it was undefined). That includes views that interleave
+without sharing an element, such as `a[0::2]` and `a[1::2]`. An output
+dimension of extent > 1 with stride 0 also returns `FP_EINVAL`. The same
+rules apply to `dx` and `dout` in `fp_jvp`, to `g` and `gx` in `fp_vjp` and to
+`x` and `out` in `fp_value`. The Python package copies its input when it may
+share memory with `out` in another layout, so Python callers never see this
+error.
 
 ### Lifecycle
 
