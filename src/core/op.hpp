@@ -680,4 +680,131 @@ inline void fill_nan(T *z, int64_t n) noexcept {
     for (int64_t i = 0; i < n; ++i) z[i] = q;
 }
 
+// True when S, a sum of squares (>= 0 or NaN), lies in [2^-968, DBL_MAX],
+// where its square root is the norm to rounding: one unsigned compare of the
+// bit patterns (NaN, +inf and anything below 2^-968 fall outside).
+inline bool sumsq_in_range(double S) noexcept {
+    constexpr uint64_t lo = 0x0370000000000000ull;  // 2^-968
+    constexpr uint64_t hi = 0x7fefffffffffffffull;  // DBL_MAX
+    uint64_t b;
+    std::memcpy(&b, &S, sizeof b);
+    return b - lo <= hi - lo;
+}
+
+// Out of line and cold: a rare path kept out of the hot code that calls it.
+#if defined(_MSC_VER)
+#define FP_COLD __declspec(noinline)
+#else
+#define FP_COLD __attribute__((noinline, cold))
+#endif
+
+// Group norms sqrt(sum_{i in g} x_i^2) from the plain sums of squares S_g,
+// which nrm holds on entry; x(i), i < n, the entries and group(i) < G their
+// groups. A sum safely in range, [2^-968, DBL_MAX], is used as it is, so
+// those norms are those of the plain formula, bit for bit (below 2^-968 the
+// squares lost to underflow are no longer below rounding). The other groups
+// are summed again on entries scaled by a power of two that brings their
+// largest to [1/2, 1), so that no square overflows or underflows: the idea
+// of the reference BLAS dnrm2 (J. L. Blue, "A portable Fortran program to
+// find the Euclidean norm of a vector", ACM TOMS 4(1), 1978, 15-23; E.
+// Anderson, "Algorithm 978: Safe scaling in the Level 1 BLAS", ACM TOMS
+// 44(1), 2017), with the scale chosen after the fact. On return the norm of
+// group g is nrm[g] / M[g], with M[g] = 1 unless the norm exceeds the
+// largest double or is below the smallest normal one (where 1 / norm
+// overflows); then M[g] = t is the power of two of the rescaling and
+// nrm[g] = ||t x_g||, in [2^-53, sqrt(len)]. A NaN entry gives a NaN norm.
+// Every pass runs in index order.
+template <class X, class Grp>
+inline void safe_group_norms(int64_t n, int64_t G, X x, Grp group, double *nrm, double *M) noexcept {
+    bool slow = false;
+    for (int64_t g = 0; g < G; ++g) {
+        const bool ok = sumsq_in_range(nrm[g]);
+        M[g] = ok ? -1.0 : 0.0;  // -1: done; else the running max of |x| (NaN sticks)
+        slow = slow || !ok;
+    }
+    if (!slow) {
+        for (int64_t g = 0; g < G; ++g) {
+            nrm[g] = std::sqrt(nrm[g]);
+            M[g] = 1.0;
+        }
+        return;
+    }
+    for (int64_t i = 0; i < n; ++i) {
+        double &m = M[group(i)];
+        const double v = std::fabs(static_cast<double>(x(i)));
+        if (!(m < 0.0) && m == m && !(v <= m)) m = v;
+    }
+    for (int64_t g = 0; g < G; ++g) {
+        if (M[g] < 0.0) {
+            nrm[g] = std::sqrt(nrm[g]);
+            M[g] = 0.0;  // done
+        } else if (!(M[g] > 0.0)) {
+            nrm[g] = M[g];  // an all-zero group, or NaN
+            M[g] = 0.0;
+        } else {
+            // The scale t = 2^-e brings the largest to [1/2, 1). For a subnormal
+            // largest 2^-e would overflow; 2^1022 brings it to [2^-53, 1), whose
+            // squares are still far from underflow.
+            int e;
+            std::frexp(M[g], &e);
+            M[g] = std::ldexp(1.0, std::min(-e, 1022));
+            nrm[g] = 0.0;
+        }
+    }
+    for (int64_t i = 0; i < n; ++i) {
+        const int64_t g = group(i);
+        if (M[g] > 0.0) {
+            const double v = static_cast<double>(x(i)) * M[g];
+            nrm[g] += v * v;
+        }
+    }
+    for (int64_t g = 0; g < G; ++g) {
+        if (!(M[g] > 0.0)) {
+            M[g] = 1.0;
+            continue;
+        }
+        const double m = std::sqrt(nrm[g]), s = m / M[g];
+        if (std::numeric_limits<double>::min() <= s && s <= std::numeric_limits<double>::max()) {
+            nrm[g] = s;
+            M[g] = 1.0;
+        } else {
+            nrm[g] = m;  // keep the scale
+        }
+    }
+}
+
+template <class X>
+FP_COLD double safe_norm_slow(double S, int64_t n, X x, double &t) noexcept {
+    safe_group_norms(n, 1, x, [](int64_t) { return int64_t{0}; }, &S, &t);
+    return S;
+}
+
+// The norm of x(k), k < n, as m / t from the plain sum of squares S, as
+// safe_group_norms for one group: returns m and sets t.
+template <class X>
+inline double safe_norm(double S, int64_t n, X x, double &t) noexcept {
+    if (sumsq_in_range(S)) {
+        t = 1.0;
+        return std::sqrt(S);
+    }
+    return safe_norm_slow(S, n, x, t);
+}
+
+// f(m, t) with the norm of x(k), k < n, equal to m / t (safe_norm). f is
+// called with the constant t = 1 when S is in range, so that once inlined
+// every product by t folds away and that path is the code of the plain norm;
+// with a runtime t the short rows of the l2 ball and the cone took 5-10%
+// longer. The other call is out of line.
+template <class X, class F>
+FP_COLD auto with_norm_slow(double S, int64_t n, X x, F f) noexcept {
+    double t;
+    const double m = safe_norm_slow(S, n, x, t);
+    return f(m, t);
+}
+template <class X, class F>
+inline auto with_norm(double S, int64_t n, X x, F f) noexcept {
+    if (sumsq_in_range(S)) return f(std::sqrt(S), 1.0);
+    return with_norm_slow(S, n, x, f);  // out of line, so the hot path needs no frame
+}
+
 }  // namespace fp

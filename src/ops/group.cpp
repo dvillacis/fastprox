@@ -19,8 +19,11 @@
 //
 // Derivatives follow the chain. A live shrink w_g <- a w_g, a = 1 - tau/s,
 // s = ||w_g||, tau = gamma eta_g, maps a tangent t_g to
-//   a t_g + ((tau / s^3) <w_g, t_g> - dtau / s) w_g,
-// a symmetric map of t_g; a killed group (s <= tau) maps it to 0. The JVP runs
+//   a t_g + ((tau / s) <u, t_g> - dtau) u,   u = w_g / s,
+// a symmetric map of t_g; a killed group (s <= tau) maps it to 0. Written
+// with u, no power of s above the first appears (s^3 over- or underflows
+// where s does not). Every norm is rescaled where its plain sum of squares
+// leaves the safe range (safe_norm in core/op.hpp). The JVP runs
 // it forward alongside the prox; the VJP keeps each group's input w_g and runs
 // it backwards.
 //
@@ -53,8 +56,10 @@ struct GroupL2 final : RowOp<GroupL2> {
     fp_status check_n(int64_t n) const noexcept override {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;
     }
+    // Three arrays of G doubles (norms, dots or scales, and the scales of
+    // safe_group_norms) and G bytes.
     size_t scratch_bytes(int64_t) const noexcept override {
-        return 2 * static_cast<size_t>(G) * sizeof(double) + static_cast<size_t>(G);
+        return 3 * static_cast<size_t>(G) * sizeof(double) + static_cast<size_t>(G);
     }
 
     int64_t group(int64_t i) const noexcept { return gid.empty() ? 0 : gid[i]; }
@@ -64,13 +69,14 @@ struct GroupL2 final : RowOp<GroupL2> {
     // ||x_g|| > tau_g, read by the derivatives so that a branch override can
     // set it (fp_workspace_set_branch).
     bool has_value() const noexcept override { return true; }
-    int64_t value_doubles(int64_t n) const noexcept override { return n > G ? n : G; }
-    // lambda sum_g c_g ||x_g||; scr holds the G squared norms (G <= n).
+    int64_t value_doubles(int64_t n) const noexcept override { return n > 2 * G ? n : 2 * G; }
+    // lambda sum_g c_g ||x_g||; scr holds the G norms and their scales.
     double value_row(const double *x, int64_t n, double, double *scr) const noexcept override {
         for (int64_t g = 0; g < G; ++g) scr[g] = 0.0;
         for (int64_t i = 0; i < n; ++i) scr[group(i)] += x[i] * x[i];
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, scr, scr + G);
         double s = 0.0;
-        for (int64_t g = 0; g < G; ++g) s += c[ci(g)] * std::sqrt(scr[g]);
+        for (int64_t g = 0; g < G; ++g) s += c[ci(g)] * (scr[g] / scr[G + g]);
         return lambda * s;
     }
 
@@ -83,13 +89,18 @@ struct GroupL2 final : RowOp<GroupL2> {
             if (std::isinf(v)) return kRowNonFinite;
             scale[group(i)] += v * v;
         }
+        // ||x_g|| = m / t (safe_group_norms; t = 1 unless the norm exceeds the
+        // largest double or is subnormal), read through tau t / m, (t x_i) / m
+        // and <t x, v> / m.
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, scale,
+                         scale + G);
         for (int64_t g = 0; g < G; ++g) {
-            const double s = std::sqrt(scale[g]);
+            const double m = scale[g], t = scale[G + g];
             const double tau = gamma * lambda * c[ci(g)];
             // NaN norms give NaN scales, so the whole group becomes NaN. A
             // zero threshold is the identity, also at x_g = 0, so its group is
             // live there.
-            scale[g] = s != s ? s : (!(tau > 0.0) ? 1.0 : (s > tau ? 1.0 - tau / s : 0.0));
+            scale[g] = m != m ? m : (!(tau > 0.0) ? 1.0 : (m > tau * t ? 1.0 - tau * t / m : 0.0));
         }
         for (int64_t i = 0; i < n; ++i)
             z[i] = static_cast<T>(static_cast<double>(x[i]) * scale[group(i)]);
@@ -110,13 +121,14 @@ struct GroupL2 final : RowOp<GroupL2> {
     // formula taken at x) or kills it (-1).
     bool has_kinks() const noexcept override { return true; }
     bool has_branches() const noexcept override { return true; }
-    // Per group at a kink: in the row scratch, the norm then the first entry
-    // (as a double) in the two arrays of G, and in the G bytes after them the
-    // side (branch_row) or 1 (kink_row); 0 for the other groups.
+    // Per group at a kink: in the row scratch, the norm, the first entry (as
+    // a double) and the norm's scale in the three arrays of G, and in the G
+    // bytes after them the side (branch_row) or 1 (kink_row); 0 for the other
+    // groups.
     int8_t *group_kinks(const double *x, int64_t n, double gamma, double tol, const int8_t *side,
                         void *scr) const noexcept {
-        double *s = static_cast<double *>(scr), *first = s + G;
-        int8_t *at = reinterpret_cast<int8_t *>(first + G);
+        double *s = static_cast<double *>(scr), *first = s + G, *M = first + G;
+        int8_t *at = reinterpret_cast<int8_t *>(M + G);
         for (int64_t g = 0; g < G; ++g) {
             s[g] = 0.0;
             first[g] = -1.0;
@@ -126,9 +138,10 @@ struct GroupL2 final : RowOp<GroupL2> {
             s[g] += x[i] * x[i];
             if (first[g] < 0.0) first[g] = static_cast<double>(i);
         }
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, s, M);
         for (int64_t g = 0; g < G; ++g) {
             const double tau = gamma * lambda * c[ci(g)];
-            const bool kink = first[g] >= 0.0 && tau > 0.0 && std::fabs(std::sqrt(s[g]) - tau) <= tol;
+            const bool kink = first[g] >= 0.0 && tau > 0.0 && std::fabs(s[g] / M[g] - tau) <= tol;
             at[g] = !kink ? 0 : (side ? side[static_cast<int64_t>(first[g])] : 1);
         }
         return at;
@@ -151,16 +164,30 @@ struct GroupL2 final : RowOp<GroupL2> {
             if (set[group(i)] != 0) code[i] = set[group(i)] > 0;
     }
 
-    // Fills nrm[g] = ||x_g|| and dot[g] = <x_g, v_g>.
+    // Fills nrm[g] = m_g and M[g] = t_g with ||x_g|| = m_g / t_g
+    // (safe_group_norms), and dot[g] = <t_g x_g, v_g>.
     template <class T>
-    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *dot) const noexcept {
+    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *dot, double *M) const noexcept {
         for (int64_t g = 0; g < G; ++g) nrm[g] = dot[g] = 0.0;
         for (int64_t i = 0; i < n; ++i) {
             const double xi = static_cast<double>(x[i]);
             nrm[group(i)] += xi * xi;
             dot[group(i)] += xi * static_cast<double>(v[i]);
         }
-        for (int64_t g = 0; g < G; ++g) nrm[g] = std::sqrt(nrm[g]);
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, nrm, M);
+        // Where the norm keeps a scale t (it overflows, or 1 / norm does), the
+        // dot is taken on t x, which cannot overflow through x: <u_g, v_g> =
+        // dot[g] / nrm[g] either way.
+        bool scaled = false;
+        for (int64_t g = 0; g < G; ++g) scaled = scaled || M[g] != 1.0;
+        if (scaled) {
+            for (int64_t g = 0; g < G; ++g)
+                if (M[g] != 1.0) dot[g] = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                const int64_t g = group(i);
+                if (M[g] != 1.0) dot[g] += static_cast<double>(x[i]) * M[g] * static_cast<double>(v[i]);
+            }
+        }
     }
 
     template <class T>
@@ -168,21 +195,22 @@ struct GroupL2 final : RowOp<GroupL2> {
              double dgamma, const double *dparams, void *scr) const noexcept {
         double *a = static_cast<double *>(scr);  // coefficient of dx
         double *b = a + G;                       // coefficient of x
-        uint8_t *live = reinterpret_cast<uint8_t *>(b + G);
-        norms_dots(x, dx, n, a, b);
+        double *M = b + G;
+        uint8_t *live = reinterpret_cast<uint8_t *>(M + G);
+        norms_dots(x, dx, n, a, b, M);
         live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
-            const double s = a[g];
+            const double m = a[g], t = M[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (live[g] && !(s > 0.0)) {  // tau = 0 at x_g = 0: the identity
+            if (live[g] && !(m > 0.0)) {  // tau = 0 at x_g = 0: the identity
                 a[g] = 1.0;
                 b[g] = 0.0;
             } else if (live[g]) {
-                const double cc = tau / s;
-                double coef = cc * b[g] / s - lambda * c[ci(g)] * dgamma;
+                const double cc = tau * t / m;
+                double coef = cc * b[g] / m - lambda * c[ci(g)] * dgamma;
                 if (dparams) coef -= gamma * lambda * dparams[ci(g)];
                 a[g] = 1.0 - cc;
-                b[g] = coef / s;
+                b[g] = coef / m;  // times t x_i below: u_i = (t x_i) / m, as 1 / ||x_g|| may overflow
             } else {
                 a[g] = b[g] = 0.0;
             }
@@ -190,7 +218,7 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t i = 0; i < n; ++i) {
             const int64_t g = group(i);
             dz[i] = static_cast<T>(a[g] * static_cast<double>(dx[i]) +
-                                   b[g] * static_cast<double>(x[i]));
+                                   b[g] * (static_cast<double>(x[i]) * M[g]));
         }
     }
 
@@ -200,22 +228,23 @@ struct GroupL2 final : RowOp<GroupL2> {
         const int64_t P = nparams();
         double *a = static_cast<double *>(scr);
         double *b = a + G;
-        uint8_t *live = reinterpret_cast<uint8_t *>(b + G);
-        norms_dots(x, gv, n, a, b);
+        double *M = b + G;
+        uint8_t *live = reinterpret_cast<uint8_t *>(M + G);
+        norms_dots(x, gv, n, a, b, M);
         live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
-            const double s = a[g];
+            const double m = a[g], t = M[g];
             const double tau = gamma * lambda * c[ci(g)];
-            if (live[g] && !(s > 0.0)) {  // tau = 0 at x_g = 0: the identity
+            if (live[g] && !(m > 0.0)) {  // tau = 0 at x_g = 0: the identity
                 a[g] = 1.0;
                 b[g] = 0.0;
             } else if (live[g]) {
-                const double cc = tau / s;
-                const double ug = b[g] / s;  // <u, g_g>
+                const double cc = tau * t / m;
+                const double ug = b[g] / m;  // <u, g_g>
                 acc[ci(g)] += -gamma * lambda * ug;
                 acc[P] += -lambda * c[ci(g)] * ug;
                 a[g] = 1.0 - cc;
-                b[g] = cc * ug / s;
+                b[g] = cc * ug / m;  // times t x_i below, as in jvp
             } else {
                 a[g] = b[g] = 0.0;
             }
@@ -223,7 +252,7 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t i = 0; i < n; ++i) {
             const int64_t g = group(i);
             gx[i] = static_cast<T>(a[g] * static_cast<double>(gv[i]) +
-                                   b[g] * static_cast<double>(x[i]));
+                                   b[g] * (static_cast<double>(x[i]) * M[g]));
         }
     }
 };
@@ -260,10 +289,13 @@ struct TreeL2 final : RowOp<TreeL2> {
         }
         return true;
     }
-    double norm(const double *w, int64_t g) const noexcept {
+    // ||w_g|| = m / t (safe_norm; t = 1 unless the norm exceeds the largest
+    // double or is subnormal), read through tau t / m and (t w_i) / m.
+    double norm(const double *w, int64_t g, double &t) const noexcept {
         double q = 0.0;
         for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) q += w[idx[k]] * w[idx[k]];
-        return std::sqrt(q);
+        const int64_t *ix = idx.data() + ptr[g];
+        return safe_norm(q, ptr[g + 1] - ptr[g], [w, ix](int64_t k) { return w[ix[k]]; }, t);
     }
 
     bool has_value() const noexcept override { return true; }
@@ -273,9 +305,9 @@ struct TreeL2 final : RowOp<TreeL2> {
         for (int64_t i = 0; i < n; ++i) s += std::fabs(x[i]);
         s *= l1;
         for (int64_t g = 0; g < G; ++g) {
-            double q = 0.0;
-            for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) q += x[idx[k]] * x[idx[k]];
-            s += eta[ei(g)] * std::sqrt(q);
+            double t;
+            const double m = norm(x, g, t);
+            s += eta[ei(g)] * (m / t);
         }
         return s;
     }
@@ -285,9 +317,10 @@ struct TreeL2 final : RowOp<TreeL2> {
         double *w = static_cast<double *>(scr);
         if (!start(x, n, gamma, w)) return kRowNonFinite;
         for (int64_t g : order) {
-            const double s = norm(w, g), tau = gamma * eta[ei(g)];
+            double t;
+            const double m = norm(w, g, t), tau = gamma * eta[ei(g)];
             // A NaN norm gives a NaN scale, so the group becomes NaN.
-            const double a = s > tau ? 1.0 - tau / s : (s == s ? 0.0 : s);
+            const double a = m > tau * t ? 1.0 - tau * t / m : (m == m ? 0.0 : m);
             for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) w[idx[k]] *= a;
         }
         for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(w[i]);
@@ -311,17 +344,21 @@ struct TreeL2 final : RowOp<TreeL2> {
             }
         }
         for (int64_t g : order) {
-            const double s = norm(w, g), e = eta[ei(g)], tau = gamma * e;
-            if (!(tau > 0.0) && !(s > 0.0)) {
+            double sc;
+            const double m = norm(w, g, sc), e = eta[ei(g)], tau = gamma * e;
+            if (!(tau > 0.0) && !(m > 0.0)) {
                 // tau = 0 at w_g = 0: the identity, and w_g stays 0 for any tau
-            } else if (s > tau || !(tau > 0.0)) {
+            } else if (m > tau * sc || !(tau > 0.0)) {
+                // With u = w_g / ||w_g||: t <- a t + (cc <u, t> - dtau) u,
+                // cc = tau / ||w_g||, a = 1 - cc; no higher power of the norm,
+                // which would over- or underflow (audit K5).
                 double wt = 0.0;
-                for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) wt += w[idx[k]] * t[idx[k]];
+                for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) wt += w[idx[k]] * sc * t[idx[k]];
                 const double dtau = e * dgamma + (dp ? gamma * dp[1 + ei(g)] : 0.0);
-                const double a = 1.0 - tau / s, c = tau / (s * s * s) * wt - dtau / s;
+                const double cc = tau * sc / m, a = 1.0 - cc, c = cc * (wt / m) - dtau;
                 for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) {
                     const int64_t i = idx[k];
-                    t[i] = a * t[i] + c * w[i];
+                    t[i] = a * t[i] + c * (w[i] * sc / m);
                     w[i] *= a;
                 }
             } else {
@@ -341,8 +378,9 @@ struct TreeL2 final : RowOp<TreeL2> {
         start(x, n, gamma, w);
         int64_t off = 0;
         for (int64_t g : order) {
-            const double s = norm(w, g), tau = gamma * eta[ei(g)];
-            const double a = s > tau ? 1.0 - tau / s : 0.0;
+            double sc;
+            const double m = norm(w, g, sc), tau = gamma * eta[ei(g)];
+            const double a = m > tau * sc ? 1.0 - tau * sc / m : 0.0;
             for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) {
                 before[off++] = w[idx[k]];
                 w[idx[k]] *= a;
@@ -353,20 +391,24 @@ struct TreeL2 final : RowOp<TreeL2> {
             const int64_t g = order[r], len = ptr[g + 1] - ptr[g];
             off -= len;
             const double *wb = before + off;
-            double q = 0.0;
+            double q = 0.0, sc;
             for (int64_t k = 0; k < len; ++k) q += wb[k] * wb[k];
-            const double s = std::sqrt(q), e = eta[ei(g)], tau = gamma * e;
-            if (!(tau > 0.0) && !(s > 0.0)) {
+            const double m = safe_norm(q, len, [wb](int64_t k) { return wb[k]; }, sc);
+            const double e = eta[ei(g)], tau = gamma * e;
+            if (!(tau > 0.0) && !(m > 0.0)) {
                 // tau = 0 at w_g = 0: the identity, u passes unchanged
-            } else if (s > tau || !(tau > 0.0)) {
+            } else if (m > tau * sc || !(tau > 0.0)) {
+                // The adjoint of the jvp's step: u <- a u + cc <ub, u> ub, with ub
+                // the group's input over its norm.
                 double wu = 0.0;
-                for (int64_t k = 0; k < len; ++k) wu += wb[k] * u[idx[ptr[g] + k]];
-                acc[1 + ei(g)] += -gamma * wu / s;
-                acc[P] += -e * wu / s;
-                const double a = 1.0 - tau / s, c = tau / (s * s * s) * wu;
+                for (int64_t k = 0; k < len; ++k) wu += wb[k] * sc * u[idx[ptr[g] + k]];
+                wu = wu / m;  // <ub, u>
+                acc[1 + ei(g)] += -gamma * wu;
+                acc[P] += -e * wu;
+                const double cc = tau * sc / m, a = 1.0 - cc, c = cc * wu;
                 for (int64_t k = 0; k < len; ++k) {
                     double &ui = u[idx[ptr[g] + k]];
-                    ui = a * ui + c * wb[k];
+                    ui = a * ui + c * (wb[k] * sc / m);
                 }
             } else {
                 for (int64_t k = 0; k < len; ++k) u[idx[ptr[g] + k]] = 0.0;
