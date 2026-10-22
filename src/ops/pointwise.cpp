@@ -158,11 +158,14 @@ struct Huber final : ElemOp<Huber> {
         e.pi[0] = 0;
         e.pi[1] = 1;
         if (std::fabs(x) <= c) {
-            const double c2 = c * c;
-            e.j = delta / c;
-            e.dg = -x * delta * lambda / c2;
-            e.pv[0] = -x * delta * gamma / c2;
-            e.pv[1] = x * gamma * lambda / c2;
+            // With q = x / c (|q| <= 1 here), delta / c and gamma lambda / c (in
+            // [0, 1]): no product grows past its factors, where c^2 and
+            // x delta lambda over- or underflow (audit K10).
+            const double q = x / c, rd = delta / c, rl = gamma * lambda / c;
+            e.j = rd;
+            e.dg = -q * rd * lambda;
+            e.pv[0] = -q * rd * gamma;
+            e.pv[1] = q * rl;
         } else {
             const double s = sgn(x);
             e.j = 1.0;

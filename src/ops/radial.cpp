@@ -32,8 +32,10 @@
 #include "core/op.hpp"
 #include "ops/ops.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -62,8 +64,9 @@ struct GroupRadial final : RowOp<GroupRadial> {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;
     }
     fp_status check_step(double gamma) const noexcept override { return h->check_step(gamma * cmax); }
+    // Three arrays of G: norms, dots and the scales of safe_group_norms.
     size_t scratch_bytes(int64_t) const noexcept override {
-        return 2 * static_cast<size_t>(G) * sizeof(double);
+        return 3 * static_cast<size_t>(G) * sizeof(double);
     }
 
     int64_t group(int64_t i) const noexcept { return gid.empty() ? 0 : gid[i]; }
@@ -84,14 +87,15 @@ struct GroupRadial final : RowOp<GroupRadial> {
     }
 
     bool has_value() const noexcept override { return true; }
-    int64_t value_doubles(int64_t n) const noexcept override { return n > G ? n : G; }
+    int64_t value_doubles(int64_t n) const noexcept override { return n > 2 * G ? n : 2 * G; }
     // sum_g c_g h(||x_g||), h the scalar map (its value at one entry).
     double value_row(const double *x, int64_t n, double tol, double *scr) const noexcept override {
         for (int64_t g = 0; g < G; ++g) scr[g] = 0.0;
         for (int64_t i = 0; i < n; ++i) scr[group(i)] += x[i] * x[i];
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, scr, scr + G);
         double s = 0.0;
         for (int64_t g = 0; g < G; ++g) {
-            const double t = std::sqrt(scr[g]);
+            const double t = scr[g] / scr[G + g];
             s += c[ci(g)] * h->value_row(&t, 1, tol, nullptr);
         }
         return s;
@@ -106,8 +110,10 @@ struct GroupRadial final : RowOp<GroupRadial> {
             if (std::isinf(v)) return kRowNonFinite;
             scale[group(i)] += v * v;
         }
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, scale,
+                         scale + G);
         for (int64_t g = 0; g < G; ++g) {
-            const double s = std::sqrt(scale[g]);
+            const double s = norm(scale[g], scale[G + g]);
             // A NaN norm gives a NaN scale, so the whole group becomes NaN.
             scale[g] = s > 0.0 ? phi(s, gamma * c[ci(g)]) / s : (s == s ? 0.0 : s);
         }
@@ -116,15 +122,36 @@ struct GroupRadial final : RowOp<GroupRadial> {
         return kRowOk;
     }
 
+    // ||x_g|| from safe_group_norms' m and t, capped at the largest double:
+    // beyond it phi(s) = s - kappa (the last piece of the scalar maps), so
+    // phi(s) / s is 1 - kappa / s to rounding unless kappa is near the cap.
+    static double norm(double m, double t) noexcept {
+        return std::min(m / t, std::numeric_limits<double>::max());
+    }
+    // nrm[g] = m_g and M[g] = t_g, ||x_g|| = m_g / t_g (safe_group_norms), and
+    // dot[g] = <t_g x_g, v_g>. The derivatives read u_g = (t_g x_g) / m_g.
     template <class T>
-    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *dot) const noexcept {
+    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *dot, double *M) const noexcept {
         for (int64_t g = 0; g < G; ++g) nrm[g] = dot[g] = 0.0;
         for (int64_t i = 0; i < n; ++i) {
             const double xi = static_cast<double>(x[i]);
             nrm[group(i)] += xi * xi;
             dot[group(i)] += xi * static_cast<double>(v[i]);
         }
-        for (int64_t g = 0; g < G; ++g) nrm[g] = std::sqrt(nrm[g]);
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, nrm, M);
+        // Where the norm keeps a scale t (it overflows, or 1 / norm does), the
+        // dot is taken on t x, which cannot overflow through x: <u_g, v_g> =
+        // dot[g] / nrm[g] either way.
+        bool scaled = false;
+        for (int64_t g = 0; g < G; ++g) scaled = scaled || M[g] != 1.0;
+        if (scaled) {
+            for (int64_t g = 0; g < G; ++g)
+                if (M[g] != 1.0) dot[g] = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                const int64_t g = group(i);
+                if (M[g] != 1.0) dot[g] += static_cast<double>(x[i]) * M[g] * static_cast<double>(v[i]);
+            }
+        }
     }
 
     template <class T>
@@ -132,10 +159,11 @@ struct GroupRadial final : RowOp<GroupRadial> {
              double dgamma, const double *dparams, void *scr) const noexcept {
         double *a = static_cast<double *>(scr);  // coefficient of dx
         double *b = a + G;                       // coefficient of x
-        norms_dots(x, dx, n, a, b);
+        const double *M = b + G;
+        norms_dots(x, dx, n, a, b, b + G);
         double d[4];
         for (int64_t g = 0; g < G; ++g) {
-            const double s = a[g], cg = c[ci(g)];
+            const double m = a[g], t = M[g], s = norm(m, t), cg = c[ci(g)];
             double j;
             const double p = deriv(s, gamma * cg, j, d);
             if (s > 0.0) {
@@ -146,7 +174,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
                 }
                 const double r = p / s;
                 a[g] = r;
-                b[g] = ((j - r) * (b[g] / s) + dphi) / s;
+                b[g] = ((j - r) * (b[g] / m) + dphi) / m;  // times t x_i below: u_i = (t x_i) / m
             } else {
                 a[g] = j;
                 b[g] = 0.0;
@@ -155,7 +183,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
         for (int64_t i = 0; i < n; ++i) {
             const int64_t g = group(i);
             dz[i] = static_cast<T>(a[g] * static_cast<double>(dx[i]) +
-                                   b[g] * static_cast<double>(x[i]));
+                                   b[g] * (static_cast<double>(x[i]) * M[g]));
         }
     }
 
@@ -165,20 +193,21 @@ struct GroupRadial final : RowOp<GroupRadial> {
         const int64_t P = nparams();
         double *a = static_cast<double *>(scr);
         double *b = a + G;
-        norms_dots(x, gv, n, a, b);
+        const double *M = b + G;
+        norms_dots(x, gv, n, a, b, b + G);
         double d[4];
         for (int64_t g = 0; g < G; ++g) {
-            const double s = a[g], cg = c[ci(g)];
+            const double m = a[g], t = M[g], s = norm(m, t), cg = c[ci(g)];
             double j;
             const double p = deriv(s, gamma * cg, j, d);
             if (s > 0.0) {
-                const double ug = b[g] / s;  // <u, g_g>
+                const double ug = b[g] / m;  // <u, g_g>
                 for (int64_t k = 0; k < Ph; ++k) acc[k] += d[k] * ug;
                 acc[Ph + ci(g)] += d[Ph] * gamma * ug;
                 acc[P] += d[Ph] * cg * ug;
                 const double r = p / s;
                 a[g] = r;
-                b[g] = (j - r) * ug / s;
+                b[g] = (j - r) * ug / m;  // times t x_i below, as in jvp
             } else {
                 a[g] = j;
                 b[g] = 0.0;
@@ -187,7 +216,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
         for (int64_t i = 0; i < n; ++i) {
             const int64_t g = group(i);
             gx[i] = static_cast<T>(a[g] * static_cast<double>(gv[i]) +
-                                   b[g] * static_cast<double>(x[i]));
+                                   b[g] * (static_cast<double>(x[i]) * M[g]));
         }
     }
 };
@@ -201,15 +230,20 @@ struct Soc final : RowOp<Soc> {
 
     enum Region { kKeep, kZero, kMid };
 
-    // s = ||x[1:]||; the branch (NaN falls through to kMid, which stays NaN).
-    template <class T>
-    static Region region(const T *x, int64_t n, double &t, double &s) noexcept {
-        t = static_cast<double>(x[0]);
+    // f(s, sc) with ||x[1:]|| = s / sc (with_norm in core/op.hpp), sc = 1
+    // unless the norm exceeds the largest double or is subnormal. The
+    // formulas read it through t sc, (x_i sc) / s and <sc y, v> / s, which
+    // are those of the plain norm, bit for bit, when sc = 1.
+    template <class T, class F>
+    static auto with_ynorm(const T *x, int64_t n, F f) noexcept {
         double q = 0.0;
         for (int64_t i = 1; i < n; ++i) q += static_cast<double>(x[i]) * static_cast<double>(x[i]);
-        s = std::sqrt(q);
-        if (s <= t) return kKeep;
-        if (s <= -t) return kZero;
+        return with_norm(q, n - 1, [x](int64_t i) { return x[i + 1]; }, f);
+    }
+    // The branch for t = x_0 (NaN falls through to kMid, which stays NaN).
+    static Region region(double t, double s, double sc) noexcept {
+        if (s <= t * sc) return kKeep;
+        if (s <= -t * sc) return kZero;
         return kMid;
     }
 
@@ -217,57 +251,59 @@ struct Soc final : RowOp<Soc> {
     // The indicator of ||y||_2 <= t, t = x_0.
     double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
         if (n == 0) return 0.0;
-        double s = 0.0;
-        for (int64_t i = 1; i < n; ++i) s += x[i] * x[i];
-        return indicator(std::sqrt(s) - x[0], value_atol(x, n, tol));
+        return with_ynorm(x, n, [=](double s, double sc) { return indicator(s / sc - x[0], value_atol(x, n, tol)); });
     }
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *, uint8_t *) const noexcept {
         for (int64_t i = 0; i < n; ++i)
             if (std::isinf(x[i])) return kRowNonFinite;
-        double t, s;
-        switch (region(x, n, t, s)) {
-        case kKeep:
-            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
-            break;
-        case kZero:
-            for (int64_t i = 0; i < n; ++i) z[i] = T(0);
-            break;
-        case kMid: {
-            const double al = 0.5 * (s + t), r = al / s;
-            z[0] = static_cast<T>(al);
-            for (int64_t i = 1; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) * r);
-            break;
-        }
-        }
+        const double t = static_cast<double>(x[0]);
+        with_ynorm(x, n, [=](double s, double sc) {
+            switch (region(t, s, sc)) {
+            case kKeep:
+                if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+                break;
+            case kZero:
+                for (int64_t i = 0; i < n; ++i) z[i] = T(0);
+                break;
+            case kMid: {
+                const double al = 0.5 * (s + t * sc), r = al / s;
+                z[0] = static_cast<T>(al / sc);
+                for (int64_t i = 1; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) * r);
+                break;
+            }
+            }
+        });
         return kRowOk;
     }
 
     // The Jacobian is symmetric: jvp and vjp apply the same map.
     template <class T>
     static void apply(const T *x, const T *v, T *out, int64_t n) noexcept {
-        double t, s;
-        switch (region(x, n, t, s)) {
-        case kKeep:
-            for (int64_t i = 0; i < n; ++i) out[i] = v[i];
-            return;
-        case kZero:
-            for (int64_t i = 0; i < n; ++i) out[i] = T(0);
-            return;
-        case kMid:
-            break;
-        }
-        double uv = 0.0;
-        for (int64_t i = 1; i < n; ++i) uv += static_cast<double>(x[i]) * static_cast<double>(v[i]);
-        uv /= s;
-        const double r = 0.5 * (s + t) / s;
-        const double da = 0.5 * (uv + static_cast<double>(v[0]));
-        out[0] = static_cast<T>(da);
-        for (int64_t i = 1; i < n; ++i) {
-            const double ui = static_cast<double>(x[i]) / s;
-            out[i] = static_cast<T>(da * ui + r * (static_cast<double>(v[i]) - uv * ui));
-        }
+        const double t = static_cast<double>(x[0]);
+        with_ynorm(x, n, [=](double s, double sc) {
+            switch (region(t, s, sc)) {
+            case kKeep:
+                for (int64_t i = 0; i < n; ++i) out[i] = v[i];
+                return;
+            case kZero:
+                for (int64_t i = 0; i < n; ++i) out[i] = T(0);
+                return;
+            case kMid:
+                break;
+            }
+            double uv = 0.0;
+            for (int64_t i = 1; i < n; ++i) uv += static_cast<double>(x[i]) * sc * static_cast<double>(v[i]);
+            uv /= s;
+            const double r = 0.5 * (s + t * sc) / s;
+            const double da = 0.5 * (uv + static_cast<double>(v[0]));
+            out[0] = static_cast<T>(da);
+            for (int64_t i = 1; i < n; ++i) {
+                const double ui = static_cast<double>(x[i]) * sc / s;
+                out[i] = static_cast<T>(da * ui + r * (static_cast<double>(v[i]) - uv * ui));
+            }
+        });
     }
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double,

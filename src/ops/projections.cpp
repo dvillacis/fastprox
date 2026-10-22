@@ -230,65 +230,70 @@ struct L2Ball final : RowOp<L2Ball> {
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 
-    template <class T>
-    static double norm(const T *x, int64_t n) noexcept {
+    // f(m, t) with ||x|| = m / t (with_norm in core/op.hpp), t = 1 unless the
+    // norm exceeds the largest double or is subnormal. The formulas read it
+    // through r t / m, (x_i t) / m and <t x, v> / m, which are those of the
+    // plain norm, bit for bit, when t = 1.
+    template <class T, class F>
+    static auto with_norm(const T *x, int64_t n, F f) noexcept {
         double s = 0.0;
         for (int64_t i = 0; i < n; ++i) s += static_cast<double>(x[i]) * static_cast<double>(x[i]);
-        return std::sqrt(s);
+        return fp::with_norm(s, n, [x](int64_t i) { return x[i]; }, f);
     }
 
     bool has_value() const noexcept override { return true; }
     double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
-        double s = 0.0;
-        for (int64_t i = 0; i < n; ++i) s += x[i] * x[i];
-        return indicator(std::sqrt(s) - r, value_atol(x, n, tol));
+        return with_norm(x, n, [=](double m, double t) { return indicator(m / t - r, value_atol(x, n, tol)); });
     }
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *, uint8_t *) const noexcept {
         for (int64_t i = 0; i < n; ++i)
             if (std::isinf(x[i])) return kRowNonFinite;
-        const double s = norm(x, n);
-        if (s <= r) {
-            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+        return with_norm(x, n, [=](double m, double t) {
+            if (m <= r * t) {
+                if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+                return kRowOk;
+            }
+            const double c = r / m;  // NaN when the norm is NaN
+            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) * t * c);
             return kRowOk;
-        }
-        const double c = r / s;  // NaN when s is NaN
-        for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) * c);
-        return kRowOk;
+        });
     }
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double, double,
              const double *dp, void *) const noexcept {
-        const double s = norm(x, n);
-        if (s <= r) {
-            for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
-            return;
-        }
-        double ud = 0.0;
-        for (int64_t i = 0; i < n; ++i) ud += static_cast<double>(x[i]) * static_cast<double>(dx[i]);
-        ud /= s;
-        const double c = r / s, dr = dp ? dp[0] : 0.0;
-        for (int64_t i = 0; i < n; ++i) {
-            const double ui = static_cast<double>(x[i]) / s;
-            dz[i] = static_cast<T>(c * (static_cast<double>(dx[i]) - ui * ud) + dr * ui);
-        }
+        with_norm(x, n, [=](double m, double t) {
+            if (m <= r * t) {
+                for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
+                return;
+            }
+            double ud = 0.0;
+            for (int64_t i = 0; i < n; ++i) ud += static_cast<double>(x[i]) * t * static_cast<double>(dx[i]);
+            ud /= m;
+            const double c = r * t / m, dr = dp ? dp[0] : 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                const double ui = static_cast<double>(x[i]) * t / m;
+                dz[i] = static_cast<T>(c * (static_cast<double>(dx[i]) - ui * ud) + dr * ui);
+            }
+        });
     }
     template <class T>
     void vjp(const T *x, const T *, const uint8_t *, const T *g, T *gx, int64_t n, double,
              double *acc, void *) const noexcept {
-        const double s = norm(x, n);
-        if (s <= r) {
-            for (int64_t i = 0; i < n; ++i) gx[i] = g[i];
-            return;
-        }
-        double ug = 0.0;
-        for (int64_t i = 0; i < n; ++i) ug += static_cast<double>(x[i]) * static_cast<double>(g[i]);
-        ug /= s;
-        const double c = r / s;
-        for (int64_t i = 0; i < n; ++i)
-            gx[i] = static_cast<T>(c * (static_cast<double>(g[i]) - static_cast<double>(x[i]) / s * ug));
-        acc[0] += ug;
+        with_norm(x, n, [=](double m, double t) {
+            if (m <= r * t) {
+                for (int64_t i = 0; i < n; ++i) gx[i] = g[i];
+                return;
+            }
+            double ug = 0.0;
+            for (int64_t i = 0; i < n; ++i) ug += static_cast<double>(x[i]) * t * static_cast<double>(g[i]);
+            ug /= m;
+            const double c = r * t / m;
+            for (int64_t i = 0; i < n; ++i)
+                gx[i] = static_cast<T>(c * (static_cast<double>(g[i]) - static_cast<double>(x[i]) * t / m * ug));
+            acc[0] += ug;
+        });
     }
 };
 

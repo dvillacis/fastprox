@@ -399,10 +399,15 @@ void run(const uint8_t *data, size_t size) {
     }
 
     double gamma = b.u8() % 4 ? b.param() : b.f64();
-    // Image TV far from unit scale (since 1.0, audit T5): x and gamma times
-    // 2^e, |e| in [600, 1000], which the solvers rescale back exactly.
+    // Far from unit scale (since 1.0): x times 2^e, |e| in [600, 1000], for the
+    // image TV solvers, which rescale back exactly (audit T5; gamma scales
+    // too), and the maps built on Euclidean norms (audit K2).
     const char *opname = fp_op_name(c.op);
-    if (!f32 && (std::strcmp(opname, "tv_aniso") == 0 || std::strcmp(opname, "tv_iso") == 0) && b.u8() % 4 == 0) {
+    const bool tv = std::strcmp(opname, "tv_aniso") == 0 || std::strcmp(opname, "tv_iso") == 0;
+    bool normed = false;
+    for (const char *nm : {"l2_ball", "l2", "group_l2", "tree_l2", "soc", "group_huber", "group_scad", "group_mcp"})
+        normed = normed || std::strcmp(opname, nm) == 0;
+    if (!f32 && (tv || normed) && b.u8() % 4 == 0) {
         const int e = (b.u8() % 2 ? 1 : -1) * (600 + b.u8() * 400 / 255);
         for (int64_t i = 0; i < total; ++i) {
             double v;
@@ -410,7 +415,7 @@ void run(const uint8_t *data, size_t size) {
             v = std::ldexp(v, e);
             std::memcpy(&xbuf[static_cast<size_t>(i) * 8], &v, 8);
         }
-        gamma = std::ldexp(gamma, e);
+        if (tv) gamma = std::ldexp(gamma, e);
     }
     std::snprintf(g_case, sizeof g_case, "op=%s nparams=%lld dtype=%s ndim=%d shape=(%lld,%lld,%lld) axis=%d gamma=%.17g",
                   fp_op_name(c.op), static_cast<long long>(fp_op_nparams(c.op)), f32 ? "f32" : "f64", ndim,
