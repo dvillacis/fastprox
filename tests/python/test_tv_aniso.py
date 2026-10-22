@@ -277,3 +277,42 @@ def test_errors():
         fp.tv_aniso(np.zeros((4, 5)), 0.5, tol=-1.0)
     with pytest.raises(TypeError):
         fp.tv_aniso(np.zeros((4, 5), dtype=np.int64))
+
+
+def _rel(a, b):
+    return np.linalg.norm(a - b) / np.linalg.norm(b)
+
+
+@pytest.mark.parametrize("shape", [(32, 32), (4, 8, 8)])
+@pytest.mark.parametrize("gamma", [1e-12, 1e-8])
+def test_derivatives_at_tiny_bounds(shape, gamma):
+    """Every jump of a randn image is far above 2 gamma, so J = I. The dual
+    test alone read most edges as flat (errors of 0.79-0.97), its rounding
+    being above lam_e; edges whose jump the gap certifies now come first.
+    branch rebuilds the structure from the stored gap."""
+    x = np.random.default_rng(9).standard_normal(shape)
+    dx = np.random.default_rng(1).standard_normal(shape)
+    op = fp.TVAniso(len(shape))
+    _, ctx = op.prox(x, gamma, keep=True, tol=1e-15, max_iter=200000)
+    assert _rel(op.jvp(ctx, dx), dx) <= 1e-12
+    assert _rel(op.vjp(ctx, dx)[0], dx) <= 1e-12
+    assert _rel(op.jvp(ctx, dx, branch=1), dx) <= 1e-12
+
+
+@pytest.mark.parametrize("small", [1e-6, 1e-8])
+def test_derivatives_at_tiny_edge_weights(small):
+    """Half of the edge weights tiny (lam_e = 0.01 small): the jvp against
+    central differences was off by 0.59-0.66."""
+    x = np.random.default_rng(10).standard_normal((32, 32))
+    dx = np.random.default_rng(1).standard_normal(x.shape)
+    beta = np.ones((2, 32, 32))
+    beta[np.random.default_rng(10).random((2, 32, 32)) < 0.5] = small
+    op = fp.TVAniso(2, edge_weights=beta)
+    kw = dict(tol=1e-14, max_iter=200000)
+    _, ctx = op.prox(x, 0.01, keep=True, **kw)
+
+    def fd(h):
+        return (op.prox(x + h * dx, 0.01, **kw) - op.prox(x - h * dx, 0.01, **kw)) / (2 * h)
+
+    assert _rel(fd(1e-7), fd(1e-9)) <= 1e-6
+    assert _rel(op.jvp(ctx, dx), fd(1e-7)) <= 1e-6

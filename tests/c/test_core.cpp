@@ -879,6 +879,32 @@ static void test_tv_aniso() {
         CHECK(df <= 1e-3 * (1 + maxabs(x.data)));
         fp_op_free(op);
     }
+
+    // Tiny bounds (audit T1): at gamma = 1e-9 every jump of a randn image is far
+    // above 2 gamma, so the Jacobian is the identity. The dual test alone read
+    // most edges as flat there, its rounding being above lam_e.
+    {
+        fp_op *op = make_aniso(2, {1.0});
+        Arr x({16, 16}, randn(256)), z({16, 16}), dx({16, 16}, randn(256)), dz({16, 16}), gx({16, 16});
+        fp_options o = opts(-1, 0, 1);
+        o.tol = 1e-15;
+        o.max_iter = 200000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1e-9, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a));
+        double gg = 0;
+        CHECK_OK(fp_vjp(op, ws, &dx.a, &gx.a, &gg, nullptr));
+        double ej = 0, ev = 0;
+        for (int64_t i = 0; i < 256; ++i) {
+            ej = std::max(ej, std::fabs(dz.data[i] - dx.data[i]));
+            ev = std::max(ev, std::fabs(gx.data[i] - dx.data[i]));
+        }
+        CHECK(ej <= 1e-12 * maxabs(dx.data) && ev <= 1e-12 * maxabs(dx.data));
+        if (ej > 1e-12 * maxabs(dx.data)) std::fprintf(stderr, "  aniso tiny gamma: jvp off identity by %.3g\n", ej);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
 }
 
 // ---------------------------------------------------------------- nonconvex maps
