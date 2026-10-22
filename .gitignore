@@ -11,4 +11,6 @@ compile_commands.json
 dist/
 .cache/
 fuzz-crash.bin
+reports/
+research_notes/
 site/
