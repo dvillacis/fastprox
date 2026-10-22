@@ -35,15 +35,28 @@ fp_status guard(F &&f) noexcept {
 
 bool finite(double v) noexcept { return std::isfinite(v); }
 
+// The int in an enum argument or field. A C caller may pass any int there (C
+// enums are ints), while in C++ loading an enum object outside its
+// enumeration's range is undefined, so the boundary reads the bits and
+// validates them before converting.
+template <class E>
+int enum_bits(const E &e) noexcept {
+    static_assert(sizeof(E) == sizeof(int), "the C enums of fastprox.h are int-sized");
+    int v;
+    std::memcpy(&v, &e, sizeof v);
+    return v;
+}
+
 // Converts and validates a public descriptor. Scalars become shape [1].
 // int8: true for the kink and branch arrays, the only ones of that dtype.
 fp_status to_arr(const fp_array *a, Arr &out, bool int8 = false) noexcept {
     if (!a) return FP_EINVAL;
-    if (a->device != FP_DEVICE_CPU) return FP_EINVAL;
-    if (int8 ? a->dtype != FP_I8 : (a->dtype != FP_F32 && a->dtype != FP_F64)) return FP_EDTYPE;
+    if (enum_bits(a->device) != FP_DEVICE_CPU) return FP_EINVAL;
+    const int dt = enum_bits(a->dtype);
+    if (int8 ? dt != FP_I8 : (dt != FP_F32 && dt != FP_F64)) return FP_EDTYPE;
     if (a->ndim < 0 || a->ndim > FP_MAX_NDIM) return FP_ESHAPE;
     out.data = static_cast<char *>(a->data);
-    out.dtype = a->dtype;
+    out.dtype = static_cast<fp_dtype>(dt);
     if (a->ndim == 0) {
         out.ndim = 1;
         out.shape[0] = 1;
@@ -429,8 +442,9 @@ fp_status jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *dxa,
                                : jvp_driver<double>(*op, *ws, dxp, dgamma, dp, out);
 }
 
-int spectral_bit(fp_spectral_kind kind) noexcept {
-    return kind == FP_SPECTRAL_SVD ? kSpectralSvd : kind == FP_SPECTRAL_EIG ? kSpectralEig : 0;
+int spectral_bit(const fp_spectral_kind &kind) noexcept {
+    const int k = enum_bits(kind);
+    return k == FP_SPECTRAL_SVD ? kSpectralSvd : k == FP_SPECTRAL_EIG ? kSpectralEig : 0;
 }
 
 // A (..., k, k) array over the batch of ws: its leading axes those of ws.
@@ -450,14 +464,14 @@ Arr diagonal(const Arr &a) noexcept {
     return d;
 }
 
-fp_status spectral_jvp_impl(const fp_op *op, const fp_workspace *ws, fp_spectral_kind kind,
+fp_status spectral_jvp_impl(const fp_op *op, const fp_workspace *ws, const fp_spectral_kind &kind,
                             const fp_array *sa, const fp_array *za, const fp_array *aa, double dgamma,
                             const fp_array *dpa, fp_array *ba, fp_array *ra) {
     if (!op || !ws || !sa || !za || !aa || !ba) return FP_EINVAL;
     const int bit = spectral_bit(kind);
     if (!bit || !(op->spectral() & bit)) return FP_EINVAL;
     if (ws->op != op || !ws->valid || ws->conj || ws->axis != ws->ndim - 1) return FP_EINVAL;
-    const bool svd = kind == FP_SPECTRAL_SVD;
+    const bool svd = bit == kSpectralSvd;
     if (ra && !svd) return FP_EINVAL;
     if (!finite(dgamma)) return FP_EPARAM;
     Arr s, z, a, b, r;
@@ -615,7 +629,7 @@ fp_status value_impl(const fp_op *op, const fp_array *xa, const fp_options *opt,
     Arr x, out;
     if (fp_status s = to_arr(xa, x)) return s;
     if (fp_status s = to_arr(oa, out)) return s;
-    if (oa->dtype != FP_F64) return FP_EDTYPE;
+    if (out.dtype != FP_F64) return FP_EDTYPE;
     // The batch shape: x's without the axis (rows) or the image axes.
     const int k = op->image_ndim();
     int axis = 0;
@@ -1105,7 +1119,9 @@ FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,
         *out = nullptr;
         Vec w;
         if (fp_status s = fp::read_vec(edge_weights, w)) return s;
-        return fp::make_tv1d(std::move(w), method, out);
+        const int m = fp::enum_bits(method);
+        if (m != FP_TV1D_AUTO && m != FP_TV1D_CONDAT && m != FP_TV1D_TAUT_STRING) return FP_EPARAM;
+        return fp::make_tv1d(std::move(w), static_cast<fp_tv1d_method>(m), out);
     });
 }
 
@@ -1368,17 +1384,19 @@ FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws, fp_spe
 }
 
 FP_API int fp_device_available(fp_device dev) {
-    if (dev == FP_DEVICE_CPU) return 1;
-    return dev == FP_DEVICE_CUDA && fp::cuda_devices() > 0 ? 1 : 0;
+    const int d = fp::enum_bits(dev);
+    if (d == FP_DEVICE_CPU) return 1;
+    return d == FP_DEVICE_CUDA && fp::cuda_devices() > 0 ? 1 : 0;
 }
 
 FP_API fp_status fp_op_device_check(const fp_op *op, fp_device dev, int *row_parallel_only) {
     if (!op) return FP_EINVAL;
     int rpo = 0;
-    if (dev == FP_DEVICE_CPU) {
+    const int d = fp::enum_bits(dev);
+    if (d == FP_DEVICE_CPU) {
         rpo = op->splits_rows() ? 0 : 1;
     } else {
-        if (dev != FP_DEVICE_CUDA || fp::cuda_devices() == 0) return FP_EINVAL;
+        if (d != FP_DEVICE_CUDA || fp::cuda_devices() == 0) return FP_EINVAL;
         if (fp_status s = fp::cuda_plugin()->op_check(op, &rpo)) return s;
     }
     if (row_parallel_only) *row_parallel_only = rpo;

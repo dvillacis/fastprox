@@ -60,6 +60,21 @@ int main(void) {
     CHECK(fp_op_simplex(-1.0, &op) == FP_EPARAM && op == NULL);
     CHECK(fp_strerror(FP_ENOMEM)[0] != '\0');
 
+    /* C enums are ints, so a caller can pass any value in an enum argument or
+       field; the library reads the int and rejects values outside the enum. */
+    xa.dtype = (fp_dtype)7;
+    CHECK(fp_op_soft(1.0, NULL, &op) == FP_OK);
+    CHECK(fp_prox(op, 1.0, &xa, &za, NULL, NULL, NULL) == FP_EDTYPE);
+    xa.dtype = FP_F64;
+    xa.device = (fp_device)10;
+    CHECK(fp_prox(op, 1.0, &xa, &za, NULL, NULL, NULL) == FP_EINVAL);
+    xa.device = FP_DEVICE_CPU;
+    CHECK(fp_device_available((fp_device)10) == 0 && fp_device_available((fp_device)-1) == 0);
+    CHECK(fp_op_device_check(op, (fp_device)10, NULL) == FP_EINVAL);
+    CHECK(fp_op_spectral_check(op, (fp_spectral_kind)5) == FP_EINVAL);
+    fp_op_free(op);
+    CHECK(fp_op_tv1d(NULL, (fp_tv1d_method)7, &op) == FP_EPARAM && op == NULL);
+
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures != 0;
 }
