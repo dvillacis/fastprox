@@ -615,3 +615,65 @@ def test_graph_tv_grid_overrides(dtype):
     lhs, rhs = float((g.astype(float) * jv).sum()), float((gx.astype(float) * d).sum())
     assert abs(lhs - rhs) <= (1e-4 if dtype == np.float32 else 1e-10) * (1 + abs(lhs))
     np.testing.assert_array_equal(op.jvp(ctx, d), before)
+
+
+def zero_threshold_cases():
+    """name: (operator, entries of x = [0, 0.5] whose threshold is zero, the
+    identity's Jacobian there). At GAMMA every threshold that is not zero
+    exceeds 0.5."""
+    return {
+        "soft_w0": (fp.Soft(1.0, [0.0, 1.0]), [0], 1.0),
+        "soft_lam0": (fp.Soft(0.0), [0, 1], 1.0),
+        "elastic_net_l1_0": (fp.ElasticNet(0.0, 0.5), [0, 1], 1.0 / (1.0 + GAMMA * 0.5)),
+        "l1_box_lam0": (fp.L1Box(0.0, -1.0, 1.0), [0, 1], 1.0),
+        "l0_lam0": (fp.L0(0.0), [0, 1], 1.0),
+        "lq_lam0": (fp.Lq(0.0, 0.5), [0, 1], 1.0),
+        "scad_lam0": (fp.SCAD(0.0, 3.7), [0, 1], 1.0),
+        "mcp_lam0": (fp.MCP(0.0, 3.0), [0, 1], 1.0),
+        "scad_w0": (fp.SCAD(1.0, 3.7, [0.0, 1.0]), [0], 1.0),
+        "mcp_w0": (fp.MCP(1.0, 3.0, [0.0, 1.0]), [0], 1.0),
+        "log_lam0": (fp.LogPenalty(0.0, 1.0), [0, 1], 1.0),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(zero_threshold_cases()))
+def test_zero_threshold_is_identity(name):
+    """A zero threshold is not a kink: the map is the identity there, also at
+    x = 0, so its Jacobian is 1 (1/(1 + gamma l2) for the elastic net) and z
+    does not move with gamma or the parameters at x = 0."""
+    op, idx, j = zero_threshold_cases()[name]
+    x = np.array([0.0, 0.5])
+    z, ctx = op.prox(x, GAMMA, keep=True)
+    assert np.all(ctx.jacobian_diag()[idx] == j)
+    if not isinstance(op, fp.ElasticNet):  # no kink masks
+        assert np.all(ctx.kinks(1e-12)[idx] == 0)
+    # Adjointness of (dx, dgamma, dtheta) -> dz.
+    rng = np.random.default_rng(3)
+    dx, g = rng.standard_normal(2), rng.standard_normal(2)
+    dp = rng.standard_normal(op.nparams)
+    dz = op.jvp(ctx, dx, 0.37, dp)
+    gx, grads = op.vjp(ctx, g)
+    rhs = gx @ dx + 0.37 * grads.gamma + grads.params @ dp
+    assert abs(g @ dz - rhs) <= 1e-14 * (1 + abs(g @ dz))
+    # At x = 0, z = 0 for every step and parameter.
+    dz = op.jvp(ctx, np.zeros(2), 1.0, np.ones(op.nparams))
+    assert dz[0] == 0.0
+    e0 = np.array([1.0, 0.0])
+    gx, grads = op.vjp(ctx, e0)
+    assert gx[0] == j and grads.gamma == 0.0 and np.all(grads.params == 0.0)
+
+
+def test_zero_threshold_groups_are_identity():
+    # The unpenalised group of GroupL2 at x_g = 0, beside a live group.
+    op = fp.GroupL2(1.0, [0, 0, 1, 1], [0.0, 1.0])
+    _, ctx = op.prox(np.array([0.0, 0.0, 3.0, 4.0]), 1.0, keep=True)
+    np.testing.assert_allclose(op.jvp(ctx, np.ones(4)), [1.0, 1.0, 0.968, 1.024], rtol=1e-14)
+    gx, grads = op.vjp(ctx, np.array([1.0, -2.0, 0.0, 0.0]))
+    assert list(gx) == [1.0, -2.0, 0.0, 0.0] and grads.gamma == 0.0
+    assert grads.group_weights[0] == 0.0
+    # TreeL2 with l1 = 0 and a zero group weight is the identity at x = 0.
+    op = fp.TreeL2([[0, 1]], [0.0], 0.0)
+    _, ctx = op.prox(np.zeros(2), GAMMA, keep=True)
+    assert list(op.jvp(ctx, np.ones(2))) == [1.0, 1.0]
+    gx, grads = op.vjp(ctx, np.array([1.0, -2.0]))
+    assert list(gx) == [1.0, -2.0] and grads.gamma == 0.0 and np.all(grads.params == 0.0)
