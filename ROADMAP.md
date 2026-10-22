@@ -170,14 +170,14 @@ its row to the decisions table when it lands.
 - [ ] C10: Guard against a nested `parallel_run` from inside a job — [spec](docs/audit-2026-10.md#c10)
 - [x] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
 - [x] K2: Squared norms overflow or underflow (L2Ball, GroupL2, TreeL2, GroupRadial, SOC) — [spec](docs/audit-2026-10.md#k2)
-- [ ] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
+- [x] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
 - [ ] K4: tv1d_l2 derivatives are not scaled, so they fail outside about 1e±103 — [spec](docs/audit-2026-10.md#k4)
 - [x] K5: TreeL2 jvp and vjp: τ/s³ goes to inf for groups with ‖w_g‖ < 1e-103 — [spec](docs/audit-2026-10.md#k5)
-- [ ] K7: Hyperplane and half-space: Σ aᵢxᵢ overflows — [spec](docs/audit-2026-10.md#k7)
-- [ ] K8: Isotonic: block sums overflow; keep block means instead — [spec](docs/audit-2026-10.md#k8)
-- [ ] K9: TV1D `constant_mean` overflows — [spec](docs/audit-2026-10.md#k9)
+- [x] K7: Hyperplane and half-space: Σ aᵢxᵢ overflows — [spec](docs/audit-2026-10.md#k7)
+- [x] K8: Isotonic: block sums overflow; keep block means instead — [spec](docs/audit-2026-10.md#k8)
+- [x] K9: TV1D `constant_mean` overflows — [spec](docs/audit-2026-10.md#k9)
 - [x] K10: Huber derivative: c² underflows — [spec](docs/audit-2026-10.md#k10)
-- [ ] K11: A degenerate bound lo = hi is treated as free — [spec](docs/audit-2026-10.md#k11)
+- [x] K11: A degenerate bound lo = hi is treated as free — [spec](docs/audit-2026-10.md#k11)
 - [x] T1: Anisotropic TV: flat edges at tiny bounds λ_e — [spec](docs/audit-2026-10.md#t1)
 - [x] T5: Image TV: overflow of ‖x‖² and of the gap (power-of-two rescaling) — [spec](docs/audit-2026-10.md#t5)
 - [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
@@ -308,3 +308,4 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 | 2026-10-21 | `fp_prox_steps` defines the derivatives that the spec left open. After it, `fp_jvp`'s scalar `dgamma` moves every step and `fp_vjp`'s `ggamma` is the sum over rows, so neither signature changes. A row's own step gradient comes from `fp_jvp` with `dgamma = 1`, summed against $g$ over the row. The steps are saved in a buffer of one double per row, sized with the saved structure when a workspace keeps it, so prox calls still never allocate. There is no conjugate form. Elementwise maps along an axis that is not the last run one entry at a time under per-row steps, since consecutive entries belong to different rows. |
 | 2026-10-22 | `out` may alias the input only exactly (the same data, shape and strides): any other overlap of an output's byte range with an input's, or a stride-0 output dimension of extent > 1, returns FP_EINVAL before any work (spec Section 4: "out may alias x"). The test is conservative, so disjoint interleaved views are rejected too. The same rule holds for dx/dout, g/gx, the steps of fp_prox_steps and fp_value's out. The Python package retries with a copy of the input instead, so Python callers see no change | `fastprox.h`, `src/core/layout.hpp`, `src/api/api.cpp`, `docs/api.md` |
 | 2026-10-22 | fp_prox_conj evaluates y − prox_g(y) for positively homogeneous g and cone indicators: exact for every σ > 0, σ-derivative 0, image duals at unit step. For the other operators it returns FP_EPARAM when 1/σ overflows or leaves the step range, or when some y_i/σ overflows: always checked in float32 for σ < 1, and in float64 only for σ < 2^-64, since a check for every σ < 1 cost 15–30% on cheap conjugates (above 2^-64, float64 entries beyond ~1e289 may give ±inf/NaN). Every call returns FP_EPARAM when γ·step_scale() > 2^960 | `src/api/api.cpp`, `src/core/op.hpp`, `src/core/driver.hpp`, `src/ops/*`, `fastprox.h`, `docs/api.md` |
+| 2026-10-22 | Weighted isotonic regression rejects weights with min/max below 1e-100 (FP_EPARAM), as the weighted ℓ1 ball does: the weights are stored scaled by their largest power of two, and such ratios would underflow | `src/ops/isotonic.cpp`, `fastprox.h` |

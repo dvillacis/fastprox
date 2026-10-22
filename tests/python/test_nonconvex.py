@@ -207,3 +207,46 @@ def test_lq_lam_gradient():
     h = 1e-7
     fd = (fp.lq(x, 0.4 + h, 0.5).sum() - fp.lq(x, 0.4 - h, 0.5).sum()) / (2 * h)
     assert grads.lam == pytest.approx(fd, rel=1e-6)
+
+
+def _log_root_exact(a, lam, eps):
+    """The positive root of z^2 + (eps - a) z + (lam - a eps) = 0 in 80 digits."""
+    from decimal import Decimal, getcontext
+    getcontext().prec = 80
+    a, lam, eps = Decimal(a), Decimal(lam), Decimal(eps)
+    D = (a + eps) ** 2 - 4 * lam
+    if D < 0:
+        return 0.0
+    r = ((a - eps) + D.sqrt()) / 2
+    return float(r) if r > 0 else 0.0
+
+
+def test_log_root_accuracy():
+    """The root without cancellation for |x| < eps and without (|x| + eps)^2
+    overflowing (audit K3)."""
+    for lam, eps, x in [(1e-20, 1, 3e-20), (1e-14, 1, 1.1e-14), (1e-10, 1, 1e-9), (1e-6, 1e3, 2e-9)]:
+        z = fp.LogPenalty(lam, eps).prox(np.array([x]))[0]
+        assert z == pytest.approx(_log_root_exact(x, lam, eps), rel=4 * 2.0 ** -52)
+    # The convex regime lam = rho eps^2 across scales; the map is the root
+    # beyond the breakpoint lam / eps.
+    for eps in (1e-150, 1e-50, 1.0, 1e50, 1e140):
+        for rho in (1e-12, 0.5, 1.0):
+            lam = rho * eps * eps
+            for ratio in (1e-6, 0.5, 2.0, 1e6):
+                x = ratio * eps
+                if x <= lam / eps * (1 + 1e-12):
+                    continue
+                z = fp.LogPenalty(lam, eps).prox(np.array([x]))[0]
+                assert z == pytest.approx(_log_root_exact(x, lam, eps), rel=4 * 2.0 ** -52), (eps, rho, ratio)
+    np.testing.assert_allclose(fp.LogPenalty(1, 1).prox(np.array([1e200, 1e154, 1e155])), [1e200, 1e154, 1e155],
+                               rtol=2.0 ** -52)
+
+
+def test_log_derivative_at_tiny_eps():
+    # lam / u^2 lost its digits with u = eps + r ~ 1e-159, u^2 subnormal (audit K3).
+    op = fp.LogPenalty(1e-320, 1e-160)
+    x = np.array([1e-159])
+    _, ctx = op.prox(x, keep=True)
+    h = 1e-165  # 1e-6 relative: the spacing of z near 1e-159 is ~1e-175
+    fd = (op.prox(x + h) - op.prox(x - h)) / (2 * h)
+    np.testing.assert_allclose(op.jvp(ctx, np.ones(1)), fd, rtol=1e-6)

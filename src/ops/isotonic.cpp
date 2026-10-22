@@ -3,6 +3,12 @@
 // previous block mean exceeds the current one. Minimises
 // sum_i w_i (z_i - x_i)^2 subject to z nondecreasing (or nonincreasing).
 //
+// The stack keeps block sums and weights; if a sum overflows (audit K8), the
+// row is pooled again on block means, which cannot. Weights are stored over 2^k with their
+// maximum in [1/2, 1), an exact scaling, so block weights stay below n; the
+// derivative terms in the weights carry the 2^-k back. Weight ratios below
+// 1e-100 are rejected, as for the weighted l1 ball, so none underflows.
+//
 // Saved structure (code): 1 at the first entry of every pooled block.
 // The Jacobian averages over blocks with the weights:
 //   (J v)_i = sum_{j in B} w_j v_j / W_B, dz_B/dw_j = (x_j - z_B) / W_B.
@@ -11,6 +17,8 @@
 #include "core/op.hpp"
 #include "ops/ops.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -18,9 +26,16 @@ namespace fp {
 namespace {
 
 struct Isotonic final : RowOp<Isotonic> {
-    Vec w;  // empty: unit weights
+    Vec w;  // empty: unit weights; else the weights over 2^k
+    double wscale = 1.0;  // 2^-k
     bool increasing;
-    Isotonic(Vec ww, bool inc) : w(std::move(ww)), increasing(inc) {}
+    Isotonic(Vec ww, bool inc) : w(std::move(ww)), increasing(inc) {
+        if (w.empty()) return;
+        int k;
+        std::frexp(vmax(w), &k);
+        wscale = std::ldexp(1.0, -k);
+        for (double &v : w) v *= wscale;
+    }
 
     const char *name() const noexcept override { return "isotonic"; }
     double step_scale() const noexcept override { return 0.0; }
@@ -55,7 +70,11 @@ struct Isotonic final : RowOp<Isotonic> {
         int64_t *start = static_cast<int64_t *>(scr);
         double *bw = reinterpret_cast<double *>(start + n);
         double *bs = bw + n;
+        // Block sums, as before; if one overflows (entries near DBL_MAX,
+        // audit K8), the row again with block means, one division per merge:
+        // slower here, as the division sits on each merge's critical path.
         int64_t top = 0;  // number of blocks
+        bool finite = true;
         for (int64_t i = 0; i < n; ++i) {
             const double wv = wi(i);
             start[top] = i;
@@ -68,9 +87,31 @@ struct Isotonic final : RowOp<Isotonic> {
                 --top;
             }
         }
+        // An overflowed sum stays inf (or NaN), so the final blocks tell.
+        for (int64_t b = 0; b < top; ++b) finite = finite && std::isfinite(bs[b]);
+        if (finite) {
+            for (int64_t b = 0; b < top; ++b) bs[b] /= bw[b];  // the means
+        } else {
+            top = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                start[top] = i;
+                bw[top] = wi(i);
+                bs[top] = sg * static_cast<double>(x[i]);
+                ++top;
+                while (top > 1 && bs[top - 2] > bs[top - 1]) {
+                    const double W = bw[top - 2] + bw[top - 1], f = bw[top - 1] / W;
+                    const double m2 = bs[top - 2], m1 = bs[top - 1], d = m1 - m2;
+                    // The update; the convex form where opposite extreme
+                    // means make the difference overflow.
+                    bs[top - 2] = std::isfinite(d) ? m2 + f * d : (1.0 - f) * m2 + f * m1;
+                    bw[top - 2] = W;
+                    --top;
+                }
+            }
+        }
         for (int64_t b = 0; b < top; ++b) {
             const int64_t e = b + 1 < top ? start[b + 1] : n;
-            const T m = static_cast<T>(sg * (bs[b] / bw[b]));
+            const T m = static_cast<T>(sg * bs[b]);
             for (int64_t i = start[b]; i < e; ++i) z[i] = m;
             if (code) code[start[b]] = 1;
         }
@@ -96,7 +137,7 @@ struct Isotonic final : RowOp<Isotonic> {
             for (int64_t i = s; i < e; ++i) {
                 W += wi(i);
                 num += wi(i) * static_cast<double>(dx[i]);
-                if (dp) num += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * dp[i];
+                if (dp) num += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * (dp[i] * wscale);
             }
             const T v = static_cast<T>(num / W);
             for (int64_t i = s; i < e; ++i) dz[i] = v;
@@ -116,7 +157,7 @@ struct Isotonic final : RowOp<Isotonic> {
             for (int64_t i = s; i < e; ++i) {
                 gx[i] = static_cast<T>(wi(i) * m);
                 if (!w.empty())
-                    acc[i] += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * m;
+                    acc[i] += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * (m * wscale);
             }
         });
     }
@@ -125,8 +166,12 @@ struct Isotonic final : RowOp<Isotonic> {
 }  // namespace
 
 fp_status make_isotonic(Vec w, bool increasing, fp_op **out) {
-    for (double v : w)
+    double wmin = 0.0;
+    for (double v : w) {
         if (!finite_nonneg(v) || v == 0.0) return FP_EPARAM;
+        wmin = wmin == 0.0 ? v : std::min(wmin, v);
+    }
+    if (!w.empty() && wmin / vmax(w) < 1e-100) return FP_EPARAM;  // stored over 2^k, they would underflow
     *out = new Isotonic(std::move(w), increasing);
     return FP_OK;
 }
