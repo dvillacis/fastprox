@@ -1,6 +1,7 @@
 // Shared pieces of the image operators (tv_aniso.cpp, tv_iso.cpp): image
-// geometry, exact 1D TV passes over every fiber along one axis, and row sums
-// in a fixed order (so results do not depend on the thread count).
+// geometry, exact 1D TV passes over every fiber along one axis, row sums
+// in a fixed order (so results do not depend on the thread count), and the
+// power-of-two rescaling of images far from unit scale.
 //
 // SPDX-License-Identifier: MIT
 #pragma once
@@ -10,6 +11,7 @@
 #include "core/workspace.hpp"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 
@@ -37,6 +39,30 @@ struct Geom {
     int64_t coord(int64_t o, int a) const noexcept { return (o / S[a]) % L[a]; }
     bool has_next(int64_t o, int a) const noexcept { return coord(o, a) + 1 < L[a]; }
 };
+
+// Images whose largest entry is far from 1 are solved on 2^-e d with the
+// step 2^-e gamma and scaled back, all exact: TV is positively homogeneous,
+// so prox_{gamma g}(c d) = c prox_{(gamma/c) g}(d) for c > 0 (H. H. Bauschke
+// and P. L. Combettes, Convex Analysis and Monotone Operator Theory, 2nd ed.,
+// Springer 2017, Proposition 24.8(iii)), with the dual scaled by c and the
+// gap by c^2. The squares in the stopping target and the gap overflow beyond
+// |d| ~ 1e154 and underflow below ~1e-154. e is 0, and the image is solved
+// as before bit for bit, when max |d| is in [2^-64, 2^65), when d == 0, and
+// when 2^-e gamma would overflow.
+inline int rescale_exponent(const double *d, int64_t N, double gamma) noexcept {
+    double m = 0.0;
+    for (int64_t i = 0; i < N; ++i) m = std::max(m, std::fabs(d[i]));
+    if (!(m > 0.0)) return 0;
+    const int e = std::ilogb(m);
+    if (e >= -64 && e <= 64) return 0;
+    if (e < 0 && gamma > std::ldexp(DBL_MAX, e)) return 0;
+    return e;
+}
+
+// v *= 2^e, entry by entry.
+inline void scale2(double *v, int64_t n, int e) noexcept {
+    for (int64_t i = 0; i < n; ++i) v[i] = std::ldexp(v[i], e);
+}
 
 inline double fista_t(double t) noexcept { return 0.5 * (1.0 + std::sqrt(1.0 + 4.0 * t * t)); }
 

@@ -268,7 +268,10 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
  * NULL (w = 1), length 1, or ndim, all >= 0. theta = (w_0, ..., w_{ndim-1}).
  * Iterative: fp_info reports the duality gap, and the call stops when the gap
  * of every image is at most tol * ||x||^2 / 2 (FP_ENOTCONV after max_iter,
- * with the last iterate written). Its dual is kept in the workspace. */
+ * with the last iterate written). Its dual is kept in the workspace. Images
+ * far from unit scale are solved rescaled by a power of two (since 1.0), so
+ * prox(c x, c gamma) = c prox(x, gamma) for c = 2^k up to rounding; the gap
+ * may then be +inf when it exceeds the largest double. */
 FP_API fp_status fp_op_tv_aniso(int ndim, const fp_array *axis_weights, fp_op **out);
 
 /* Anisotropic TV with edge weights (since 0.3):

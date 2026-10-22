@@ -281,6 +281,18 @@ struct TVAniso final : ImageOp<TVAniso> {
             if (lam[a] > 0.0 && g.L[a] > 1) act[na++] = a;
             else lam[a] = 0.0;
         }
+        // Far from unit scale, solve at a power-of-two scale (image_util.hpp),
+        // unless an active step would underflow there.
+        const double gamma0 = c.gamma;
+        int e = na ? rescale_exponent(d, N, c.gamma) : 0;
+        for (int a = 0; a < k && e; ++a)
+            if (lam[a] > 0.0 && !(std::ldexp(lam[a], -e) > 0.0)) e = 0;
+        if (e) {
+            scale2(d, N, -e);
+            if (c.warm) scale2(q, k * N, -e);
+            c.gamma = std::ldexp(gamma0, -e);
+            for (int a = 0; a < k; ++a) lam[a] = std::ldexp(lam[a], -e);
+        }
         // Inactive axes carry a zero dual (the warm start reads the active ones).
         for (int a = 0; a < k; ++a)
             if (lam[a] == 0.0 || na < 2) std::fill(q + a * N, q + (a + 1) * N, 0.0);
@@ -299,21 +311,25 @@ struct TVAniso final : ImageOp<TVAniso> {
             double *qa = q + a * N;
             pass(g, a, lam[a], c, [&](int64_t o) { return d[o]; },
                  [&](int64_t o, double zo, double v) { zz[o] = zo; qa[o] = v - zo; });
-            if (c.save) structure(g, c, lam, zz, u);
-            for (int64_t i = 0; i < N; ++i) z[i] = static_cast<T>(zz[i]);
-            return kRowOk;
+        } else {
+            const double dn2 = row_sum(g, c, part, [&](int64_t r) {
+                const int64_t n = g.L[k - 1];
+                double s = 0.0;
+                for (int64_t j = 0; j < n; ++j) s += d[r * n + j] * d[r * n + j];
+                return s;
+            });
+            const double target = c.tol * 0.5 * dn2;
+            if (na == 2) adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target);
+            else fdpg3(g, c, lam, d, zz, u, y, wv, pb, part, target);
         }
-
-        const double dn2 = row_sum(g, c, part, [&](int64_t r) {
-            const int64_t n = g.L[k - 1];
-            double s = 0.0;
-            for (int64_t j = 0; j < n; ++j) s += d[r * n + j] * d[r * n + j];
-            return s;
-        });
-        const double target = c.tol * 0.5 * dn2;
-        if (na == 2) adbpg(g, c, act, lam, d, zz, u, y, wv, pb, part, target);
-        else fdpg3(g, c, lam, d, zz, u, y, wv, pb, part, target);
         if (c.save) structure(g, c, lam, zz, u);
+        if (e) {  // back to the input's scale; the saved structure is scale-free but its gap
+            scale2(zz, N, e);
+            scale2(q, k * N, e);
+            c.gap = std::ldexp(c.gap, 2 * e);
+            c.gamma = gamma0;
+            if (c.save) *view(c.save, N).gap = c.gap;
+        }
         for (int64_t i = 0; i < N; ++i) z[i] = static_cast<T>(zz[i]);
         return kRowOk;
     }
