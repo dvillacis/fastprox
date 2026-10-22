@@ -182,7 +182,7 @@ its row to the decisions table when it lands.
 - [ ] T6: Graph TV: dual and gap lost to cancellation at large γ·w — [spec](docs/audit-2026-10.md#t6)
 - [ ] T7: Spectral derivatives: near-ties chained into one wide cluster — [spec](docs/audit-2026-10.md#t7)
 - [ ] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
-- [ ] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)
+- [x] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)
 - [ ] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
 - [ ] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
 - [ ] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)

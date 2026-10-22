@@ -13,9 +13,12 @@ as keywords: float tensors among them that require grad receive the
 gradient of the parameter of that name (``Grads`` fields, see
 :meth:`fastprox.Operator.vjp`); other arguments are constants. Reverse mode
 (``backward``, ``torch.autograd.grad``) and forward mode
-(``torch.autograd.forward_ad``) are supported; not double backward or the
-``torch.func`` transforms, which hand the derivatives wrapped tensors that
-cannot be read as NumPy arrays. The
+(``torch.autograd.forward_ad``) are supported; not the ``torch.func``
+transforms, which hand the derivatives wrapped tensors that cannot be read as
+NumPy arrays. Second-order reverse mode (``create_graph=True``, as in
+``torch.autograd.functional.hvp`` and ``hessian``) raises ``RuntimeError``
+until 1.0.x, rather than returning a Hessian without the prox's own second
+derivatives. The
 computation runs on the CPU in float32 or float64; tensors on another device
 are copied to the CPU and the result back.
 
@@ -97,6 +100,15 @@ def _step(v):
     return steps(_numpy(v) if isinstance(v, torch.Tensor) else v)
 
 
+def _first_order_only():
+    # A backward runs with grad mode on only under create_graph=True. Its
+    # result would carry no second derivative of the prox (torch 2.14's
+    # once_differentiable no longer refuses), so refuse here.
+    if torch.is_grad_enabled():
+        raise RuntimeError("fastprox: second-order differentiation through the prox is not "
+                           "supported yet (planned for 1.0.x); use create_graph=False")
+
+
 def _like(a, t):
     return torch.from_numpy(np.ascontiguousarray(a)).to(dtype=t.dtype, device=t.device).reshape(t.shape)
 
@@ -115,8 +127,8 @@ class _Prox(torch.autograd.Function):
         return torch.from_numpy(z).to(x.device)
 
     @staticmethod
-    @torch.autograd.function.once_differentiable
     def backward(ctx, g):
+        _first_order_only()
         spec, op = ctx.spec, ctx.op
         gn = _numpy(g)
         gx, grads = op.vjp(ctx.fctx, gn)
@@ -204,8 +216,8 @@ class _SpectralProx(torch.autograd.Function):
         return out, an
 
     @staticmethod
-    @torch.autograd.function.once_differentiable
     def backward(ctx, g):
+        _first_order_only()
         spec, op = ctx.spec, ctx.op
         gx, a = _SpectralProx._derivative(ctx, g, 0.0, None)
         dtype, device = ctx.x_like
@@ -408,8 +420,8 @@ class _DeviceTV(torch.autograd.Function):
         return ctx.S
 
     @staticmethod
-    @torch.autograd.function.once_differentiable
     def backward(ctx, c):
+        _first_order_only()
         cfg = ctx.cfg
         S = _DeviceTV._structure(ctx)
         with torch.no_grad():

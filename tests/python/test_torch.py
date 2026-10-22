@@ -270,3 +270,34 @@ def test_spectral_cuda():
     assert z.device == x.device
     z.sum().backward()
     assert x.grad.device == x.device
+
+
+def _second_order_cases():
+    rng = np.random.default_rng(4)
+    return {
+        "soft": (lambda x: fpt.prox(fp.Soft(0.4), x, 0.8), rng.normal(size=6)),
+        "tv1d": (lambda x: fpt.prox(fp.TV1D(), x, 0.6), rng.normal(size=(2, 8)).cumsum(-1)),
+        "nuclear": (lambda x: fpt.prox(fp.NuclearNorm(0.6), x, 0.9), rng.normal(size=(4, 4)) * 1.5),
+        "tv_iso": (lambda x: fpt.tv_iso(x, 0.3, tol=1e-8), rng.normal(size=(1, 6, 6))),
+        "tv_aniso": (lambda x: fpt.tv_aniso(x, 0.3, tol=1e-8), rng.normal(size=(1, 6, 6))),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_second_order_cases()))
+def test_second_order_raises(name):
+    """Second-order reverse mode raises until 1.0.x instead of returning a
+    Hessian without the prox's own second derivatives (torch 2.14's
+    once_differentiable does not refuse); first order is unchanged."""
+    f, x = _second_order_cases()[name]
+    xt = _t(x)
+
+    def loss(x):
+        return (f(x) ** 2).sum() + (x ** 3).sum()
+
+    with pytest.raises(RuntimeError, match="second-order"):
+        torch.autograd.grad(loss(xt), xt, create_graph=True)
+    with pytest.raises(RuntimeError, match="second-order"):
+        torch.autograd.functional.hvp(loss, xt.detach(), torch.ones_like(xt))
+    g1, = torch.autograd.grad(loss(xt), xt)
+    loss(xt).backward()
+    assert torch.equal(xt.grad, g1) and torch.isfinite(g1).all()
