@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- 1D TV with the ℓ2 norm: derivatives far from unit scale (audit K4). The prox was already scaled, but its jvp and vjp formed ‖W D z‖ and its cube on raw z. On x = σ·[0, 1, 3, 2, 5] with γ = 0.8σ:
+  - at σ = 1e-110 the weight derivative was NaN or −inf;
+  - at σ = 1e110 the weight gradient was silently 2× off (6.7e109 instead of 3.4e109);
+  - beyond 1e±160 the Jacobian collapsed to the identity.
+
+  The derivatives now run in scale-free form, with the differences over ‖W D z‖ and γ/‖W D z‖ computed on z scaled by a power of two. They are scale-invariant from 2⁻⁵⁶⁰ to 2⁵³⁰. jvp and vjp at n = 10⁵ take at most 4% longer. Tested in `test_tv1d_l2.py` (`test_derivative_scale_invariance`).
 - Row kernels far from unit scale, and fixed box entries (audit K3, K7, K8, K11).
   - **Log penalty (K3).** The root of the stationarity condition no longer cancels for |x| < ε: λ = 1e-20, ε = 1, x = 3e-20 gave 0 where the root is 2e-20, and λ = 1e-14 was 5.5% off. It now matches 80-digit references to within 4 ulp. The root also no longer overflows: [1e200, 1e154, 1e155] gave [0, 1e154, 0]. Its derivative avoids λ/u².
   - **Hyperplane, half-space and the sums of the largest entries (K7).** Σ aᵢxᵢ no longer overflows for entries near DBL_MAX/n. `project_hyperplane([1.4e308, 1.4e308], [1, 1], 0)` gave [−inf, −inf]; the solver now rescales by a power of two. The projection is exactly homogeneous, from 2⁻¹⁰⁰⁰ to 2¹⁰⁰⁰.

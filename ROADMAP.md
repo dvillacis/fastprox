@@ -171,7 +171,7 @@ its row to the decisions table when it lands.
 - [x] K1: Jacobian 0 instead of 1 where the threshold is 0 and x = 0 — [spec](docs/audit-2026-10.md#k1)
 - [x] K2: Squared norms overflow or underflow (L2Ball, GroupL2, TreeL2, GroupRadial, SOC) — [spec](docs/audit-2026-10.md#k2)
 - [x] K3: Log penalty: overflow of (|x|+ε)² and cancellation in the root — [spec](docs/audit-2026-10.md#k3)
-- [ ] K4: tv1d_l2 derivatives are not scaled, so they fail outside about 1e±103 — [spec](docs/audit-2026-10.md#k4)
+- [x] K4: tv1d_l2 derivatives are not scaled, so they fail outside about 1e±103 — [spec](docs/audit-2026-10.md#k4)
 - [x] K5: TreeL2 jvp and vjp: τ/s³ goes to inf for groups with ‖w_g‖ < 1e-103 — [spec](docs/audit-2026-10.md#k5)
 - [x] K7: Hyperplane and half-space: Σ aᵢxᵢ overflows — [spec](docs/audit-2026-10.md#k7)
 - [x] K8: Isotonic: block sums overflow; keep block means instead — [spec](docs/audit-2026-10.md#k8)
