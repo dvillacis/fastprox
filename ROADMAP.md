@@ -224,6 +224,18 @@ its row to the decisions table when it lands.
 
 - [ ] P1: exact second-order reverse mode through the linear part and where the Jacobian is locally constant, NaN elsewhere — [spec](docs/audit-2026-10.md#p1)
 
+## 1.x — user feedback of 2026-10-23
+
+Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing paper experiments with the library.
+
+- [ ] U1: Accuracy in the units of z: the √tol bound in the docs (1.0.0), `ztol=` and `IterInfo.zerr` (1.1) — [spec](docs/feedback-2026-10.md#u1)
+- [ ] U2: Unconverged and too-loose calls are silent: `ConvergenceWarning`, the `fp.inner_accuracy` context — [spec](docs/feedback-2026-10.md#u2)
+- [ ] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
+- [ ] U4: Derivatives of iterative TV at loose gaps: `ctx.deriv.exact`, `ctx.refine` — [spec](docs/feedback-2026-10.md#u4)
+- [ ] U5: Weighted nuclear norm through a sorted ℓ1 (OWL/SLOPE) operator — [spec](docs/feedback-2026-10.md#u5)
+- [ ] U6: Spectral MCP divergence: get the reproducer, then test or fix — [spec](docs/feedback-2026-10.md#u6)
+- [ ] U7: Releases: 1.0.0, then 1.1.0rc1 with the spectral operators on PyPI — [spec](docs/feedback-2026-10.md#u7)
+
 ## 1.x — GPU backend
 
 - [x] CUDA kernels in the C core behind `fp_array.device`, added after the ABI freeze without breaking it: new `fp_device` values, a function that reports which operators support a device, and `FP_EINVAL` from an operator given a device it does not implement — Design (2026-10-20): docs/spec.md, Section 8, "GPU backend", after a literature check (Notability and outside). `FP_DEVICE_CUDA` (2, DLPack's value), `fp_device_available`, `fp_op_device_check`, the stream bound to the workspace (`fp_workspace_set_stream`), all device scratch allocated in `fp_workspace_create`, asynchronous results (`fp_workspace_info`, `fp_vjp_device`), `FP_EDEVICE`, and one step per image (`fp_prox_steps`, CPU too). The kernels live in a plugin, `libfastprox_cuda`, loaded on first use — Landed (2026-10-20): the enum values, `FP_EDEVICE`, `fp_device_available`, `fp_op_device_check`, the stream setters, `fp_workspace_info`, `fp_vjp_device`, and the plugin loader with its private table, tested against a stub plugin. `fp_prox_steps` (2026-10-21), on the CPU for every operator. The device paths are the stages below
