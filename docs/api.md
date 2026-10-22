@@ -266,6 +266,14 @@ image-by-image calls, for any thread count.
 - **Special values.** A NaN anywhere in an image makes that whole image NaN
   (the rest of the batch is unaffected); ±Inf is rejected with `FP_EINVAL`.
   Images are limited to 2³¹ − 1 entries.
+- **Scale** (*since 1.0*). An image whose largest entry is outside
+  $[2^{-64}, 2^{65})$ is solved rescaled by a power of two and scaled back,
+  all exact. The result does not depend on the scale of $x$:
+  $\operatorname{prox}(c x, c\gamma) = c \operatorname{prox}(x, \gamma)$ for
+  $c = 2^k$, up to rounding. Convergence is decided on the rescaled problem.
+  The reported gap scales by $c^2$, so it may be $+\infty$ when that exceeds
+  the largest double. Before, images beyond about $10^{154}$ (or below
+  $10^{-154}$) were returned unsolved or ran to `max_iter`.
 
 **Isotropic TV.** The weights scale each axis inside the norm (for example
 voxel spacing); differences past the last entry are zero, as in Beck's

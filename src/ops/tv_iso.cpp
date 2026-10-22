@@ -161,15 +161,17 @@ struct TVIso final : ImageOp<TVIso> {
         return fiber_thread_bytes(*tv, Geom(k, shape));
     }
     // Saved: number of regions, the curvature floor mu, the certified relative
-    // error of z, labels, flat flags, z, u (k blocks), 1/|C|.
+    // error of z, the exponent e of the rescaling (z, u and mu are those of
+    // the problem solved, 2^-e times the input's; see prox_img), labels, flat
+    // flags, z, u (k blocks), 1/|C|.
     static size_t r8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N);
-        return 24 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
+        return 32 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
     }
     struct View {
-        int64_t *ncomp;
+        int64_t *ncomp, *ex;
         double *mu, *rel;
         int32_t *label;
         uint8_t *flat;
@@ -181,9 +183,10 @@ struct TVIso final : ImageOp<TVIso> {
         v.ncomp = reinterpret_cast<int64_t *>(s);
         v.mu = reinterpret_cast<double *>(s + 8);
         v.rel = reinterpret_cast<double *>(s + 16);
-        v.label = reinterpret_cast<int32_t *>(s + 24);
-        v.flat = reinterpret_cast<uint8_t *>(s + 24 + r8(4 * n));
-        v.z = reinterpret_cast<double *>(s + 24 + r8(4 * n) + r8(n));
+        v.ex = reinterpret_cast<int64_t *>(s + 24);
+        v.label = reinterpret_cast<int32_t *>(s + 32);
+        v.flat = reinterpret_cast<uint8_t *>(s + 32 + r8(4 * n));
+        v.z = reinterpret_cast<double *>(s + 32 + r8(4 * n) + r8(n));
         v.u = v.z + N;
         v.inv = v.u + k * N;
         return v;
@@ -308,6 +311,17 @@ struct TVIso final : ImageOp<TVIso> {
             if (c.save) save(g, c, wa, d, d, nullptr);
             return kRowOk;
         }
+        // Far from unit scale, solve at a power-of-two scale (image_util.hpp),
+        // unless an active step would underflow there.
+        const double gamma0 = c.gamma;
+        int e = na ? rescale_exponent(d, N, c.gamma) : 0;
+        for (int a = 0; a < k && e; ++a)
+            if (wa[a] > 0.0 && !(std::ldexp(gamma0 * wa[a], -e) > 0.0)) e = 0;
+        if (e) {
+            scale2(d, N, -e);
+            if (c.warm) scale2(q, k * N, -e);
+            c.gamma = std::ldexp(gamma0, -e);
+        }
         if (na == 0) {
             std::memcpy(z, d, static_cast<size_t>(N) * sizeof(double));
             std::fill(q, q + k * N, 0.0);
@@ -333,6 +347,13 @@ struct TVIso final : ImageOp<TVIso> {
             fdpg(g, c, wa, d, z, u, v, part);
         }
         if (c.save) save(g, c, wa, d, z, na >= 1 ? c.dual : nullptr, na >= 2);
+        if (e) {  // back to the input's scale; the saved structure stays at the solved one
+            scale2(z, N, e);
+            scale2(q, k * N, e);
+            c.gap = std::ldexp(c.gap, 2 * e);
+            c.gamma = gamma0;
+            if (c.save) *view(c.save, N).ex = e;
+        }
         for (int64_t i = 0; i < N; ++i) zout[i] = static_cast<T>(z[i]);
         return kRowOk;
     }
@@ -475,6 +496,7 @@ struct TVIso final : ImageOp<TVIso> {
               bool from_dual = false) const {
         const int64_t N = g.N;
         View s = view(c.save, N);
+        *s.ex = 0;
         std::memcpy(s.z, z, static_cast<size_t>(N) * sizeof(double));
         if (dual) std::memcpy(s.u, dual, static_cast<size_t>(k * N) * sizeof(double));
         else std::fill(s.u, s.u + k * N, 0.0);
@@ -735,6 +757,11 @@ struct TVIso final : ImageOp<TVIso> {
                  const double *dparams, char *work, DerivCtl &dc) const noexcept {
         const Geom g(k, shape);
         const int64_t N = g.N;
+        // At the solved scale (prox_img): z = 2^e zh(2^-e x, 2^-e gamma, theta),
+        // so the derivatives in x and gamma are zh's, and theta's carry 2^e.
+        const int e = static_cast<int>(*view(const_cast<char *>(save), N).ex);
+        const double sc = std::ldexp(1.0, e);
+        gamma = std::ldexp(gamma, -e);
         Sys S = system(save, g, gamma, work);
         double *rhs = S.pix + N, *cb = rhs + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         // rhs = dx + sum_a dw_a (u_a[p] - u_a[p - e_a]) - G_A^T c_A,
@@ -745,7 +772,8 @@ struct TVIso final : ImageOp<TVIso> {
             for (int a = 0; a < k; ++a) {
                 if (dparams[a] == 0.0 || g.L[a] == 1) continue;
                 const double *ua = S.s.u + a * N;
-                for (int64_t p = 0; p < N; ++p) rhs[p] += dparams[a] * (ua[p] - (g.coord(p, a) > 0 ? ua[p - g.S[a]] : 0.0));
+                const double da = sc * dparams[a];
+                for (int64_t p = 0; p < N; ++p) rhs[p] += da * (ua[p] - (g.coord(p, a) > 0 ? ua[p - g.S[a]] : 0.0));
             }
         }
         double *cA = S.hbuf;
@@ -753,7 +781,7 @@ struct TVIso final : ImageOp<TVIso> {
             double *ca = cA + a * N;
             for (int64_t p = 0; p < N; ++p) {
                 const double wd = S.wa[a] != 0.0 ? S.gz[a * N + p] / S.wa[a] : 0.0;  // (D_a z)_p
-                ca[p] = (dparams && S.wa[a] != 0.0) ? dparams[a] * wd : 0.0;
+                ca[p] = (dparams && S.wa[a] != 0.0) ? sc * dparams[a] * wd : 0.0;
             }
         }
         S.hess(cA);  // H (dW D z)
@@ -763,7 +791,7 @@ struct TVIso final : ImageOp<TVIso> {
             for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
             const double nr = std::sqrt(nn);
             double dr = dgamma;
-            if (S.alpha) dr = dgamma * S.alpha[p] + (dparams ? gamma * dparams[k + p] : 0.0);
+            if (S.alpha) dr = dgamma * S.alpha[p] + (dparams ? gamma * (sc * dparams[k + p]) : 0.0);
             for (int a = 0; a < k; ++a) cA[a * N + p] += dr * S.gz[a * N + p] / nr;
         }
         S.sub_gradT(cA, rhs);  // rhs -= G^T c
@@ -778,6 +806,9 @@ struct TVIso final : ImageOp<TVIso> {
                  char *work, DerivCtl &dc) const noexcept {
         const Geom g(k, shape);
         const int64_t N = g.N;
+        const int e = static_cast<int>(*view(const_cast<char *>(save), N).ex);  // as in jvp_img
+        const double sc = std::ldexp(1.0, e);
+        gamma = std::ldexp(gamma, -e);
         Sys S = system(save, g, gamma, work);
         double *cb = S.pix + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         std::fill(cb, cb + S.nc, 0.0);
@@ -801,7 +832,7 @@ struct TVIso final : ImageOp<TVIso> {
             double t = 0.0;
             for (int64_t p = 0; p < N; ++p)
                 if (g.has_next(p, a)) t += (vpix[p + g.S[a]] - vpix[p]) * ua[p];
-            acc[a] -= t;
+            acc[a] -= sc * t;
         }
         double ggam = 0.0;
         for (int64_t p = 0; p < N; ++p) {
@@ -813,7 +844,7 @@ struct TVIso final : ImageOp<TVIso> {
             for (int a = 0; a < k; ++a) t += gv[a * N + p] * S.gz[a * N + p] / nr;
             if (S.alpha) {
                 ggam += S.alpha[p] * t;
-                acc[k + p] -= gamma * t;
+                acc[k + p] -= sc * (gamma * t);
             } else {
                 ggam += t;
             }
@@ -825,7 +856,7 @@ struct TVIso final : ImageOp<TVIso> {
             double t = 0.0;
             for (int64_t p = 0; p < N; ++p)
                 if (!S.s.flat[p]) t += gv[a * N + p] * (S.gz[a * N + p] / S.wa[a]);
-            acc[a] -= t;
+            acc[a] -= sc * t;
         }
     }
 };

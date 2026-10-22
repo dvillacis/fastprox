@@ -398,7 +398,20 @@ void run(const uint8_t *data, size_t size) {
         return;
     }
 
-    const double gamma = b.u8() % 4 ? b.param() : b.f64();
+    double gamma = b.u8() % 4 ? b.param() : b.f64();
+    // Image TV far from unit scale (since 1.0, audit T5): x and gamma times
+    // 2^e, |e| in [600, 1000], which the solvers rescale back exactly.
+    const char *opname = fp_op_name(c.op);
+    if (!f32 && (std::strcmp(opname, "tv_aniso") == 0 || std::strcmp(opname, "tv_iso") == 0) && b.u8() % 4 == 0) {
+        const int e = (b.u8() % 2 ? 1 : -1) * (600 + b.u8() * 400 / 255);
+        for (int64_t i = 0; i < total; ++i) {
+            double v;
+            std::memcpy(&v, &xbuf[static_cast<size_t>(i) * 8], 8);
+            v = std::ldexp(v, e);
+            std::memcpy(&xbuf[static_cast<size_t>(i) * 8], &v, 8);
+        }
+        gamma = std::ldexp(gamma, e);
+    }
     std::snprintf(g_case, sizeof g_case, "op=%s nparams=%lld dtype=%s ndim=%d shape=(%lld,%lld,%lld) axis=%d gamma=%.17g",
                   fp_op_name(c.op), static_cast<long long>(fp_op_nparams(c.op)), f32 ? "f32" : "f64", ndim,
                   static_cast<long long>(shape[0]), static_cast<long long>(shape[1]),
