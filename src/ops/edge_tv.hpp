@@ -165,6 +165,8 @@ struct Base : ImageOp<D> {
     void unscale(int e, double *zv, double gamma0, ImageCall &c) const noexcept {
         scale2(zv, n, e);
         scale2(c.dual, n, e);
+        c.scale_exp = e;
+        c.scaled_gap = c.gap;
         c.gap = std::ldexp(c.gap, 2 * e);
         c.gamma = gamma0;
     }

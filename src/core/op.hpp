@@ -137,6 +137,11 @@ struct ImageCall {
     double gap = 0.0;
     int iters = 0;
     bool converged = true;
+    // An image solved at a power-of-two scale, as 2^-scale_exp x, had the gap
+    // scaled_gap there; gap = 2^(2 scale_exp) scaled_gap may overflow or
+    // underflow, the certified relative error sqrt(2 gap) / |x| does not.
+    int scale_exp = 0;
+    double scaled_gap = 0.0;
 
     char *thread_scratch(int t) const noexcept { return thread_base + static_cast<size_t>(t) * thread_bytes; }
 };

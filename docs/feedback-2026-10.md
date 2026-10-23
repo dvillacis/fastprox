@@ -81,6 +81,24 @@ the 1.0 ABI before it freezes, and need no "since" note.
 - The per-image gaps sum to `IterInfo.gap`.
 - `ztol` together with `tol`, and `ztol` = 1e-200, raise `ValueError`.
 
+**As implemented.** As designed, with these changes:
+- **`fp_workspace_image_info(ws, gaps, iters, zerrs, count)`.** It takes plain contiguous buffers and a count, since there is no FP_I32 dtype. It also returns each image's certified error. The driver computes that error from the kernel's own input, at the power-of-two scale the image was solved at (`ImageCall.scale_exp`, `scaled_gap`), so it holds where the gap overflows or underflows, and in place. The norm uses eight partial sums by position: a fixed order, with no latency chain.
+  - **Speed.** The extra pass costs about 1% on graph and tree TV at 512², and is within noise elsewhere.
+  - **Why in C.** In Python the norms took 2–6 µs per call, and `solve` on a 16² image went from 12.9 to 18.3 µs.
+- **Graph TV's `tol`** bounds each node: ‖z − z*‖∞ ≤ tol·(max x − min x). So `ztol` maps to tol = ztol·minᵢ ‖xᵢ‖/(√n·(max xᵢ − min xᵢ)), which gives the same guarantee. The tests check it with offsets and scales.
+- **When the work runs.** `prox` without `keep` or `ctx` now skips building `IterInfo`, the dual copy included.
+- **Recipe.** The recipe in docs/api.md was measured. On a 96² inpainting problem with isotropic TV, 200 FISTA iterations took 10–14× fewer inner iterations warm than cold, at the same `ztol` (1e-3 to 1e-5).
+- **The paper's statements.** They were checked against arXiv:1109.2415v2: Propositions 1 and 2, and the error measure (4). Since √(2ε/L) = √(2·gap), their conditions read directly in `ztol`'s units.
+
+**Tests.**
+- **C:** `test_image_info` (`tests/c/test_core.cpp`) covers:
+  - the gaps' sum against `fp_info.gap`;
+  - NaN images;
+  - in-place calls;
+  - scales 2^±600;
+  - the errors.
+- **Python:** `tests/python/test_ztol.py` covers bitwise equality with `tol=ztol²`, zerr against references carrying their own certificate, graph and tree TV, the special cases, the errors, and PyTorch and JAX (float64, eager and jit).
+
 **Acceptance.** The tests pass, and the docs section is in `docs/api.md`.
 
 ---

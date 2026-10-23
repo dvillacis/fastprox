@@ -45,7 +45,7 @@ import math
 
 import torch
 
-from . import IterInfo
+from . import IterInfo, _zerr
 
 CHECK = 4  # iterations between gap and restart tests
 SCAN_BLOCK = 32  # entries per block of the region sums' segmented scan
@@ -599,5 +599,7 @@ def dual_in(q, w, iso, k, gamma):
     return torch.stack(us)
 
 
-def info(gap, iters, converged, dual):
-    return IterInfo(float(gap.sum()), int(iters), 0, bool(converged), dual)
+def info(gap, iters, converged, dual, xx):
+    """The IterInfo of a solve from the per-image gaps and squared norms xx."""
+    zerr = _zerr(gap.detach().cpu().double().numpy(), xx.detach().cpu().double().numpy())  # MPS has no float64
+    return IterInfo(float(gap.sum()), int(iters), 0, bool(converged), dual, zerr)

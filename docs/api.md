@@ -216,7 +216,10 @@ image-by-image calls, for any thread count.
   prox problem at $(z, q)$ bounds the error:
   $\lVert z - z^\star \rVert^2 \le 2 \cdot \mathrm{gap}$. Each image stops when
   its gap is at most $\mathrm{tol} \cdot \lVert x \rVert^2 / 2$ (default
-  1e-6), or after `max_iter`
+  1e-6), which certifies
+  $\lVert z - z^\star \rVert \le \sqrt{\mathrm{tol}}\,\lVert x \rVert$ (so
+  `tol=1e-10` gives $z$ to 1e-5 relative; see "Inexact proxes inside outer
+  solvers"), or after `max_iter`
   iterations (default 1000), in which case the call returns `FP_ENOTCONV`
   with the last iterate written. `fp_info.gap` is the sum over the batch,
   `fp_info.iters` the maximum. In 2D the iterate checked is the second
@@ -655,6 +658,95 @@ dx = np.ones_like(x)
 up = op.jvp(ctx, dx, branch=1, kink_tol=1e-8)         # pieces on the x + eps side
 dn = op.jvp(ctx, dx, branch=-1, kink_tol=1e-8)        # and on the x - eps side
 d = ctx.jacobian_diag(branch=1, kink_tol=1e-8)        # the same as up here, dx being ones
+```
+
+### Inexact proxes inside outer solvers (*since 1.0*)
+
+The iterative operators (`TVAniso`, `TVIso`, `GraphTV` and the device-native
+image TV) return an approximate prox with a certificate. This section says
+what the certificate bounds, and how accurate the inner solves must be for
+an outer method such as proximal gradient or FISTA to keep its rate.
+
+- **What `tol` certifies.** The prox objective
+  $\tfrac12 \lVert z - x \rVert^2 + \gamma g(z)$ is 1-strongly convex, so
+  $\lVert z - z^\star \rVert^2 \le 2 \cdot \mathrm{gap}$. An image stops when
+  its gap is at most $\mathrm{tol} \cdot \lVert x \rVert^2 / 2$, which
+  certifies a relative error of $z$ of $\sqrt{\mathrm{tol}}$:
+
+  | `tol` | $\lVert z - z^\star \rVert / \lVert x \rVert$ at most |
+  | --- | --- |
+  | 1e-6 (the default) | 1e-3 |
+  | 1e-8 | 1e-4 |
+  | 1e-10 | 1e-5 |
+  | 1e-12 | 1e-6 |
+
+  An outer solver that needs $z$ to 1e-5 therefore needs `tol=1e-10`. Graph
+  TV's `tol` bounds each node instead, within
+  $\mathrm{tol} \cdot (\max x - \min x)$, but its gap certifies $z$ the same
+  way.
+- **`ztol=`** (Python: every `prox`, `prox_conj` and `solve` of these
+  operators, the one-shot functions, and `fastprox.torch`/`fastprox.jax`)
+  asks for the relative error of $z$ directly:
+  $\lVert z_i - z_i^\star \rVert \le \mathrm{ztol}\,\lVert x_i \rVert$ for
+  every image $i$. It passes `tol = ztol**2`; for graph TV it passes the `tol`
+  whose per-node bound gives the same guarantee,
+  $\mathrm{ztol} \min_i \lVert x_i \rVert / (\sqrt{n}\,(\max x_i - \min x_i))$.
+  `ztol` and `tol` are exclusive, and a positive `ztol` below about 1e-154,
+  whose square underflows, raises `ValueError`.
+- **`IterInfo.zerr`** is the error certified for the worst image,
+  $\max_i \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert$, in `ztol`'s units:
+  below `ztol` when the call converged, above it when an image stopped at
+  `max_iter`. It is NaN when an image holds a NaN. In float32 (JAX's
+  default) the gap is a difference of two sums of the size of
+  $\lVert x \rVert^2$, so its rounding, and `zerr`'s, can reach a fraction of
+  a percent at tight tolerances. In C the per-image gaps and
+  iterations, and each image's certified error, come from
+  `fp_workspace_image_info(ws, gaps, iters, zerrs, count)`; `fp_info.gap` is
+  the gaps' sum. The errors are computed at the scale the image was solved
+  at, so they hold where the gap itself overflows or underflows.
+
+**What outer methods need.** Schmidt, Le Roux and Bach (*Convergence rates of
+inexact proximal-gradient methods for convex optimization*, NeurIPS 2011,
+arXiv:1109.2415) analyse $x_k = \operatorname{prox}_{h/L}(y_{k-1} - \nabla
+g(y_{k-1})/L)$ with the prox solved to $\varepsilon_k$ in the objective
+$\tfrac{L}{2}\lVert x - y \rVert^2 + h(x)$ (their (4)). With $\gamma = 1/L$
+that objective is $L$ times fastprox's, so $\varepsilon_k = L \cdot
+\mathrm{gap}_k$, and the quantity their bounds use, $\sqrt{2\varepsilon_k/L}$, is
+$\sqrt{2\,\mathrm{gap}_k}$: the certified distance $\lVert z_k - z_k^\star
+\rVert$, at most $\mathrm{ztol}_k \lVert x_k \rVert$ for the prox's input
+$x_k$. Without gradient errors:
+
+- **Proximal gradient** (their Proposition 1): $f(\bar x_k) - f^\star \le
+  \frac{L}{2k}\bigl(\lVert x_0 - x^\star \rVert + 2A_k + \sqrt{2B_k}\bigr)^2$
+  for the average $\bar x_k$ of the iterates, with $A_k = \sum_{i \le k}
+  \sqrt{2\varepsilon_i/L}$ and $B_k = \sum_{i \le k} \varepsilon_i/L$. The
+  $O(1/k)$ rate holds when $\sum_k \sqrt{\varepsilon_k}$ converges, for
+  instance when $\mathrm{ztol}_k$ falls as $O(1/k^{1+\delta})$.
+- **Accelerated proximal gradient** with $\beta_k = (k-1)/(k+2)$ (their
+  Proposition 2): $f(x_k) - f^\star \le
+  \frac{2L}{(k+1)^2}\bigl(\lVert x_0 - x^\star \rVert + 2\tilde A_k +
+  \sqrt{2\tilde B_k}\bigr)^2$ with $\tilde A_k = \sum_{i \le k} i
+  \sqrt{2\varepsilon_i/L}$ and $\tilde B_k = \sum_{i \le k} i^2
+  \varepsilon_i/L$. The $O(1/k^2)$ rate needs $\sum_k k\sqrt{\varepsilon_k}$
+  to converge, for instance $\mathrm{ztol}_k = O(1/k^{2+\delta})$: a stronger
+  condition, which is why FISTA stalls at a fixed loose tolerance.
+
+**In practice.** Either take `ztol` a factor of 10 below the accuracy the
+outer method needs on $z$, so that the inner error never decides the outer
+stopping test, or decrease it with the iterations as above. In both cases
+start each inner solve from the previous one's dual: keep a context and pass
+it back with `warm=True`, which makes tight inner solves cheap near
+convergence. On a 96² inpainting problem with isotropic TV, 200 FISTA
+iterations took 10–14× fewer inner iterations warm than cold at the same
+`ztol` (1e-3 to 1e-5).
+
+```python
+op = fp.TVIso()
+ctx = None
+for k in range(1, iters + 1):
+    v = y - step * grad(y)
+    z, ctx = op.prox(v, step * lam, keep=True, ctx=ctx, warm=True, ztol=0.1 * target)
+    ...                                   # ctx.info.zerr: the error certified for this z
 ```
 
 ## C API
@@ -1296,7 +1388,8 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   (anisotropic) more, at the same iterations; the backward is unchanged.
 - **Forward**: FISTA on the dual with the C kernels' step, restart test and
   stopping rule (each image stops when its gap is at most
-  $\mathrm{tol} \cdot \lVert x \rVert^2 / 2$), so
+  $\mathrm{tol} \cdot \lVert x \rVert^2 / 2$; `ztol` and `info.zerr` as for the
+  NumPy operators), so
   isotropic TV takes the C kernel's iterations. The anisotropic C kernel's
   exact 1D steps and polish stay on the CPU, so the device path is a plain
   dual method there: same certificate, more iterations to tight tolerances.

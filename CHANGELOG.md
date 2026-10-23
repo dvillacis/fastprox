@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Accuracy in the units of z (feedback U1):
+  - **The bound, documented.** An iterative image operator's `tol` certifies $\lVert z - z^\star \rVert \le \sqrt{\mathrm{tol}}\,\lVert x \rVert$ per image, so the default 1e-6 gives $z$ to 1e-3 relative and `tol=1e-10` to 1e-5. The header, the docstrings and docs/api.md now say so. A new section of docs/api.md, "Inexact proxes inside outer solvers", gives the conditions of Schmidt, Le Roux and Bach (NeurIPS 2011) for proximal gradient and its accelerated form in `ztol`'s units, and the recipe: an inner `ztol` a tenth of the outer tolerance, or a decreasing one, with warm starts. On a 96² inpainting problem, warm starts cut FISTA's inner iterations 10–14×.
+  - **`ztol=`** on every `prox`, `prox_conj` and `solve` of `TVAniso`, `TVIso` and `GraphTV`, on the one-shot `tv_aniso`, `tv_iso` and `graph_tv`, and in `fastprox.torch` and `fastprox.jax` (`tv_iso`, `tv_aniso`, `prox`, `prox_conj`). It asks for $\lVert z_i - z_i^\star \rVert \le \mathrm{ztol}\,\lVert x_i \rVert$ for every image: `tol = ztol**2`, and for graph TV the `tol` whose per-node bound gives that. It is exclusive with `tol`, and a positive `ztol` whose square underflows raises `ValueError`. `tol` now defaults to `None`, meaning the previous defaults (1e-6, and 0 for graph TV).
+  - **`IterInfo.zerr`**: the certified relative error of the worst image, $\max_i \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert$, on every path (NumPy, PyTorch, JAX). It is NaN for a NaN image.
+  - **C:** `fp_workspace_image_info(ws, gaps, iters, zerrs, count)` returns each image's gap, iterations and certified error from the last call. The errors are computed at the scale the image was solved at, so they hold for images whose gap overflows or underflows.
 - Spectral operators: any absolutely symmetric operator on the singular values of a batch of matrices, and any permutation-invariant one on the eigenvalues of symmetric matrices. Examples: the nuclear norm, its ball, the spectral norm and its ball, nonconvex low-rank penalties (SCAD, MCP, $\ell_q$, $\ell_0$, log), the PSD cone, the spectraplex, $-\log\det$.
   - **C:** `fp_op_spectral_check` says whether an operator qualifies. `fp_spectral_jvp` gives the $k \times k$ core of the derivative from $A = U^\top H V$, after `fp_prox` on the spectrum; the caller keeps the decomposition and the matrix products, so the core still needs no LAPACK or BLAS. Ties and zero singular values take their exact limits from the Jacobian of the prox on the spectrum, through one extra JVP per row; near ties take the average of the two limits within $\varepsilon^{1/3}$ of the scale.
   - **Python:** `fp.Spectral(op, kind="svd" | "eigh")`, with `NuclearNorm`, `SpectralNormBall` and `PSD`. `prox`, `prox_from`, `jvp`, `vjp` and `value` use NumPy's `svd`/`eigh`.
@@ -23,6 +28,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `IterInfo` has a sixth field, `zerr` (feedback U1). Unpacking it into five names now fails; use the attributes.
+- An image operator's `prox` without `keep` or `ctx` no longer copies out the dual and builds an `IterInfo` that it then discards.
 - Non-NumPy array-likes keep float32: PyTorch and JAX arrays, memoryviews and `array('f')` are converted with `numpy.asarray`, without a copy where they export a buffer, instead of being cast to float64 (audit P5). Lists and other real types still become float64. Complex inputs raise `TypeError`; before, they lost their imaginary part with a `ComplexWarning`. The PyProximal adapter does the same, and converts float16 to float64.
 - `dparams` rejects unknown names and wrong sizes with a `ValueError` that lists the operator's parameters (audit P6). Before, a typo gave a zero tangent. It also accepts the derived names `lam` (Soft, L1Box, Lq) and `radius` (SpectralNormBall).
 - Clearer errors at the Python boundary (audit P7):

@@ -10,7 +10,7 @@ import numpy as np
 
 from . import Operator, Spectral, _ImageOperator
 
-_CALL = ("axis", "tol", "max_iter")
+_CALL = ("axis", "tol", "ztol", "max_iter")
 
 
 class Spec:
@@ -35,8 +35,8 @@ class Spec:
             if conj:
                 raise TypeError("spectral operators have no prox_conj")
             if any(call.get(k) is not None for k in _CALL):
-                raise TypeError("spectral operators act on the last two axes; axis, tol and max_iter "
-                                "are not accepted")
+                raise TypeError("spectral operators act on the last two axes; axis, tol, ztol and "
+                                "max_iter are not accepted")
             if cls is Spectral and not isinstance(op, Spectral):
                 raise TypeError("pass Spectral(op, kind) built, or a subclass such as NuclearNorm")
         self.op = op

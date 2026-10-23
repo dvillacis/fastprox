@@ -569,6 +569,35 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
     return count;
 }
 
+// sqrt(2 gap) / |x| for the image the kernel solved, x(i, o) its entry i
+// (offset o in the input): the relative error of z that the gap certifies,
+// since |z - z*|^2 <= 2 gap (feedback U1). 0 for an image of zeros, NaN for
+// one holding a NaN (its gap is NaN). The norm is summed in double, in eight
+// partial sums by position (a fixed order, not the adder's latency chain);
+// when its square leaves the normal range it is summed again scaled by the
+// largest entry.
+template <class X>
+double certified_error(double gap, const ImagePlan &p, X x) noexcept {
+    if (std::isnan(gap)) return gap;
+    const double e = std::sqrt(2.0 * std::max(gap, 0.0));
+    double acc[8] = {};
+    p.for_each(0, [&](int64_t i, int64_t o) {
+        const double v = x(i, o);
+        acc[i & 7] += v * v;
+    });
+    const double s = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    if (s >= 1e-280 && s <= 1e280) return e / std::sqrt(s);
+    double m = 0.0;
+    p.for_each(0, [&](int64_t i, int64_t o) { m = std::max(m, std::fabs(x(i, o))); });
+    if (!(m > 0.0)) return std::isnan(m) ? m : 0.0;
+    double t = 0.0;
+    p.for_each(0, [&](int64_t i, int64_t o) {
+        const double v = x(i, o) / m;
+        t += v * v;
+    });
+    return e / m / std::sqrt(t);
+}
+
 template <class T>
 fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, double gamma, bool conj,
                             double sigma, fp_workspace &ws, int nt, bool keep, double tol,
@@ -585,6 +614,7 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
     if (outer) nt = std::min<int>(nt, ws.image_sets);
     double *gaps = ws.image_gaps.data();
     int *iters = reinterpret_cast<int *>(ws.image_iters.data());
+    double *zerr = ws.image_zerr.data();
     std::atomic<int> err{0}, notconv{0};
 
     auto solve = [&](int64_t r, char *set, char *threads, int inner) {
@@ -632,6 +662,19 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         if (!c.converged) notconv.store(1, std::memory_order_relaxed);
         gaps[r] = conj ? c.gap * sigma * sigma : c.gap;
         iters[r] = c.iters;
+        // From the kernel's input: out may be x itself, and holds z by now.
+        // After a conjugate, c.gap and y / sigma give the error relative to y.
+        // At the solve's scale, where the gap is finite and normal.
+        const int se = c.scale_exp;
+        const double sg = se ? c.scaled_gap : c.gap;
+        if (in == xr && !se)
+            zerr[r] = certified_error(sg, p, [&](int64_t, int64_t o) { return static_cast<double>(xr[o]); });
+        else if (in == xr)
+            zerr[r] = certified_error(sg, p, [&](int64_t, int64_t o) { return std::ldexp(static_cast<double>(xr[o]), -se); });
+        else if (!se)
+            zerr[r] = certified_error(sg, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); });
+        else
+            zerr[r] = certified_error(sg, p, [&](int64_t i, int64_t) { return std::ldexp(static_cast<double>(in[i]), -se); });
         if (conj) {
             // out = x - sigma z, reading x through its own strides.
             int64_t pos = 0;
