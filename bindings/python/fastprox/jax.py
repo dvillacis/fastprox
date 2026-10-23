@@ -45,21 +45,25 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
-         **params):
+         deriv_tol=None, deriv_max_iter=10000, **params):
     r"""$\operatorname{prox}_{\gamma g}(x)$. ``gamma`` is a scalar or (since 1.0) one step per
     row, image or matrix, broadcasting to the batch shape, as in
     :func:`fastprox.torch.prox`. ``axis`` (row operators), ``tol``, ``ztol``
-    and ``max_iter`` (iterative operators) are passed on when given."""
-    return _apply(op, x, gamma, False, axis, threads, tol, ztol, max_iter, params)
+    and ``max_iter`` (iterative operators) are passed on when given;
+    ``deriv_tol`` and ``deriv_max_iter`` (since 1.0) as in
+    :func:`fastprox.torch.prox`."""
+    return _apply(op, x, gamma, False, axis, threads, tol, ztol, max_iter, params,
+                  {"tol": deriv_tol, "max_iter": deriv_max_iter})
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
-              **params):
+              deriv_tol=None, deriv_max_iter=10000, **params):
     r"""$\operatorname{prox}_{\sigma g^*}(y)$ (Moreau's identity), with a scalar ``sigma``."""
-    return _apply(op, y, sigma, True, axis, threads, tol, ztol, max_iter, params)
+    return _apply(op, y, sigma, True, axis, threads, tol, ztol, max_iter, params,
+                  {"tol": deriv_tol, "max_iter": deriv_max_iter})
 
 
-def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params):
+def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params, deriv):
     x = jnp.asarray(x)
     check_dtype(x.dtype)
     check_step(step, conj)
@@ -73,7 +77,7 @@ def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params):
         else:
             static[k] = v
     spec = Spec(op, static, names, conj, threads,
-                {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter})
+                {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter}, deriv)
     if spec.spectral:
         return _spectral(spec, x)(x, jnp.asarray(step, x.dtype), *values)
     return _function(spec)(x, jnp.asarray(step, x.dtype), *values)
@@ -102,7 +106,7 @@ def _function(spec):
             op = spec.build(values)
             _, ctx = spec.run(op, np.asarray(x), step)
             g = np.asarray(g, x.dtype)
-            gx, grads = op.vjp(ctx, g)
+            gx, grads = op.vjp(ctx, g, **spec.deriv)
             out = [gx, spec.step_grad(op, ctx, g, grads, np.shape(step)).astype(x.dtype)]
             out += [v.astype(x.dtype) for v in spec.param_grads(op, grads, [np.shape(v) for v in values])]
             return tuple(out)

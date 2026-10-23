@@ -1198,6 +1198,11 @@ gx, grads = wiso.vjp(ctx, np.ones_like(img))                 # grads.pixel_weigh
   (`gap`, `iters`, `ties`).
 - **`dparams`** is a flat vector of length `op.nparams` or a dict by
   parameter name; **`grads`** exposes the same names as attributes.
+- **Derivative keywords** (*since 1.0* on every operator): `jvp` and `vjp`
+  take `tol` and `max_iter`, which control iterative derivative solves
+  (isotropic TV's conjugate gradients) and are accepted and ignored by every
+  other operator, whose derivatives are in closed form. `ctx.deriv` is then
+  the solve's `(residual, iterations)`, or `(0.0, 0)`.
   `Soft` also reports `grads.lam`, and `dparams` accepts `lam` too (since 1.0;
   as for `L1Box` and `Lq`, and `radius` for `SpectralNormBall`). An unknown
   name, or a size that is neither the parameter's nor 1, raises `ValueError`
@@ -1240,11 +1245,13 @@ loss = lambda w: jnp.sum(fpj.prox(fp.TV1D, xj, 0.5, weights=w) ** 2)
 g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
 ```
 
-- **`prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params)`**
+- **`prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None, deriv_tol=None, deriv_max_iter=10000, **params)`**
   and `prox_conj(op, y, sigma, ...)`. `op` is an operator, whose
   parameters are then constants, or an operator class with its constructor
-  arguments as keywords. `axis` (row operators), `tol` and `max_iter`
-  (iterative operators) are passed on when given.
+  arguments as keywords. `axis` (row operators), `tol`, `ztol` and `max_iter`
+  (iterative operators) are passed on when given; `deriv_tol` and
+  `deriv_max_iter` (*since 1.0*) go to the derivatives' `tol` and `max_iter`,
+  as in `tv_iso`.
 - **One step per row** (*since 1.0*). `gamma` may be a tensor or array that
   broadcasts to the batch shape: `x`'s shape without `axis`, the image axes
   or the matrix axes. Its gradient is each row's

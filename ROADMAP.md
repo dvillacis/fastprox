@@ -231,7 +231,7 @@ Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing 
 
 - [x] U1: Accuracy in the units of z: the √tol bound in the docs, `ztol=` and `IterInfo.zerr` — [spec](docs/feedback-2026-10.md#u1)
 - [x] U2: Unconverged and too-loose calls are silent: `ConvergenceWarning`, the `fp.inner_accuracy` context — [spec](docs/feedback-2026-10.md#u2)
-- [ ] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
+- [x] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
 - [ ] U4: Derivatives of iterative TV at loose gaps: `ctx.deriv.exact`, `ctx.refine` — [spec](docs/feedback-2026-10.md#u4)
 - [ ] U5: Weighted nuclear norm through a sorted ℓ1 (OWL/SLOPE) operator — [spec](docs/feedback-2026-10.md#u5)
 - [ ] U6: Spectral MCP divergence: get the reproducer, then test or fix — [spec](docs/feedback-2026-10.md#u6)

@@ -18,7 +18,7 @@ class Spec:
     the static parameters and the differentiable ones (``names``, given in
     order at each call)."""
 
-    def __init__(self, op, static, names, conj, threads, call):
+    def __init__(self, op, static, names, conj, threads, call, deriv=None):
         kinds = (Operator, Spectral)
         if isinstance(op, kinds):
             if static or names:
@@ -45,6 +45,8 @@ class Spec:
         self.conj = bool(conj)
         self.threads = int(threads)
         self.call = {k: v for k, v in call.items() if v is not None}
+        # The derivative solve's tol and max_iter, for jvp and vjp (feedback U3).
+        self.deriv = dict(deriv or {})
         # inner_accuracy's state when the call is set up: the run may be in a
         # JAX callback on another thread, where the context is not set.
         self.accuracy = _ACCURACY.get()
@@ -83,12 +85,12 @@ class Spec:
         summed to the step's shape."""
         if math.prod(shape) == 1:
             return np.full(shape, grads.gamma)
-        t = op.jvp(ctx, None, 1.0)
+        t = op.jvp(ctx, None, 1.0, **self.deriv)
         return sum_to(np.sum(g * t, axis=self.row_axes(op, g.ndim)), shape)
 
     def step_tangent(self, op, ctx, dstep):
         """dz from a step tangent of the step's shape, one per row."""
-        t = op.jvp(ctx, None, 1.0)
+        t = op.jvp(ctx, None, 1.0, **self.deriv)
         axes = self.row_axes(op, t.ndim)
         batch = tuple(n for i, n in enumerate(t.shape) if i not in axes)
         return t * np.expand_dims(np.broadcast_to(dstep, batch), axes)

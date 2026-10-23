@@ -48,25 +48,30 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
-         **params):
+         deriv_tol=None, deriv_max_iter=10000, **params):
     r"""$\operatorname{prox}_{\gamma g}(x)$ as a differentiable tensor. ``gamma`` may be a tensor
     that requires grad: 0-d, or (since 1.0) one step per row, image or
     matrix, broadcasting to the batch shape (``x``'s shape without ``axis``,
     the image axes or the matrix axes); each step's gradient is
     $\langle g, \partial z / \partial \gamma \rangle$ over its rows, at the cost of one more JVP.
     ``axis`` (row operators), ``tol``, ``ztol`` and ``max_iter`` (iterative
-    operators) are passed on when given."""
-    return _apply(op, x, gamma, False, axis, threads, tol, ztol, max_iter, params)
+    operators) are passed on when given. ``deriv_tol`` and ``deriv_max_iter``
+    (since 1.0) are the ``tol`` and ``max_iter`` of the derivatives'
+    :meth:`fastprox.Operator.vjp` and ``jvp``: they control isotropic TV's
+    conjugate gradients, as in :func:`tv_iso`, and are ignored elsewhere."""
+    return _apply(op, x, gamma, False, axis, threads, tol, ztol, max_iter, params,
+                  {"tol": deriv_tol, "max_iter": deriv_max_iter})
 
 
 def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
-              **params):
+              deriv_tol=None, deriv_max_iter=10000, **params):
     r"""$\operatorname{prox}_{\sigma g^*}(y)$ as a differentiable tensor (Moreau's identity);
     ``sigma`` as ``gamma`` in :func:`prox`, but a scalar."""
-    return _apply(op, y, sigma, True, axis, threads, tol, ztol, max_iter, params)
+    return _apply(op, y, sigma, True, axis, threads, tol, ztol, max_iter, params,
+                  {"tol": deriv_tol, "max_iter": deriv_max_iter})
 
 
-def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params):
+def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params, deriv):
     if not isinstance(x, torch.Tensor):
         raise TypeError("x must be a torch.Tensor")
     _check_tensor_dtype(x)
@@ -81,7 +86,7 @@ def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params):
         else:
             static[k] = v
     spec = Spec(op, static, names, conj, threads,
-                {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter})
+                {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter}, deriv)
     if spec.spectral:
         return _SpectralProx.apply(spec, x, step, *values)
     return _Prox.apply(spec, x, step, *values)
@@ -142,7 +147,7 @@ class _Prox(torch.autograd.Function):
         _first_order_only()
         spec, op = ctx.spec, ctx.op
         gn = _numpy(g)
-        gx, grads = op.vjp(ctx.fctx, gn)
+        gx, grads = op.vjp(ctx.fctx, gn, **spec.deriv)
         dtype, device = ctx.x_like
         out_x = torch.from_numpy(gx).to(device=device, dtype=dtype) if ctx.needs_input_grad[1] else None
         out_step = None
@@ -163,7 +168,7 @@ class _Prox(torch.autograd.Function):
         dparams = ctx.spec.dparams(op, [None if t is None else _numpy(t) for t in dvalues])
         per_row = dstep is not None and dstep.numel() > 1
         dz = op.jvp(ctx.fctx, None if dx is None else _numpy(dx),
-                    0.0 if dstep is None or per_row else _scalar(dstep), dparams)
+                    0.0 if dstep is None or per_row else _scalar(dstep), dparams, **ctx.spec.deriv)
         if per_row:
             dz = dz + ctx.spec.step_tangent(op, ctx.fctx, _numpy(dstep))
         dtype, device = ctx.x_like

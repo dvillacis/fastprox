@@ -180,6 +180,19 @@ the 1.0 ABI before it freezes, and need no "since" note.
 - `ctx.deriv` is set after every derivative.
 - `fastprox.torch.prox(fp.TVIso(2), ..., deriv_tol=1e-4)` reaches `ctx.deriv`'s residual ≤ 1e-4.
 
+**As implemented.** As designed:
+- **One code path.** The iterative solve's setup moved into `Operator.jvp` and `vjp`, behind a class flag (`_iterative_deriv`, set by `TVIso`), and TVIso's overrides went away.
+- **Validation.** `tol` must be > 0 or None. `max_iter` must be an integer ≥ 1; booleans are refused.
+- **Cost.** A fast path skips the checks when both keep their defaults, so a tiny call costs 0.03–0.05 µs more than before (measured at 0.12 µs without it).
+- **`ctx.deriv`.** `SpectralContext` gained a `deriv` slot, so every context reports `ctx.deriv`.
+- **Frameworks.** The PyTorch and JAX generic paths carry `deriv_tol` and `deriv_max_iter` in `Spec.deriv`, to every `jvp` and `vjp` they make, the per-row step gradients included.
+
+**Tests.** `tests/python/test_deriv_keywords.py` (61 tests; 60 fail on the previous bindings) covers:
+- bitwise equality with and without the keywords for every operator in `CASES`, anisotropic, graph and tree TV, and the nuclear norm;
+- TVIso's residual and iterations following them;
+- the errors;
+- the PyTorch and JAX generic paths reaching `deriv_tol`, checked through `ctx.deriv`.
+
 **Acceptance.** The tests pass.
 
 ---

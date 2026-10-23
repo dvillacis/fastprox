@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- One set of derivative keywords on every operator (feedback U3): `jvp` and `vjp` take `tol` and `max_iter` everywhere. They control isotropic TV's conjugate gradients, and every other operator, the spectral ones included, accepts and ignores them, since its derivatives are in closed form. Before, only `TVIso` took them, so generic code had to special-case it. `ctx.deriv` is set after every derivative: `(0.0, 0)` in closed form. `fastprox.torch.prox` and `fastprox.jax.prox` take `deriv_tol` and `deriv_max_iter`, as `tv_iso` does, and pass them to every derivative call. A call with the default keywords costs 0.03–0.05 µs more than before.
 - CI builds and tests the aarch64 wheel on every pull request that touches the library, its tests or the build, as the release does. It is the wheel built by GCC for a CPU with FMA, where results depended on the thread count before `-ffp-contract=off`; only the TestPyPI dry run for 1.0.0rc2 had found that (#105).
 
 ## [1.0.0rc2] — 2026-10-23
