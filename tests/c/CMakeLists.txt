@@ -18,6 +18,8 @@ add_executable(test_parallel test_parallel.cpp ${PROJECT_SOURCE_DIR}/src/core/pa
 target_include_directories(test_parallel PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_parallel PRIVATE Threads::Threads)
 add_test(NAME parallel COMMAND test_parallel)
+add_test(NAME parallel_nospin COMMAND test_parallel)  # workers sleep at once (audit C9)
+set_tests_properties(parallel_nospin PROPERTIES ENVIRONMENT "FASTPROX_SPIN_US=0")
 
 # The max-flow engine is internal: tested from its header.
 add_executable(test_maxflow test_maxflow.cpp)

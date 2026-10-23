@@ -10,3 +10,16 @@
    ...
    fun:*Pool4grow*
 }
+
+# The same for the threads test_concurrent_callers runs itself while it
+# forks under load (audit C6): a child has none of them, so their std::thread
+# state and what their lambdas hold on their stacks have no reference left in
+# it. Any frame of that test (the allocation is at operator new, with or
+# without a malloc frame above it).
+{
+   test-threads-after-fork
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*test_concurrent_callers*
+}

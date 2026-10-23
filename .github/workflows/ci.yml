@@ -40,6 +40,14 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFASTPROX_THREADS=${{ matrix.threads }}
       - run: cmake --build build --config Release
       - run: ctest --test-dir build -C Release --output-on-failure --timeout 300
+      # The kernel profiler (bench/profile_kernels.cpp) builds, and its core
+      # section runs (audit C11). POSIX only: it loads proxTV with dlopen.
+      - name: Profiler
+        if: runner.os != 'Windows'
+        run: |
+          c++ -O2 -std=c++17 -Wall -Wextra bench/profile_kernels.cpp src/core/parallel.cpp -Iinclude -Isrc \
+            -Lbuild -lfastprox -ldl -pthread -Wl,-rpath,build -o build/profile_kernels
+          build/profile_kernels core elem
 
   sanitizers:
     runs-on: ubuntu-latest

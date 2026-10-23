@@ -29,6 +29,29 @@ inline size_t mul_size(size_t a, size_t b) noexcept { return a != 0 && b > SIZE_
 // result does not depend on which thread computes which row.
 inline int64_t row_chunk(int64_t n) noexcept { return std::max<int64_t>(1, kChunk / std::max<int64_t>(n, 1)); }
 
+// Pieces of prox and jvp scaled to the thread count (audit C7): with fixed
+// pieces of kChunk entries, 2048 rows of 16 made 2 pieces whatever the
+// threads. prox and jvp have no cross-entry floating-point sums, so their
+// pieces may depend on nt; the vjp's blocks may not (vjp_driver).
+constexpr int64_t kPiecesPerThread = 8;      // rows
+constexpr int64_t kRowPieceMin = 512;        // entries per row piece, at least
+constexpr int64_t kElemPiecesPerThread = 4;
+constexpr int64_t kElemPieceMin = 8192;      // entries per elementwise piece, at least
+
+// Rows per piece: about 8 pieces per thread, at least 512 entries and at
+// most kChunk entries (the old grain) per piece.
+inline int64_t row_grain(int64_t n, int64_t rows, int nt) noexcept {
+    const int64_t want = ceil_div(rows, kPiecesPerThread * std::max(nt, 1));
+    const int64_t floor_rows = ceil_div(kRowPieceMin, std::max<int64_t>(n, 1));
+    return std::max<int64_t>(1, std::min(row_chunk(n), std::max(want, floor_rows)));
+}
+// Entries per elementwise piece: about 4 per thread, between 8192 and kChunk,
+// a multiple of 64.
+inline int64_t elem_piece(int64_t numel, int nt) noexcept {
+    const int64_t want = ceil_div(numel, kElemPiecesPerThread * std::max(nt, 1));
+    return std::min(kChunk, std::max(kElemPieceMin, (want + 63) / 64 * 64));
+}
+
 // Per-thread scratch for row operators: four rows of T, then kernel scratch.
 // SIZE_MAX for rows beyond 2^48 entries, whose byte counts (a few hundred
 // bytes per entry at most) could wrap; only stride-0 views reach them.
@@ -129,15 +152,15 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
     if (op.elementwise()) {
         const ElemPlan p = make_elem_plan(x.ndim, x.shape, axis, op.axis_params() || steps != nullptr, 2, st);
         const RowOfPos rp = row_of_pos(x.ndim, x.shape, axis);
-        const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         T *save = keep ? ws.xs<T>() : nullptr;
         if (p.numel < kParallelMin) nt = 1;
+        const int64_t E = elem_piece(p.numel, nt), nch = ceil_div(p.numel, E);
         std::atomic<int64_t> nties{0};  // integer sums: the same for any order
         std::atomic<bool> ovf{false};
         parallel_for(nt, nch, 1, [&](int, int64_t c0, int64_t c1) {
             int64_t local = 0;
-            p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
+            p.for_runs(c0 * E, std::min(p.numel, c1 * E),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
                            split_rows(rp, steps != nullptr, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
@@ -162,7 +185,7 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
     const bool distinct = op.needs_distinct();
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
     std::atomic<int> err{0};
-    parallel_for(nt, p.rows, row_chunk(n), [&](int tid, int64_t r0, int64_t r1) {
+    parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
         RowBuffers<T> buf(ws, tid, n);
         for (int64_t r = r0; r < r1; ++r) {
             int64_t off[2];
@@ -289,14 +312,14 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
     if (op.elementwise()) {
         const ElemPlan p = make_elem_plan(dout.ndim, dout.shape, ws.axis, op.axis_params() || ws.steps_on, 2, st);
         const RowOfPos rp = row_of_pos(dout.ndim, dout.shape, ws.axis);
-        const int64_t nch = ceil_div(p.numel, kChunk);
         const int64_t xs = p.stride[0][p.ndim - 1], os = p.stride[1][p.ndim - 1];
         const T *save = ws.xs<T>();
         const int8_t *side = ws.branch_on ? ws.branch.data() : nullptr;
         const double ktol = branch_tol(ws);
         if (p.numel < kParallelMin) nt = 1;
+        const int64_t E = elem_piece(p.numel, nt), nch = ceil_div(p.numel, E);
         parallel_for(nt, nch, 1, [&](int, int64_t c0, int64_t c1) {
-            p.for_runs(c0 * kChunk, std::min(p.numel, c1 * kChunk),
+            p.for_runs(c0 * E, std::min(p.numel, c1 * E),
                        [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx,
                            int64_t wstep) {
                            split_rows(rp, ws.steps_on, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
@@ -315,7 +338,7 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
     const int64_t sx = p.astride[0], so = p.astride[1];
     const bool alias = dx && dx->data == dout.data;
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
-    parallel_for(nt, p.rows, row_chunk(n), [&](int tid, int64_t r0, int64_t r1) {
+    parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
         RowBuffers<T> buf(ws, tid, n);
         for (int64_t r = r0; r < r1; ++r) {
             int64_t off[2];
@@ -362,7 +385,10 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
 // ---------------------------------------------------------------------------
 
 // Writes gx and returns the totals over the batch in tot[0..P+2):
-// theta gradients, the gamma slot and the conjugate extra slot.
+// theta gradients, the gamma slot and the conjugate extra slot. Its blocks
+// (reduction_blocks over rows, or over chunks of kChunk entries) fix the
+// order of the cross-row sums, so they are part of the result: they must not
+// depend on the thread count (no row_grain or elem_piece here).
 template <class T>
 fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, const Arr &gx,
                      double *tot) {
