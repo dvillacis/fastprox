@@ -8,7 +8,7 @@ import math
 
 import numpy as np
 
-from . import Operator, Spectral, _ImageOperator
+from . import _ACCURACY, Operator, Spectral, _ImageOperator, _accuracy
 
 _CALL = ("axis", "tol", "ztol", "max_iter")
 
@@ -45,6 +45,9 @@ class Spec:
         self.conj = bool(conj)
         self.threads = int(threads)
         self.call = {k: v for k, v in call.items() if v is not None}
+        # inner_accuracy's state when the call is set up: the run may be in a
+        # JAX callback on another thread, where the context is not set.
+        self.accuracy = _ACCURACY.get()
 
     def build(self, values):
         """The operator for the differentiable parameters' values (NumPy)."""
@@ -64,7 +67,8 @@ class Spec:
     def run(self, op, x, step):
         """(z, ctx) with the structure kept for jvp and vjp."""
         f = op.prox_conj if self.conj else op.prox
-        return f(x, steps(step), threads=self.threads, keep=True, **self.call)
+        with _accuracy(self.accuracy):
+            return f(x, steps(step), threads=self.threads, keep=True, **self.call)
 
     def row_axes(self, op, ndim):
         """The axes of x that a step does not vary over: the operator's axis,

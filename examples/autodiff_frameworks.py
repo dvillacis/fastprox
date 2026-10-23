@@ -73,7 +73,7 @@ def jax_part(rng):
 
     @jax.jit
     def loss_and_grad(t):
-        f = lambda t: 0.5 * jnp.sum((fpj.prox(fp.TVIso(), y, jnp.exp(t), tol=1e-7) - x) ** 2)
+        f = lambda t: 0.5 * jnp.sum((fpj.prox(fp.TVIso(), y, jnp.exp(t), tol=1e-7, max_iter=10 ** 5) - x) ** 2)
         return jax.value_and_grad(f)(t)
 
     t = jnp.log(0.02).astype(jnp.float32)
@@ -83,7 +83,8 @@ def jax_part(rng):
         t = t - 5e-3 * g
     gamma = float(jnp.exp(t))
     grid = np.geomspace(gamma / 2, gamma * 2, 21)
-    best = grid[np.argmin([float(0.5 * jnp.sum((fp.TVIso().prox(np.asarray(y), g, tol=1e-7) - x) ** 2))
+    best = grid[np.argmin([float(0.5 * jnp.sum((fp.TVIso().prox(np.asarray(y), g, tol=1e-7,
+                                                                 max_iter=10 ** 5) - x) ** 2))
                            for g in grid])]
     print(f"JAX:     loss {float(first):.2f} -> {float(val):.2f}; gamma {gamma:.4f} (grid search {best:.4f})")
     return gamma, best

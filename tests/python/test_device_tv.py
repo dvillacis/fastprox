@@ -313,8 +313,8 @@ def test_special_cases(fw, iso):
     tv = fw.tv(iso)
     np.testing.assert_array_equal(np.asarray(tv(fw.arr(x), 0.0)), x)
     np.testing.assert_array_equal(np.asarray(tv(fw.arr(x), 0.5, weights=[0.0, 0.0])), x)
-    np.testing.assert_array_equal(np.asarray(tv(fw.arr(x), 0.5, max_iter=0)), x)
-    z, info = tv(fw.arr(x), 0.5, max_iter=3, return_info=True)
+    np.testing.assert_array_equal(np.asarray(tv(fw.arr(x), 0.5, max_iter=0, warn=False)), x)
+    z, info = tv(fw.arr(x), 0.5, max_iter=3, return_info=True, warn=False)
     assert not bool(info.converged) and int(info.iters) == 3
     z32 = tv(fw.arr(x, np.float32), 0.5, tol=1e-4)
     assert np.asarray(z32).dtype == np.float32

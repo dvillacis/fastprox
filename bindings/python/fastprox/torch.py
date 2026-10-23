@@ -40,7 +40,7 @@ import math
 import numpy as np
 import torch
 
-from . import _gap_tol
+from . import _call_tol, _sq_tol, _warn_unconverged
 from . import _tv_torch as _tvt
 from ._interop import Spec, check_step, spectral_step_grad, steps
 
@@ -268,7 +268,7 @@ class _SpectralProx(torch.autograd.Function):
 
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, ztol=None,
            max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
-           deriv_max_iter=10000):
+           deriv_max_iter=10000, warn=True):
     r"""Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, computed in tensor operations on ``x``'s device and differentiable
     in ``x``, ``gamma`` and ``weights`` (tensors that require grad), forward
@@ -276,7 +276,9 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     broadcasts to the batch shape ``x.shape[:-ndim]``. Each image stops when its duality gap is at most
     $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$ (``tol`` defaults to 1e-6), which certifies
     $\lVert z - z^* \rVert_2 \le \sqrt{\mathrm{tol}}\,\lVert x \rVert_2$; ``ztol`` (since 1.0)
-    asks for that relative error of $z$ instead (``tol`` $= \mathrm{ztol}^2$). ``warm_start`` takes the ``dual`` of an earlier
+    asks for that relative error of $z$ instead (``tol`` $= \mathrm{ztol}^2$). Without either,
+    :func:`fastprox.inner_accuracy` sets ``ztol``. A solve that stops at ``max_iter`` raises
+    :class:`fastprox.ConvergenceWarning` unless ``warn=False``. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape), the C kernel's form). With
     ``return_info=True`` returns ``(z, info)``, an :class:`IterInfo` whose
     ``dual`` is a tensor. The derivatives are the C kernel's: one unknown per
@@ -287,13 +289,14 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     0.3): $\alpha \ge 0$ in $\gamma \sum_p \alpha_p \lVert (w D z)_p \rVert_2$, a
     tensor that broadcasts to x.shape (one map for every image, or one per image, e.g. predicted by a network),
     differentiable like gamma."""
-    return _device_tv(True, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
-                      warm_start, return_info, deriv_tol, deriv_max_iter, pixel_weights)
+    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter, pixel_weights, warn and "fastprox.torch.tv_iso")
 
 
 def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None, ztol=None,
              max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
-             deriv_max_iter=10000):
+             deriv_max_iter=10000, warn=True):
     r"""Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`. A plain
     dual method on the device (the C kernel's exact 1D steps and polish stay
     on the CPU), so tight tolerances take more iterations than ``TVAniso``;
@@ -303,8 +306,9 @@ def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None,
     $\gamma \sum_a w_a \sum_p \beta[a, \dots, p] \lvert z_{p + e_a} - z_p \rvert$, a
     tensor that broadcasts to (ndim, *x.shape) ($\beta[a]$ at the last entry
     along $a$ unused), differentiable like gamma."""
-    return _device_tv(False, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
-                      warm_start, return_info, deriv_tol, deriv_max_iter, edge_weights)
+    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter, edge_weights, warn and "fastprox.torch.tv_aniso")
 
 
 class _TVConfig:
@@ -317,7 +321,8 @@ class _TVConfig:
 
 
 def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
-               deriv_max_iter, spatial=None):
+               deriv_max_iter, spatial=None, warn=False):
+    """warn: the function's name for a ConvergenceWarning, or False."""
     if not isinstance(x, torch.Tensor):
         raise TypeError("x must be a torch.Tensor")
     _check_tensor_dtype(x)
@@ -363,6 +368,8 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
     if bool(torch.isinf(x.detach()).any()):  # one sync; the solve syncs every few iterations anyway
         raise ValueError("x contains ±Inf; image operators reject infinite values")
     z = _DeviceTV.apply(cfg, x, gb, wt, sw)
+    if warn and not cfg.info.converged:
+        _warn_unconverged(warn, cfg.info.zerr, max_iter, stacklevel=4)
     return (z, cfg.info) if return_info else z
 
 

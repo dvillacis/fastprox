@@ -229,7 +229,7 @@ its row to the decisions table when it lands.
 Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing paper experiments with the library. Every item gates 1.0.0 (decided 2026-10-23), with the decisions recorded at the end of the doc.
 
 - [x] U1: Accuracy in the units of z: the √tol bound in the docs, `ztol=` and `IterInfo.zerr` — [spec](docs/feedback-2026-10.md#u1)
-- [ ] U2: Unconverged and too-loose calls are silent: `ConvergenceWarning`, the `fp.inner_accuracy` context — [spec](docs/feedback-2026-10.md#u2)
+- [x] U2: Unconverged and too-loose calls are silent: `ConvergenceWarning`, the `fp.inner_accuracy` context — [spec](docs/feedback-2026-10.md#u2)
 - [ ] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
 - [ ] U4: Derivatives of iterative TV at loose gaps: `ctx.deriv.exact`, `ctx.refine` — [spec](docs/feedback-2026-10.md#u4)
 - [ ] U5: Weighted nuclear norm through a sorted ℓ1 (OWL/SLOPE) operator — [spec](docs/feedback-2026-10.md#u5)

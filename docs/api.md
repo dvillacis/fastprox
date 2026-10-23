@@ -731,9 +731,41 @@ $x_k$. Without gradient errors:
   to converge, for instance $\mathrm{ztol}_k = O(1/k^{2+\delta})$: a stronger
   condition, which is why FISTA stalls at a fixed loose tolerance.
 
+**Warnings** (*since 1.0*). A call that stops at `max_iter` before its
+tolerance raises `fastprox.ConvergenceWarning`, with the error it did
+certify (`zerr`). This holds for `prox`, `prox_conj` and `solve`, the
+one-shot functions, `fastprox.torch` and `fastprox.jax`; JAX warns from the
+host through `jax.debug.callback`, under `jit` too. `solve(..., warn=False)`
+and the framework functions' `warn=False` silence one call, which still
+reports `converged` and `zerr`; the standard warning filters silence the
+rest. `ConvergenceWarning` is a subclass of `fastprox.AccuracyWarning`.
+
+**`fp.inner_accuracy(target, factor=0.1)`** sets the accuracy once for a
+block of code. `target` is the relative accuracy the outer solver needs on
+$z$. Every iterative call in the block that sets neither `tol` nor `ztol`
+uses `ztol = factor * target`, so the outer code needs no other change:
+
+```python
+with fp.inner_accuracy(1e-5):                 # ztol = 1e-6 inside
+    for k in range(iters):
+        z, ctx = op.prox(y - step * grad(y), step * lam, keep=True, ctx=ctx, warm=True,
+                         max_iter=10 ** 5)
+        ...
+```
+
+A call whose own `tol` or `ztol` certifies less raises `AccuracyWarning`
+with both numbers, and one that stops at `max_iter` raises
+`ConvergenceWarning`, naming the block's ztol. Tight inner tolerances need
+more iterations than the default `max_iter` of 1000, as above; the
+warning says when. Blocks nest. The state is a context variable, so each
+thread and asyncio task has its own; the PyTorch and JAX wrappers capture
+it when a call is set up, and under `jax.jit` the block in force when the
+function is traced applies.
+
 **In practice.** Either take `ztol` a factor of 10 below the accuracy the
-outer method needs on $z$, so that the inner error never decides the outer
-stopping test, or decrease it with the iterations as above. In both cases
+outer method needs on $z$ (what `inner_accuracy` does), so that the inner
+error never decides the outer stopping test, or decrease it with the
+iterations as above. In both cases
 start each inner solve from the previous one's dual: keep a context and pass
 it back with `warm=True`, which makes tight inner solves cheap near
 convergence. On a 96² inpainting problem with isotropic TV, 200 FISTA
