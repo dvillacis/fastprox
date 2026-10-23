@@ -191,7 +191,8 @@ def test_warm_starts():
 
 
 def test_not_converged_and_errors():
-    z, info = fp.tv_iso(image((30, 40), 8), 0.5, tol=1e-14, max_iter=3)
+    with pytest.warns(fp.ConvergenceWarning):
+        z, info = fp.tv_iso(image((30, 40), 8), 0.5, tol=1e-14, max_iter=3)
     assert not info.converged and info.iters == 3 and np.isfinite(z).all()
     with pytest.raises(ValueError):
         fp.TVIso(1)

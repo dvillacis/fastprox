@@ -21,9 +21,11 @@ differentiation::
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import math
 import operator
 import threading
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -47,6 +49,7 @@ __all__ = [
     "TreeL2", "tree_soft_threshold", "sparse_group_soft_threshold", "TV1DBall",
     "project_tv1d_ball", "TV1DL2", "tv1d_l2",
     "Spectral", "SpectralContext", "NuclearNorm", "SpectralNormBall", "PSD",
+    "AccuracyWarning", "ConvergenceWarning", "inner_accuracy",
 ]
 
 _TV1D_METHODS = {"auto": 0, "condat": 1, "taut_string": 2}
@@ -305,6 +308,98 @@ def _vec(v):
     if v is None:
         return None
     return np.ascontiguousarray(v, dtype=np.float64).reshape(-1)
+
+
+class AccuracyWarning(UserWarning):
+    """An iterative prox certified less accuracy than asked for (since 1.0):
+    inside :func:`inner_accuracy`, a call whose own ``tol`` or ``ztol`` is
+    looser than the block's, or one that stopped before it."""
+
+
+class ConvergenceWarning(AccuracyWarning):
+    """An iterative prox stopped at ``max_iter`` before its tolerance (since
+    1.0). The message gives ``zerr``, the relative error of $z$ that was
+    certified. ``solve(..., warn=False)`` silences one call; the standard
+    warning filters the rest."""
+
+
+# The ztol that inner_accuracy asks for, or None outside it (feedback U2).
+_ACCURACY = contextvars.ContextVar("fastprox_inner_accuracy", default=None)
+
+
+@contextlib.contextmanager
+def inner_accuracy(target, factor=0.1):
+    r"""Inner accuracy for the iterative operators of a block (since 1.0):
+    ``target`` is the accuracy the outer solver needs on $z$, relative to the
+    prox's input, and every iterative call in the block that sets neither
+    ``tol`` nor ``ztol`` uses ``ztol = factor * target``, so that the inner
+    error never decides the outer test.
+
+        with fp.inner_accuracy(1e-5):        # ztol = 1e-6 for the calls below
+            z = op.prox(x, gamma)
+
+    A call whose own ``tol`` or ``ztol`` certifies less raises
+    :class:`AccuracyWarning`, and one that stops at ``max_iter``
+    :class:`ConvergenceWarning`. Blocks nest, and the state is a context
+    variable: each thread and asyncio task has its own. Under ``jax.jit`` the
+    block in force when the function is traced applies. Yields the ztol."""
+    target, factor = float(target), float(factor)
+    if not (0.0 < target < float("inf") and 0.0 < factor < float("inf")):
+        raise ValueError(f"target and factor must be finite and > 0, got {target} and {factor}")
+    ztol = factor * target
+    _gap_tol(None, ztol, 0.0)  # its square must not underflow
+    token = _ACCURACY.set(ztol)
+    try:
+        yield ztol
+    finally:
+        _ACCURACY.reset(token)
+
+
+@contextlib.contextmanager
+def _accuracy(ztol):
+    """Sets the inner_accuracy state captured elsewhere (a framework call's
+    callback may run on another thread)."""
+    token = _ACCURACY.set(ztol)
+    try:
+        yield
+    finally:
+        _ACCURACY.reset(token)
+
+
+def _sq_tol(ztol):
+    """The gap tolerance that certifies ztol for the TV operators: ztol^2."""
+    return _gap_tol(None, ztol, 0.0)
+
+
+def _call_tol(tol, ztol, default, from_ztol, warn=True, stacklevel=4):
+    """The gap tolerance of an iterative call: its own tol or ztol, else the
+    inner_accuracy block's ztol, else the default. from_ztol maps a ztol to
+    the operator's tol. An own tolerance looser than the block's warns."""
+    if tol is not None and ztol is not None:
+        raise ValueError("pass tol or ztol, not both")
+    need = _ACCURACY.get()
+    if tol is None and ztol is None:
+        return default if need is None else from_ztol(need)
+    t = float(tol) if ztol is None else from_ztol(ztol)
+    if need is not None and warn and t > from_ztol(need):
+        own = f"tol={float(tol):g}" if ztol is None else f"ztol={float(ztol):g}"
+        warnings.warn(f"{own} certifies less than inner_accuracy's ztol={need:g}, which needs "
+                      f"tol={from_ztol(need):g} or below", AccuracyWarning, stacklevel=stacklevel)
+    return t
+
+
+_CONTEXT = object()
+
+
+def _warn_unconverged(who, zerr, max_iter, stacklevel, need=_CONTEXT):
+    """A ConvergenceWarning; need is inner_accuracy's ztol, by default the
+    context's (a JAX callback passes the one captured when tracing)."""
+    if need is _CONTEXT:
+        need = _ACCURACY.get()
+    want = "" if need is None else f" (inner_accuracy asks for {need:g})"
+    warnings.warn(f"{who} stopped at max_iter={max_iter} before its tolerance; the certified "
+                  f"relative error of z is {zerr:.3g}{want}", ConvergenceWarning,
+                  stacklevel=stacklevel)
 
 
 def _gap_tol(tol, ztol, default):
@@ -950,19 +1045,27 @@ class _ImageOperator(Operator):
         return (z, ctx) if keep else z
 
     def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=None, ztol=None,
-              max_iter=1000, warm_start=None, ctx=None, warm=False):
+              max_iter=1000, warm_start=None, ctx=None, warm=False, warn=True):
         """``(z, info)`` with ``info`` an :class:`IterInfo` (gap, certified
-        error and dual); ``tol`` and ``ztol`` as in :meth:`prox`."""
+        error and dual); ``tol`` and ``ztol`` as in :meth:`prox`.
+        ``warn=False`` (since 1.0) silences this call's
+        :class:`ConvergenceWarning` and :class:`AccuracyWarning`, since
+        ``info.converged`` and ``info.zerr`` report the same."""
         z, _, info = self._iter(x, gamma, out, threads, False, ctx, copy, False, tol, ztol,
-                                max_iter, warm_start, warm, True)
+                                max_iter, warm_start, warm, True, warn)
         return z, info
 
-    def _tol(self, x, tol, ztol):
-        """The C tolerance for tol= or ztol=."""
-        return _gap_tol(tol, ztol, self._default_tol)
+    def _from_ztol(self, x, ztol):
+        """The C tolerance that certifies ztol: ztol^2."""
+        return _gap_tol(None, ztol, 0.0)
+
+    def _tol(self, x, tol, ztol, warn=True):
+        """The C tolerance for tol=, ztol= or inner_accuracy."""
+        return _call_tol(tol, ztol, self._default_tol, lambda z: self._from_ztol(x, z), warn,
+                         stacklevel=5)  # _call_tol, _tol, _iter, prox: the caller
 
     def _iter(self, x, step, out, threads, keep, ctx, copy, conj, tol, ztol, max_iter,
-              warm_start, warm, want_info):
+              warm_start, warm, want_info, warn=True):
         _, threads = _axis_threads(-1, threads)
         x = _input(x, copy)
         if x.ndim < self.ndim:
@@ -970,7 +1073,7 @@ class _ImageOperator(Operator):
                              f"least {self.ndim} dimensions")
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
-        tol = self._tol(x, tol, ztol)
+        tol = self._tol(x, tol, ztol, warn)
 
         def call(ws):
             nonlocal x, steps
@@ -985,13 +1088,18 @@ class _ImageOperator(Operator):
                 res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol),
                               int(max_iter), steps=steps)
             gap, iters, ties, conv = res
+            zerr = None
+            if want_info or (warn and not conv):
+                zerrs = np.empty(math.prod(x.shape[:x.ndim - self.ndim]), np.float64)
+                _C.image_info(ws, None, None, zerrs, zerrs.size)
+                zerr = float(zerrs.max()) if zerrs.size else 0.0
+            if warn and not conv:
+                _warn_unconverged(type(self).__name__, zerr, max_iter, stacklevel=5)
             if not want_info:
                 return None
             dual = np.empty((self.ndim, *x.shape), np.float64)
             _C.get_dual(ws, dual)
-            zerrs = np.empty(math.prod(x.shape[:x.ndim - self.ndim]), np.float64)
-            _C.image_info(ws, None, None, zerrs, zerrs.size)
-            return IterInfo(gap, iters, ties, conv, dual, float(zerrs.max()) if zerrs.size else 0.0)
+            return IterInfo(gap, iters, ties, conv, dual, zerr)
 
         if keep or ctx is not None:
             ctx = self._context(x, -1, threads, ctx)
@@ -1103,12 +1211,10 @@ class GraphTV(_ImageOperator):
 
     _default_tol = 0.0
 
-    def _tol(self, x, tol, ztol):
+    def _from_ztol(self, x, ztol):
         """``tol`` bounds each node's error by tol (max x - min x), so
         |z - z*| <= sqrt(n) tol (max x - min x), and ztol asks for
         tol = ztol min_i |x_i| / (sqrt(n) (max x_i - min x_i))."""
-        if ztol is None or tol is not None:
-            return _gap_tol(tol, ztol, self._default_tol)
         _gap_tol(None, ztol, 0.0)  # validates ztol
         ztol = float(ztol)
         xs = x.reshape(-1, x.shape[-1]) if x.size else np.zeros((0, 1))
@@ -1131,6 +1237,14 @@ class TreeTV(GraphTV):
     :class:`GraphTV`, with the flow unique on a forest. Parameters: weights."""
 
     _make = staticmethod(_C.tree_tv)
+
+    def _tol(self, x, tol, ztol, warn=True):
+        """Exact: every tolerance is met, inside inner_accuracy too."""
+        if tol is not None and ztol is not None:
+            raise ValueError("pass tol or ztol, not both")
+        if ztol is not None:
+            _gap_tol(None, ztol, 0.0)
+        return 0.0
 
 
 class TVIso(_ImageOperator):
@@ -1673,29 +1787,30 @@ def tv1d_l2(x, gamma=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=Fa
 
 
 def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=None, ztol=None, max_iter=1000, warm_start=None,
-             out=None, threads=0, copy=False):
+             out=None, threads=0, copy=False, warn=True):
     r"""prox of $\gamma \sum_a w_a \mathrm{TV}_a$ on the last ``ndim`` (2 or 3) axes.
     Returns ``(z, info)``; ``info.gap`` certifies the result and ``info.dual``
     can be passed back as ``warm_start``."""
     return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol,
-                                        max_iter=max_iter, warm_start=warm_start)
+                                        max_iter=max_iter, warm_start=warm_start, warn=warn)
 
 
 def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=None, ztol=None, max_iter=1000, warm_start=None,
-           out=None, threads=0, copy=False):
+           out=None, threads=0, copy=False, warn=True):
     r"""prox of $\gamma \sum_p \lVert (w_a D_a z)_p \rVert_2$ (isotropic TV) on the
     last ``ndim`` (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
     return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol,
-                                      max_iter=max_iter, warm_start=warm_start)
+                                      max_iter=max_iter, warm_start=warm_start, warn=warn)
 
 
 def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=None, ztol=None, max_iter=1000, out=None,
-             threads=0, copy=False):
+             threads=0, copy=False, warn=True):
     r"""prox of $\gamma \sum_e w_e \lvert z_u - z_v \rvert$ over ``edges`` (pairs
     $(u, v)$) on the last axis. Returns ``(z, info)`` as :func:`tv_aniso`."""
     x = np.asarray(x)
     return GraphTV(x.shape[-1] if n is None else n, edges, weights).solve(
-        x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol, max_iter=max_iter)
+        x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol, max_iter=max_iter,
+        warn=warn)
 
 
 def tree_tv(x, edges, gamma=1.0, *, n=None, weights=None, out=None, threads=0, copy=False):

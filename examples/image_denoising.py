@@ -91,13 +91,13 @@ def main(plot=True):
     op = fp.TVIso(ndim=2)
     s, ctx = np.log(0.05), None
     for _ in range(10):
-        z, ctx = op.prox(ytrain, np.exp(s), keep=True, ctx=ctx, tol=1e-6, warm=True)
+        z, ctx = op.prox(ytrain, np.exp(s), keep=True, ctx=ctx, tol=1e-6, max_iter=10 ** 5, warm=True)
         _, grads = op.vjp(ctx, g=(z - train) / z.size)
         s -= 100.0 * grads.gamma * np.exp(s)        # dL/dlog(gamma) = gamma dL/dgamma
     learned = float(np.exp(s))
     residual, cg_iters = ctx.deriv
     grid = learned * np.geomspace(0.5, 2.0, 15)
-    losses = [loss(fp.tv_iso(ytrain, gamma=g, tol=1e-6)[0], train) for g in grid]
+    losses = [loss(fp.tv_iso(ytrain, gamma=g, tol=1e-6, max_iter=10 ** 5)[0], train) for g in grid]
     best = grid[np.argmin(losses)]
     print(f"learned gamma {learned:.3f} (grid search: {best:.3f}); last VJP: "
           f"{cg_iters} CG iterations, relative residual {residual:.0e}")

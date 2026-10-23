@@ -136,6 +136,24 @@ the 1.0 ABI before it freezes, and need no "since" note.
   - nested contexts restore;
   - two threads with different contexts do not interfere.
 
+**As implemented.** As designed, with these details:
+- **One warning per call.** `ConvergenceWarning` subclasses `AccuracyWarning`, so one filter covers both. A call that stops early inside a block raises a single `ConvergenceWarning`, which names the block's ztol.
+- **`warn=False`** works on `solve`, the one-shot functions and the framework image functions. It silences both warnings for that call.
+- **Graph TV.** Inside a block it maps the block's ztol through its per-node bound (U1). Tree TV is exact and never warns.
+- **The PyTorch and JAX generic paths** capture the context when the call is set up (`Spec.accuracy`), because JAX's `pure_callback` may run on another thread, where the context variable is unset. The JAX image functions read the context when traced. The callback reduces `converged` on the host: `jnp.all` of the flag has no differentiation rule under `grad`.
+- **Cost.** The context variable is read once per call, and `zerr` is fetched only when a call did not converge. Small calls are unchanged within noise.
+- **What the warning found.** Three examples had stopped isotropic TV at the default 1000 iterations short of their tolerance; they now pass `max_iter=10**5`. Tests that stop early on purpose now assert the warning, and reference solves pass `warn=False`.
+
+**Tests.** `tests/python/test_warnings.py` (9 tests) covers:
+- the warning and its message (zerr, max_iter, the caller's line) on every path, JAX eager and jit included;
+- silence for converged calls and `warn=False`;
+- the context's default, bitwise equal to an explicit `ztol`, for TV and graph TV;
+- looser `tol` and `ztol` warning, tighter ones silent;
+- tree TV;
+- nesting and restoring on exceptions;
+- argument errors;
+- two threads with different blocks.
+
 **Acceptance.** The tests pass, and the docs show the context in the "Inexact proxes" section.
 
 ---

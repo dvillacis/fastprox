@@ -31,11 +31,13 @@ derivative run in callbacks on the CPU.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import IterInfo, _gap_tol
+from . import _ACCURACY, IterInfo, _call_tol, _sq_tol, _warn_unconverged
 from . import _tv_jax as _tvj
 from ._interop import Spec, check_dtype, check_step, is_float, spectral_step_grad, steps
 
@@ -202,7 +204,7 @@ def _spectral(spec, x):
 
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, ztol=None,
            max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
-           deriv_max_iter=10000):
+           deriv_max_iter=10000, warn=True):
     r"""Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, in JAX operations on ``x``'s device; differentiable (reverse
     mode) in ``x``, ``gamma`` and ``weights``. ``gamma`` is a number or one
@@ -210,6 +212,9 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$ (``tol`` defaults to
     1e-6), which certifies $\lVert z - z^* \rVert_2 \le \sqrt{\mathrm{tol}}\,\lVert x \rVert_2$;
     ``ztol`` (since 1.0) asks for that relative error of $z$ instead (``tol`` $= \mathrm{ztol}^2$).
+    Without either, :func:`fastprox.inner_accuracy` sets ``ztol`` (read when traced). A solve that
+    stops at ``max_iter`` raises :class:`fastprox.ConvergenceWarning` from the host unless
+    ``warn=False``.
     ``tol``, ``ztol`` and ``max_iter`` are static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape)). With ``return_info=True`` returns
     ``(z, info)``, an :class:`IterInfo` of JAX arrays. The backward is the C
@@ -220,24 +225,27 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     $\max(10^{-10}, 100\,\varepsilon)$ at the tightest. ``pixel_weights`` (since
     0.3), as in :func:`fastprox.torch.tv_iso`: $\alpha \ge 0$ broadcasting to x.shape,
     differentiable."""
-    return _device_tv(True, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
-                      warm_start, return_info, deriv_tol, deriv_max_iter, pixel_weights)
+    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter, pixel_weights, warn and "fastprox.jax.tv_iso")
 
 
 def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None, ztol=None,
              max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
-             deriv_max_iter=10000):
+             deriv_max_iter=10000, warn=True):
     r"""Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`: a
     plain dual method, with the dual in the C kernel's form; its derivatives
     are exact region averages. ``edge_weights`` (since 0.3), as in
     :func:`fastprox.torch.tv_aniso`: $\beta \ge 0$ of shape (ndim, ...)
     broadcasting to (ndim, *x.shape), differentiable."""
-    return _device_tv(False, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
-                      warm_start, return_info, deriv_tol, deriv_max_iter, edge_weights)
+    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
+                      deriv_tol, deriv_max_iter, edge_weights, warn and "fastprox.jax.tv_aniso")
 
 
 def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
-               deriv_max_iter, spatial=None):
+               deriv_max_iter, spatial=None, warn=False):
+    """warn: the function's name for a ConvergenceWarning, or False."""
     x = jnp.asarray(x)
     check_dtype(x.dtype)
     if ndim not in (2, 3):
@@ -295,12 +303,22 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
     z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, sw, iso, float(tol), int(max_iter), deriv_tol,
                                     int(deriv_max_iter))
     z = z.reshape(x.shape)
+    # A report, not a differentiable output: no gradients through it.
+    xx = jnp.sum(jnp.square(jax.lax.stop_gradient(xb)).reshape(xb.shape[0], -1), axis=1)
+    g = jax.lax.stop_gradient(gap)
+    zerr = jnp.max(jnp.sqrt(2 * jnp.maximum(g, 0) / jnp.where(xx > 0, xx, 1)))  # NaN for a NaN image
+    if warn:  # conv is traced: the host reduces it and warns, under jit too
+        jax.debug.callback(functools.partial(_unconverged, warn, int(max_iter), _ACCURACY.get()),
+                           conv, zerr)
     if not return_info:
         return z
     dual = _tvj.dual_out(u, w, iso).reshape((ndim,) + x.shape)
-    xx = jnp.sum(jnp.square(xb).reshape(xb.shape[0], -1), axis=1)
-    zerr = jnp.sqrt(2 * jnp.maximum(gap, 0) / jnp.where(xx > 0, xx, 1))  # NaN for a NaN image
-    return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual, jnp.max(zerr))
+    return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual, zerr)
+
+
+def _unconverged(who, max_iter, need, converged, zerr):
+    if not np.all(converged):
+        _warn_unconverged(who, float(zerr), max_iter, stacklevel=2, need=need)
 
 
 def _spatial(sw, x, ndim, iso):

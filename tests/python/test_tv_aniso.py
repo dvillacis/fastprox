@@ -262,7 +262,8 @@ def test_infeasible_warm_start(shape, k):
 
 
 def test_not_converged_is_reported():
-    z, info = fp.tv_aniso(image((40, 50), 9), 0.5, tol=1e-14, max_iter=2)
+    with pytest.warns(fp.ConvergenceWarning):
+        z, info = fp.tv_aniso(image((40, 50), 9), 0.5, tol=1e-14, max_iter=2)
     assert not info.converged and info.iters == 2 and np.isfinite(z).all() and info.gap > 0
 
 

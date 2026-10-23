@@ -68,7 +68,7 @@ def test_image_operators_match_generic_solver(case):
     worst = 0.0
     for p in probs:
         op = IMAGE_CASES[case][1](p["param"])
-        z, info = op.solve(p["x"], float(p["gamma"]), tol=1e-14, max_iter=3_000_000)
+        z, info = op.solve(p["x"], float(p["gamma"]), tol=1e-14, max_iter=3_000_000, warn=False)
         # Pixel weights near zero slow FISTA on the dual: one 20 x 9 problem
         # has a gap of 1.9e-11 after 1e6 iterations (unweighted, 1.3e-14), so
         # only the distance to the reference is checked there.

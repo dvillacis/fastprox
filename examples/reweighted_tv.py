@@ -67,7 +67,7 @@ def main():
     rng = np.random.default_rng(0)
     clean, y = images(rng)
     # Each method at its best step on a small grid (an oracle, for comparison).
-    tv = max(((psnr(fp.TVIso(2).prox(y, g, tol=1e-8), clean), g) for g in (0.06, 0.08, 0.1, 0.12, 0.15)))
+    tv = max(((psnr(fp.TVIso(2).prox(y, g, tol=1e-8, max_iter=10 ** 5), clean), g) for g in (0.06, 0.08, 0.1, 0.12, 0.15)))
     runs = [(reweighted(y, g), g) for g in (0.05, 0.08, 0.12)]
     (z, objs, step), g = max(runs, key=lambda r: psnr(r[0][0], clean))
     rise = float(np.max(np.diff(objs) / np.abs(objs[1:])))

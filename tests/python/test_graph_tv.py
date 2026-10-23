@@ -113,7 +113,8 @@ def test_max_iter_is_reported():
     shape = (30, 30)
     x = np.random.default_rng(5).normal(size=shape).ravel()
     op = fp.GraphTV(x.size, grid_edges(shape))
-    z, info = op.solve(x, 0.3, max_iter=1)
+    with pytest.warns(fp.ConvergenceWarning):
+        z, info = op.solve(x, 0.3, max_iter=1)
     assert not info.converged and info.iters == 1
     assert np.all(np.isfinite(z))
     z0, i0 = op.solve(x, 0.3)
