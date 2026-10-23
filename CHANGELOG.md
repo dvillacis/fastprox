@@ -34,6 +34,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A prox call rejected for its arguments leaves the workspace's saved point as it was, whatever the argument (audit A4). Before, a negative step or an output that overlaps the input kept the point, while a step beyond the step range, a negative `tol`, or an image or row length the operator rejects discarded it. A call without `keep_structure`, or one that fails during its work, still discards the point. The header, docs/api.md and docs/spec.md now say this; they read "the last prox call with `keep_structure`", but any later call on the workspace counts.
+- Documentation (audit A6, A10, T10, P12):
+  - an operator must outlive its workspaces;
+  - no two calls on one workspace may overlap, the `const` derivative calls included;
+  - graph TV's derivatives are exact only with `tol` = 0, and with `tol` > 0 are those of the regions where the solver stopped;
+  - free-threaded CPython is not supported yet. Built from source on 3.14t, the extension re-enables the GIL with a RuntimeWarning, checked.
 - Empty batches and NaN or Inf images follow one contract across the NumPy, PyTorch and JAX paths of the iterative operators (audit P8).
   - **Empty batches:** they return an empty result with gap 0, 0 iterations and `converged`, with empty or zero gradients. Before:
     - NumPy raised "invalid argument" (`fp_workspace_get_dual`, as the empty call never marked its dual);

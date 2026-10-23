@@ -366,11 +366,6 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         for (int d = 0; d < x.ndim; ++d)
             if (ws->shape[d] != x.shape[d]) return FP_ESHAPE;
         if (keep && !ws->keep) return FP_EINVAL;
-        ws->valid = false;
-        ws->identity = false;
-        ws->steps_on = false;
-        ws->branch_on = false;  // a branch override belongs to the point it was set for
-        ws->override_on = false;
         nt = std::min(nt, ws->nthreads);
     }
 
@@ -408,6 +403,22 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     } else if (fp_status s = step_ok(*op, gamma)) {
         return s;
     }
+    if (x.numel() != 0) {
+        if (k) {
+            if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
+        } else if (fp_status s = op->check_n(x.shape[axis])) {
+            return s;
+        }
+    }
+    // Every argument is checked: a rejected call leaves ws as it was (audit
+    // A4). From here the call replaces the saved point, or discards it.
+    if (ws) {
+        ws->valid = false;
+        ws->identity = false;
+        ws->steps_on = false;
+        ws->branch_on = false;  // a branch override belongs to the point it was set for
+        ws->override_on = false;
+    }
     // A kept call saves its point for the derivatives.
     auto save_point = [&](bool steps_on) {
         ws->valid = true;
@@ -423,11 +434,6 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
         if (keep) save_point(false);
         if (ws && k) ws->dual_valid = true;  // and its dual, which get copies (audit P8)
         return FP_OK;
-    }
-    if (k) {
-        if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
-    } else if (fp_status s = op->check_n(x.shape[axis])) {
-        return s;
     }
 
     // sigma = 0 in the conjugate: y itself, and with keep the identity's
