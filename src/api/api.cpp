@@ -421,6 +421,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     };
     if (x.numel() == 0) {  // an empty point: its derivatives are empty
         if (keep) save_point(false);
+        if (ws && k) ws->dual_valid = true;  // and its dual, which get copies (audit P8)
         return FP_OK;
     }
     if (k) {

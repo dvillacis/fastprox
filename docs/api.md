@@ -1242,6 +1242,14 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   `warm_start` (a dual in the C kernels' form, so the duals of `TVIso` and
   `TVAniso` work too), `return_info`, `deriv_tol` and `deriv_max_iter`.
   `info` is an `IterInfo` whose `gap` and `dual` live on the device.
+- **Special values** (*since 1.0*, the same on the NumPy, PyTorch and JAX
+  paths). An empty batch (any axis of extent 0) returns an empty result with
+  gap 0, 0 iterations, converged true and an empty dual, and its gradients
+  are empty or 0. An image containing a NaN gives a NaN image: its gap is
+  NaN, it takes no iterations and it counts as finished, so it does not by
+  itself make `converged` false. The rest of the batch is unaffected. ±Inf
+  is rejected (`ValueError`), except under `jax.jit`, where values cannot be
+  checked and an image with an Inf is treated as a NaN image.
 - **Steps per image**: `gamma` is a number or a tensor (array) that
   broadcasts to the batch shape `x.shape[:-ndim]`, one step per image, as
   DeepInverse's denoisers take one $\sigma$ per sample: for `x` of shape

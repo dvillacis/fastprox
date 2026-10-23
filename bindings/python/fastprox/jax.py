@@ -240,6 +240,20 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
     if not tol >= 0 or max_iter < 0:
         raise ValueError("tol must be >= 0 and max_iter >= 0")
     img = x.shape[-ndim:]
+    if x.size == 0:  # an empty batch (static): an empty result, in the graph of every input (audit P8)
+        z = x
+        for t in (gamma, weights, spatial):
+            if t is not None:
+                z = z + 0 * jnp.sum(jnp.asarray(t, x.dtype))
+        if not return_info:
+            return z
+        return z, IterInfo(jnp.zeros((), x.dtype), 0, 0, jnp.asarray(True), jnp.zeros((ndim,) + x.shape, x.dtype))
+    try:  # under jit values cannot be checked, and an Inf image is a NaN image
+        has_inf = bool(jnp.isinf(x).any())
+    except jax.errors.ConcretizationTypeError:
+        has_inf = False
+    if has_inf:
+        raise ValueError("x contains ±Inf; image operators reject infinite values")
     xb = x.reshape((-1,) + img)
     w = jnp.ones(ndim, x.dtype) if weights is None else jnp.asarray(weights, x.dtype).reshape(-1)
     if w.shape[0] == 1:

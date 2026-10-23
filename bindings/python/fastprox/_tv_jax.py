@@ -113,7 +113,22 @@ def _bimg(v, nd):
 
 def solve(x, gamma, w, u0, iso, tol, max_iter, sw=None):
     """(z, u, gap per image, iterations) for x (B, *img), gamma (B,) and
-    spatial weights sw or None; tol, max_iter static."""
+    spatial weights sw or None; tol, max_iter static. An image holding a NaN
+    or an Inf (values cannot be checked under jit) is not solved: z, u and
+    its gap are NaN, it takes no iterations and counts as finished (audits
+    A8, P8)."""
+    nd0 = x.ndim - 1
+    bad = ~jnp.all(jnp.isfinite(x.reshape(x.shape[0], -1)), axis=1)
+    mask = _bimg(bad, nd0)
+    x = jnp.where(mask, 0.0, x)
+    u0 = jnp.where(mask[None], 0.0, u0)
+    z, u, gap, it, conv = _solve(x, gamma, w, u0, iso, tol, max_iter, sw, bad)
+    return (jnp.where(mask, jnp.nan, z), jnp.where(mask[None], jnp.nan, u), jnp.where(bad, jnp.nan, gap), it,
+            conv | bad)
+
+
+def _solve(x, gamma, w, u0, iso, tol, max_iter, sw, done):
+    """solve's iteration; images where done is set take no iterations."""
     k = w.shape[0]
     ops = Ops(k, w, iso, sw)
     L = 4.0 * jnp.sum(w * w)
@@ -152,7 +167,7 @@ def solve(x, gamma, w, u0, iso, tol, max_iter, sw=None):
         return (state[0] < max_iter) & jnp.any(state[4])
 
     zero = jnp.zeros((B,), x.dtype)
-    state = (jnp.asarray(0), u, u, jnp.ones((B,), x.dtype), jnp.ones((B,), bool))
+    state = (jnp.asarray(0), u, u, jnp.ones((B,), x.dtype), ~done)
     if max_iter > 0:
         state, _ = lax.while_loop(cond, body, (state, zero))
     it, u = state[0], state[1]

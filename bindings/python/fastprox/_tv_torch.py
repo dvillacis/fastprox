@@ -206,7 +206,25 @@ def per_image(gamma, B, x):
 def solve(x, gamma, w, iso, tol, max_iter, u0, sw=None):
     """(z, u, gap per image, iterations, converged) for x of shape (B, *img),
     gamma a number or one value per image, and spatial weights sw (pixel
-    weights (B, *img) or edge weights (k, B, *img)) or None."""
+    weights (B, *img) or edge weights (k, B, *img)) or None. An image holding
+    a NaN (or, from JAX under jit, an Inf) is not solved: z, u and its gap
+    are NaN, it takes no iterations and counts as finished (audits A8, P8)."""
+    bad = ~torch.isfinite(x).flatten(1).all(1)
+    if bool(bad.any()):
+        mask = bad.reshape((-1,) + (1,) * (x.dim() - 1))
+        z, u, gap, it, _ = _solve(torch.where(mask, torch.zeros_like(x), x), gamma, w, iso, tol, max_iter,
+                                  u0, sw, bad)
+        nan = torch.full_like(gap, float("nan"))
+        z = torch.where(mask, torch.full_like(z, float("nan")), z)
+        u = torch.where(mask.unsqueeze(0), torch.full_like(u, float("nan")), u)
+        gap = torch.where(bad, nan, gap)
+        target = tol * (x * x).flatten(1).sum(1) / 2
+        return z, u, gap, it, bool((gap <= target)[~bad].all())
+    return _solve(x, gamma, w, iso, tol, max_iter, u0, sw, None)
+
+
+def _solve(x, gamma, w, iso, tol, max_iter, u0, sw, done):
+    """solve's iteration; images where done is set take no iterations."""
     prob = Problem(x, w, iso)
     gamma = per_image(gamma, prob.B, x)
     if sw is None:
@@ -221,6 +239,8 @@ def solve(x, gamma, w, iso, tol, max_iter, u0, sw=None):
     u = torch.zeros((prob.k,) + tuple(x.shape), dtype=x.dtype, device=x.device) if u0 is None \
         else prob.proj(u0.to(dtype=x.dtype, device=x.device).clone(), radius)
     none = not bool((gamma > 0).any()) or (sw is not None and not bool((radius > 0).any()))
+    if done is not None and bool(done.all()):
+        max_iter = 0  # nothing to solve: every image is finished
     if L == 0.0 or none or max_iter <= 0:
         u = torch.zeros_like(u) if L == 0.0 or none else u
         z, g, gap = prob.gap(x, u, gamma)
@@ -229,10 +249,10 @@ def solve(x, gamma, w, iso, tol, max_iter, u0, sw=None):
     target = tol * prob.isum(x * x) / 2
     v = u.clone()
     t = torch.ones(prob.B, dtype=x.dtype, device=x.device)
-    live = torch.ones(prob.B, dtype=torch.bool, device=x.device)
+    live = torch.ones(prob.B, dtype=torch.bool, device=x.device) if done is None else ~done
     gap = None
     it = 0
-    all_live = True
+    all_live = done is None
     while it < max_iter:
         up = prob.proj(prob.ascent(v, prob.primal(x, v), tau), radius)
         it += 1
