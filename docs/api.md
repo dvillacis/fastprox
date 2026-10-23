@@ -1040,8 +1040,12 @@ gx, grads = wiso.vjp(ctx, np.ones_like(img))                 # grads.pixel_weigh
 ```
 
 - **Inputs** must be float32 or float64 NumPy arrays; other dtypes raise
-  `TypeError` unless `copy=True` is passed. Lists are converted to float64.
-  Strided and reversed views are used without copying.
+  `TypeError` unless `copy=True` is passed. Non-NumPy inputs (lists, PyTorch
+  and JAX arrays, memoryviews) are converted with `numpy.asarray`: float32 and
+  float64 are kept, other real types become float64, and complex inputs raise
+  `TypeError` (since 1.0). Strided and reversed views are used without copying.
+- **Threads.** Calls on one `Context` are serialised (since 1.0); for parallel
+  derivatives use one context per thread.
 - **Common keywords:** `axis` (default −1), `out` (preallocated output, may
   be the input), `threads` (0 = `fp.default_threads()`).
 - **`keep=True`** returns `(z, ctx)`. Pass `ctx=ctx` to a later `prox` call
@@ -1049,15 +1053,21 @@ gx, grads = wiso.vjp(ctx, np.ones_like(img))                 # grads.pixel_weigh
   (`gap`, `iters`, `ties`).
 - **`dparams`** is a flat vector of length `op.nparams` or a dict by
   parameter name; **`grads`** exposes the same names as attributes.
-  `Soft` also reports `grads.lam`.
+  `Soft` also reports `grads.lam`, and `dparams` accepts `lam` too (since 1.0;
+  as for `L1Box` and `Lq`, and `radius` for `SpectralNormBall`). An unknown
+  name, or a size that is neither the parameter's nor 1, raises `ValueError`
+  (since 1.0).
 - **Iterative operators** (`TVAniso`): `solve` and the one-shot function
   return `(z, info)`, where `info` is an `IterInfo`: `gap`, `iters`, `ties`,
   `converged` (False when `max_iter` was reached; this is not an error) and
   `dual`. `prox` and `prox_conj` take `tol`, `max_iter`, `warm_start=dual` and
   `warm=True` (start from the dual of the previous call on `ctx`).
 - **Errors** map to `ValueError` (invalid arguments, parameters, shapes),
-  `TypeError` (dtype), `MemoryError` and `RuntimeError`. The GIL is released
-  during every computation.
+  `TypeError` (dtype), `MemoryError` and `RuntimeError`; an error from the C
+  library names its entry point, as in `fp_prox: invalid operator parameter or
+  step` (since 1.0). The GIL is released in every call whose cost grows with
+  its data: computations, operator constructors, workspace creation, and the
+  dual and kink copies.
 
 ### PyTorch and JAX (*since 0.3*)
 

@@ -21,8 +21,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `fp_workspace_set_stream` and `fp_workspace_get_stream`, for device workspaces.
   - Tests: CTest runs the loader against a stub plugin, a plugin of another version, a missing one and an empty `FASTPROX_CUDA_PLUGIN`.
 
+### Changed
+
+- Non-NumPy array-likes keep float32: PyTorch and JAX arrays, memoryviews and `array('f')` are converted with `numpy.asarray`, without a copy where they export a buffer, instead of being cast to float64 (audit P5). Lists and other real types still become float64. Complex inputs raise `TypeError`; before, they lost their imaginary part with a `ComplexWarning`. The PyProximal adapter does the same, and converts float16 to float64.
+- `dparams` rejects unknown names and wrong sizes with a `ValueError` that lists the operator's parameters (audit P6). Before, a typo gave a zero tangent. It also accepts the derived names `lam` (Soft, L1Box, Lq) and `radius` (SpectralNormBall).
+- Clearer errors at the Python boundary (audit P7):
+  - PyTorch tensors of other dtypes raise "fastprox operates on float32 and float64 tensors";
+  - a read-only `out`, a float `axis` and `threads < 0` raise before the binding;
+  - the one-shot functions reject an array `gamma` with a pointer to the operator classes, and an out-of-range `axis` with its value;
+  - `branch` values other than −1, 0 and 1 raise;
+  - errors from the C library name their entry point (`fp_prox: …`).
+
 ### Fixed
 
+- Calls on one Python `Context` are serialised by a lock (audit P3). Its workspace's scratch, branch override and derivative tolerance are shared, and the GIL is released during the C calls. 4 threads making derivative calls on one context gave wrong results in 80 of 80 isotropic TV vjps (by up to 3.9e262) and in 118 of 120 soft-thresholding jvps with a branch. The cost on a tiny call is under 0.03 µs.
+- The Python bindings release the GIL in operator constructors, workspace creation, and the dual and kink copies (audit P4). Building `GraphTV` on 2·10⁶ nodes held it for 255 ms.
 - Row operators' workspaces hold per-thread scratch for at most as many threads as there are rows (audit C2). Before, one row of 2²³ samples for 1D TV allocated 10.6 GB at 15 threads instead of 704 MB. Pages were touched lazily, so the time was the same, but with strict overcommit, or Windows commit accounting, the call could fail with `FP_ENOMEM`. Spectral derivatives size their scratch the same way.
 - Thread counts are capped at 4 times the CPUs the process may run on, and at 4096 (audit C3). `fp_options.threads = 100000` on soft thresholding of 2²⁶ entries created 4095 permanent pool threads, and the call took 14× longer than serially. The environment variables are capped the same way.
 - A `parallel_run` from inside a pool job now runs serially on its thread (audit C10). From the caller's thread it called `try_lock` on a mutex that thread already held, which is undefined behaviour. No kernel nests today, so this is a guard for future kernels.
