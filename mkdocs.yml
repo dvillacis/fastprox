@@ -27,6 +27,7 @@ nav:
       - Design specification: spec.md
       - Roadmap: roadmap.md
       - Audit of 2026-10-22: audit-2026-10.md
+      - User feedback of 2026-10-23: feedback-2026-10.md
       - Changelog: changelog.md
 
 theme:
