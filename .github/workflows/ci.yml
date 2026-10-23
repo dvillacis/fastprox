@@ -45,9 +45,13 @@ jobs:
       - name: Profiler
         if: runner.os != 'Windows'
         run: |
-          c++ -O2 -std=c++17 bench/profile_kernels.cpp src/core/parallel.cpp -Iinclude -Isrc \
+          c++ -O2 -g -std=c++17 bench/profile_kernels.cpp src/core/parallel.cpp -Iinclude -Isrc \
             -Lbuild -lfastprox -ldl -pthread -Wl,-rpath,build -o build/profile_kernels
-          build/profile_kernels core elem
+          if command -v gdb >/dev/null; then
+            gdb -q -batch -ex run -ex bt --args build/profile_kernels core elem
+          else
+            build/profile_kernels core elem
+          fi
 
   sanitizers:
     runs-on: ubuntu-latest

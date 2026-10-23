@@ -10,3 +10,16 @@
    ...
    fun:*Pool4grow*
 }
+
+# The same for the threads test_concurrent_callers starts itself before it
+# forks under load (audit C6): their std::thread state lives on in the
+# parent only.
+{
+   test-thread-state-after-fork
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:_Znwm
+   ...
+   fun:*test_concurrent_callers*
+}
