@@ -23,7 +23,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- The valgrind CI job builds at `-O1 -g` instead of `-O0`, installs valgrind without refreshing the package index first, and runs `test_core` with `FASTPROX_TEST_LIGHT=1`. That runs the tests sized for throughput and concurrency small and skips the fork stress, whose code paths ASan, TSan and the fuzzer cover at full size. Before, the job took 9–29 minutes, most of it `-O0` code under memcheck and the 256 × 1000 elementwise checks of audit C5.
+- The valgrind CI job builds at `-O1 -g` instead of `-O0`, installs valgrind from packages kept in the Actions cache (the Ubuntu mirror served them at 15–45 kB/s on some runs, 8–9 minutes), and runs `test_core` with `FASTPROX_TEST_LIGHT=1`. That runs the tests sized for throughput and concurrency small and skips the fork stress, whose code paths ASan, TSan and the fuzzer cover at full size. The job takes about 4.5 minutes; before, it took 9–29, most of it `-O0` code under memcheck and the 256 × 1000 elementwise checks of audit C5.
+- Row operators along a strided axis gather and scatter their rows in tiles of up to 16 (audit C8). Rows are read b at a time, neighbouring elements together, rather than one cache line per element. 1D TV on a (256, 4096) C-order array along axis 0 took 8.9 ms instead of 13.8 ms (the same rows stored contiguously: 8.0 ms). The prox, the conjugate, jvp and vjp give the same bits as before. A row operator's workspace holds 64 KiB more per thread for the tiles.
 - Elementwise prox loops run on by-value kernels (audit C4): soft thresholding, the elastic net, Huber, the box, the nonnegative orthant, the log barrier and ℓ1 over a box hand their per-call constants to the loop as plain values, so the compiler vectorises it, in place too. On 2^16 entries, one thread, Apple M5 Pro, in ns per entry (out of place / in place):
 
   | Operator | Before | After |

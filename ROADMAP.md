@@ -208,7 +208,7 @@ its row to the decisions table when it lands.
 - [x] C5: Elementwise jvp and vjp: register accumulators, branch-free pieces, skip unrequested sums — [spec](docs/audit-2026-10.md#c5)
 - [x] C6: Pool: close the job when its pieces are done, instead of waiting for every worker — [spec](docs/audit-2026-10.md#c6)
 - [x] C7: Grain: pieces scaled to the thread count for prox and jvp — [spec](docs/audit-2026-10.md#c7)
-- [ ] C8: Strided operator axis: gather and scatter rows in tiles — [spec](docs/audit-2026-10.md#c8)
+- [x] C8: Strided operator axis: gather and scatter rows in tiles — [spec](docs/audit-2026-10.md#c8)
 - [x] C9: Spin time as an environment knob — [spec](docs/audit-2026-10.md#c9)
 - [x] C11: A core section in `bench/profile_kernels.cpp` — [spec](docs/audit-2026-10.md#c11)
 - [ ] K6: Lq: Newton stalls near the threshold (speed) — [spec](docs/audit-2026-10.md#k6)
