@@ -1284,6 +1284,16 @@ FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op *
     });
 }
 
+FP_API fp_status fp_op_sorted_l1(const fp_array *weights, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        Vec w;
+        if (fp_status s = fp::read_vec(weights, w)) return s;
+        return fp::make_sorted_l1(std::move(w), out);
+    });
+}
+
 FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;

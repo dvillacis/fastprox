@@ -303,6 +303,10 @@ NB_MODULE(_fastprox, m) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_isotonic(pw.get(), increasing, o); });
     }, "weights"_a.none(), "increasing"_a);
+    m.def("sorted_l1", [](Params w) {
+        const ParamView pw(w);
+        return make([&](fp_op **o) { return fp_op_sorted_l1(pw.get(), o); });
+    }, "weights"_a);
     m.def("tv1d_ball", [](double alpha, std::optional<Params> w) {
         const ParamView pw(w);
         return make([&](fp_op **o) { return fp_op_tv1d_ball(alpha, pw.get(), o); });

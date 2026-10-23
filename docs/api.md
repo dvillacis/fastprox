@@ -46,6 +46,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Group Huber (*since 0.2*) | $\lambda \sum_g c_g h_\delta(\lVert z_g \rVert_2)$, $h_\delta$ as for Huber | `fp_op_group_huber(λ, δ, n, groups, G, c)` | `GroupHuber(lam, delta, groups, group_weights)`, `group_huber` | (λ, δ, c…) |
 | Group SCAD, group MCP (*since 0.2*) | $\sum_g c_g \rho(\lVert z_g \rVert_2)$, $\rho$ the SCAD or MCP penalty | `fp_op_group_scad(λ, a, …)`, `fp_op_group_mcp(λ, b, …)` | `GroupSCAD`, `GroupMCP`, `group_scad`, `group_mcp` | (λ, a or b, c…) |
 | Monotone cone | $z_1 \le \dots \le z_n$ (or $\ge$), weighted least squares | `fp_op_isotonic(w, increasing)` | `Isotonic(weights, increasing)`, `isotonic` | w (empty if none) |
+| Sorted ℓ1 (OWL, SLOPE; *since 1.0*) | $\sum_k w_k \lvert z \rvert_{(k)}$, magnitudes in decreasing order, $w_1 \ge w_2 \ge \dots \ge 0$ | `fp_op_sorted_l1(w)` | `SortedL1(weights)` | w (one per entry, or 1) |
 | 1D total variation | $\sum_i w_i \lvert z_{i+1} - z_i \rvert$ | `fp_op_tv1d(w, method)` | `TV1D(weights, method)`, `tv1d` | w (scalar or n − 1 edges) |
 | 1D TV ball (*since 0.2*) | $\sum_i w_i \lvert z_{i+1} - z_i \rvert \le \alpha$ | `fp_op_tv1d_ball(α, w)` | `TV1DBall(alpha, weights)`, `project_tv1d_ball` | (α, w…) |
 | 1D TV, ℓ2 of differences (*since 0.2*) | $\bigl(\sum_i w_i^2 (z_{i+1} - z_i)^2\bigr)^{1/2}$ | `fp_op_tv1d_l2(w)` | `TV1DL2(weights)`, `tv1d_l2` | w (scalar or n − 1 edges) |
@@ -133,6 +134,19 @@ Notes:
   Morrison), so a JVP or VJP costs three $O(n)$ solves.
 - **Isotonic regression** minimises $\sum_i w_i (z_i - x_i)^2$, which is the
   Euclidean projection only for unit weights.
+- **The sorted ℓ1 norm** (*since 1.0*) sorts $\lvert x \rvert$ in decreasing
+  order (ties by index), subtracts $\gamma w$, fits a nonincreasing sequence
+  by pool-adjacent-violators, clips at 0 and puts the signs and the order
+  back (Bogdan, van den Berg, Sabatti, Su and Candès, *Ann. Appl. Stat.* 9,
+  2015, Algorithm 3), in $O(n \log n)$: 1.9× isotonic regression plus a
+  NumPy sort on rows of $10^4$. With equal weights it is soft thresholding,
+  bit for bit. The derivatives average within the pooled blocks: on a block
+  $B$ of positive value, $\partial \lvert z_i \rvert / \partial \gamma$ is minus the
+  mean of $w$ over $B$ and $\partial \lvert z_i \rvert / \partial w_k = -\gamma /
+  \lvert B \rvert$ for each weight position $k$ in $B$. It is absolutely
+  symmetric, so on singular values it gives the weighted nuclear norm
+  $\sum_k w_k \sigma_k$ (`WeightedNuclearNorm`). Kinks (two blocks with equal
+  values, a block at 0) are not reported, as for isotonic regression.
 - **1D TV methods:** `FP_TV1D_AUTO` (default) runs Condat's direct
   algorithm (generalised to per-edge weights) and falls back to the taut
   string when it backtracks too much (more than $3n + 1024$ rescanned steps,
@@ -509,6 +523,7 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | 1D TV ball | adjacent segments with equal values | as for 1D TV, at the step $\gamma^\star$ |
 | 1D TV, ℓ2 of differences | the dual minimiser on the sphere, $\lVert u_0 \rVert = \gamma$ | inside: piecewise averaging |
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
+| sorted ℓ1 | adjacent blocks with equal values; a block at 0 | blocks not pooled; the block at 0 thresholded |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | an edge with no jump whose dual is on its bound | not joined: its two sides averaged apart, with the sign of the dual |
 | ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
@@ -1357,8 +1372,11 @@ x = pyproximal.optimization.primal.ProximalGradient(f, g, x0, tau=0.9, epsg=0.02
 `fp.Spectral(op, kind="svd")` applies an operator to the singular values of
 each matrix in the last two axes; `kind="eigh"` applies it to the
 eigenvalues of symmetric matrices, an input that is not symmetric being
-replaced by $(X + X^\top)/2$. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)`
-and `fp.PSD()` are shorthands.
+replaced by $(X + X^\top)/2$. `fp.NuclearNorm(lam)`, `fp.SpectralNormBall(r)`,
+`fp.PSD()` and `fp.WeightedNuclearNorm(w)` (*since 1.0*: $\sum_k w_k \sigma_k$
+with $w$ nonincreasing, `Spectral(SortedL1(w))`) are shorthands. Unequal
+weights in a fixed order are refused, since $\sum_i w_i \lvert s_i \rvert$ is
+not a function of the singular values; the error points to `SortedL1`.
 
 ```python
 op = fp.NuclearNorm(0.5)                 # = fp.Spectral(fp.Soft(0.5))

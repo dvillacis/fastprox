@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- The sorted ℓ1 norm (OWL, SLOPE) and the weighted nuclear norm (feedback U5):
+  - **The operator.** `fp_op_sorted_l1(w)` and `fp.SortedL1(weights)`: $g(z) = \sum_k w_k \lvert z \rvert_{(k)}$ with nonincreasing weights $w \ge 0$. Its prox, by a sort and pool-adjacent-violators (Bogdan et al., 2015), costs O(n log n): 1.9× isotonic regression plus a NumPy sort on rows of 10⁴. With equal weights it is soft thresholding, bit for bit. Derivatives in x, the step and the weights average over the pooled blocks.
+  - **On matrices.** `fp.WeightedNuclearNorm(w)`, i.e. $\sum_k w_k \sigma_k(X)$, is `Spectral(SortedL1(w))`. Before, unequal weights were refused with no alternative; the refusal now points to these two.
+  - **Tests.** Against cvxpy where blocks pool, the `CASES` suite, finite differences at ties of the singular values, and the fuzzer.
 - Derivatives of iterative TV at loose tolerances (feedback U4):
   - **Report.** `ctx.deriv` is a `DerivInfo(residual, iters, exact, smoothing)`. `exact` says whether the derivative at the saved point is exact: anisotropic TV once its polish certified the regions, graph TV when no part was stopped by `tol`, tree TV and the closed-form operators always. Isotropic TV is exact only without smoothing, and `smoothing` is its curvature cap μ, in the units of x. In C, `fp_workspace_deriv_exact(ws, &exact, &smoothing)`.
   - **A warning.** A derivative that is not exact, at a certified error of z above 1e-4 (inside `inner_accuracy`, above its ztol), raises `AccuracyWarning` once per point. Before, a loose solve gave a biased hypergradient without a sign: 3% for isotropic TV after a 1e-6 solve on 2 × 128² images.

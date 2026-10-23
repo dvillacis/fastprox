@@ -208,6 +208,16 @@ FP_API fp_status fp_op_soc(fp_op **out);
  * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL). */
 FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op **out);
 
+/* The sorted l1 norm (OWL, SLOPE; since 1.0): g(z) = sum_k w_k |z|_(k) along
+ * the axis, with |z|_(1) >= |z|_(2) >= ... the magnitudes in decreasing order.
+ * weights: the axis length or length 1 (then soft thresholding), finite,
+ * >= 0 and nonincreasing, w_1 >= w_2 >= ... (FP_EPARAM otherwise). Prox by a
+ * sort and pool-adjacent-violators (Bogdan et al., Ann. Appl. Stat. 2015),
+ * O(n log n); ties in |x| are ordered by index. Absolutely symmetric, so on
+ * singular values it is the weighted nuclear norm sum_k w_k sigma_k
+ * (fp_op_spectral_check). theta = w. */
+FP_API fp_status fp_op_sorted_l1(const fp_array *weights, fp_op **out);
+
 /* g(z) = sum_i w_i |z_{i+1} - z_i| along the axis. edge_weights: NULL (w = 1),
  * length 1, or axis length - 1, all >= 0. theta = w. */
 FP_API fp_status fp_op_tv1d(const fp_array *edge_weights, fp_tv1d_method method,

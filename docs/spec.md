@@ -90,6 +90,7 @@ Version 1 ships 20 operators in five groups. Seventeen are exact, by closed form
 | ℓ1 ball, weighted ℓ1 ball | indicator | simplex projection of the magnitudes | as simplex | yes | 0.1 |
 | ℓ∞ norm | ‖x‖∞ | Moreau identity with the ℓ1-ball projection | as simplex | yes | 0.1 |
 | Monotone cone | isotonic regression | pool-adjacent-violators | O(n) | yes | 0.1 |
+| Sorted ℓ1 (OWL, SLOPE) | $\sum_k w_k \lvert z \rvert_{(k)}$, $w$ nonincreasing | sort, then pool-adjacent-violators (Bogdan et al. 2015) | O(n log n) | yes | 1.0 |
 | **1D total variation** |  |  |  |  |  |
 | 1D TV | ∑ \|z\_{i+1} − z\_i\| | Condat's direct algorithm; taut string as a second path | O(n) for taut string; Condat linear in practice | yes | 0.1 |
 | Weighted 1D TV | ∑ w\_i \|z\_{i+1} − z\_i\| | weighted taut string | linear in practice | yes | 0.1 |
@@ -127,7 +128,7 @@ A spectral operator applies one of the operators above to the singular values or
 | | ℓ1 ball; ℓ∞ prox; box with lower = −upper; ℓ2 ball | nuclear-norm ball; spectral norm; spectral-norm ball; Frobenius ball |
 | Eigenvalues | the above, and the nonnegative orthant, box, simplex, log barrier | PSD cone; eigenvalue bounds; spectraplex (PSD with trace r); −log det |
 
-Each operator reports whether it is permutation invariant and whether it is even. Weighted variants qualify only with equal weights. Others, such as isotonic regression and 1D TV, are rejected with FP\_EINVAL. Not covered are symmetric penalties with no vector prox in fastprox, such as the truncated nuclear norm.
+Each operator reports whether it is permutation invariant and whether it is even. Weighted variants qualify only with equal weights; the sorted ℓ1 norm qualifies with any nonincreasing weights, which gives the weighted nuclear norm. Others, such as isotonic regression and 1D TV, are rejected with FP\_EINVAL. Not covered are symmetric penalties with no vector prox in fastprox, such as the truncated nuclear norm.
 
 **Derivatives.** Let z = f(s) be the prox on the spectrum and J its Jacobian, which fp\_jvp already provides. Take the SVD kind with A = Uᵀ H V (k × k), and let A\_s and A\_k be its symmetric and skew parts. The derivative of the spectral map in the direction H is Theorem 3.3 of Ding, Sun, Sun and Toh (2018), equation (54), written there for m ≤ n. The map is differentiable at X exactly when f is differentiable at s, and continuously so exactly when f is (their Theorems 3.3 and 3.4). The eigenvalue case is Lewis and Sendov (2001), with Daleckii and Krein (1965) behind both.
 

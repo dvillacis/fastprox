@@ -302,6 +302,25 @@ the 1.0 ABI before it freezes, and need no "since" note.
 - **Spectral:** `WeightedNuclearNorm` against a direct minimisation on 6 × 5 matrices, and its derivatives at tied singular values.
 - **Errors:** increasing weights give FP_EPARAM.
 
+**As implemented.** As designed, in `src/ops/sorted_l1.cpp`, with these details:
+- **Sort keys.** The sort is of (|x|, index) keys, contiguous in the row's scratch, ties by index. Sorting indices compared through x cost 2.28× the acceptance baseline; the keys cost 1.90×, measured on 64 rows of 10⁴ against `Isotonic` plus `np.sort`.
+- **Pooling.** It works on block means, so no sum can overflow. Blocks merge only on a strict violation, which makes equal weights reproduce soft thresholding bit for bit: the prox, the JVP and the input gradient. The step and weight gradients sum block by block in sorted order, so they agree with Soft's to rounding.
+- **Derivatives.** They sort the saved x again in their scratch rather than store the permutation: the saved code is one byte per entry, marking block starts.
+- **Kinks.** None are reported, as for isotonic regression, whose "kink machinery" the spec cited but which has none. Decisions row.
+- **Spectral.** `fp_op_spectral_check` accepts the operator for SVD and EIGH. `WeightedNuclearNorm(w, kind="svd")` is `Spectral(SortedL1(w))`, and the refusal of unequal weights points to both.
+
+**Tests.**
+- The `CASES` suite (`sorted_l1`, `sorted_l1_scalar`), with the reference in `tests/python/reference.py`: sort, the reference PAVA, clip.
+- `derivative_cases` in C, and the fuzzer (case 35).
+- `tests/python/test_sorted_l1.py`:
+  - cvxpy (the norm as Σₖ (wₖ − wₖ₊₁) S_k(|z|)) on rows where blocks pool;
+  - Soft bit for bit at equal weights;
+  - finite differences where blocks pool;
+  - the weighted nuclear norm's optimality against 200 random perturbations, on 6 × 5 matrices;
+  - its JVP and VJP at singular values tied three times;
+  - EIGH;
+  - the errors.
+
 **Acceptance.** The tests pass. The cost is within 2× of `Isotonic` plus a sort on rows of 10⁴.
 
 ---
