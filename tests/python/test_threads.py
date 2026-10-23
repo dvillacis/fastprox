@@ -79,7 +79,9 @@ def test_context_concurrent():
 
 def test_constructor_releases_gil():
     """Building a large graph TV operator lets other Python threads run (audit
-    P4): it held the GIL for its whole 255 ms on 2e6 nodes before."""
+    P4): it held the GIL for its whole 255 ms on 2e6 nodes before. The ticker
+    is compared with its own idle rate, since a 1 ms sleep lasts 1-6 ms
+    depending on the machine (timer coalescing on macOS runners)."""
     rng = np.random.default_rng(0)
     n = 500_000
     e = rng.integers(0, n, (4 * n, 2))
@@ -93,14 +95,18 @@ def test_constructor_releases_gil():
 
     th = threading.Thread(target=ticker)
     th.start()
-    time.sleep(0.01)
-    t0, k0 = time.perf_counter(), ticks[0]
-    fp.GraphTV(n, e)
-    ms, k1 = 1e3 * (time.perf_counter() - t0), ticks[0]
-    stop.set()
-    th.join()
-    if ms < 20:
-        pytest.skip(f"construction took {ms:.1f} ms, too short to measure")
-    # One tick per 1 ms sleep at best; a quarter of that allows for the
-    # scheduler's granularity. With the GIL held there are none.
-    assert k1 - k0 >= 0.25 * ms, (ms, k1 - k0)
+    try:
+        t0, k0 = time.perf_counter(), ticks[0]
+        time.sleep(0.1)
+        rate = (ticks[0] - k0) / (1e3 * (time.perf_counter() - t0))  # ticks per ms, idle
+        t0, k0 = time.perf_counter(), ticks[0]
+        fp.GraphTV(n, e)
+        ms, during = 1e3 * (time.perf_counter() - t0), ticks[0] - k0
+    finally:
+        stop.set()
+        th.join()
+    expected = rate * ms
+    if expected < 8:
+        pytest.skip(f"construction took {ms:.1f} ms, {expected:.1f} idle ticks: too short to measure")
+    # With the GIL held the ticker gets at most one tick in.
+    assert during >= 0.3 * expected, (ms, rate, during)
