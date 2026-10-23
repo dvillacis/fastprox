@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <chrono>
 #include <functional>
 #include <new>
 #include <random>
@@ -19,6 +20,7 @@
 #include <vector>
 
 #if !defined(_WIN32)
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -536,6 +538,39 @@ static void test_batching() {
         CHECK(grads[0] == grads[1] && grads[0] == grads[2]);
         fp_op_free(op);
     }
+
+    // Pieces scaled to the thread count (audit C7): prox and jvp of short rows
+    // and of one long elementwise row are the same bits for every count, and
+    // the vjp's parameter gradients, whose blocks do not depend on it, too.
+    fp_op *soft, *tv;
+    CHECK_OK(fp_op_soft(0.4, nullptr, &soft));
+    CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+    for (fp_op *op : {soft, tv})
+        for (auto shape : {std::vector<int64_t>{2048, 16}, std::vector<int64_t>{4096, 16},
+                           std::vector<int64_t>{1, 32768}}) {
+            const int64_t N = shape[0] * shape[1];
+            Arr x(shape, randn(N, 2.0)), dx(shape, randn(N)), g(shape, randn(N));
+            std::vector<Vec> zs, dzs, gps;
+            for (int t : {1, 2, 3, 8, 15}) {
+                fp_options o = opts(-1, t, 1);
+                fp_workspace *ws;
+                Arr z(shape), dz(shape), gx(shape);
+                CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+                CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+                CHECK_OK(fp_jvp(op, ws, &dx.a, 0.3, nullptr, &dz.a));
+                Arr gp({std::max<int64_t>(fp_op_nparams(op), 1)});
+                double gg = 0.0;
+                CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, fp_op_nparams(op) ? &gp.a : nullptr));
+                gp.data.push_back(gg);
+                zs.push_back(z.data);
+                dzs.push_back(dz.data);
+                gps.push_back(gp.data);
+                fp_workspace_free(ws);
+            }
+            for (size_t i = 1; i < zs.size(); ++i) CHECK(zs[i] == zs[0] && dzs[i] == dzs[0] && gps[i] == gps[0]);
+        }
+    fp_op_free(soft);
+    fp_op_free(tv);
 }
 
 // ---------------------------------------------------------------- anisotropic TV
@@ -2411,6 +2446,26 @@ static void test_concurrent_callers() {
     for (auto &t : callers) t.join();
     CHECK(failures.load() == 0);
 
+    // Eight callers at the default thread count on 512 x 512 (audit C6): one
+    // holds the pool at a time, the others run serially, every result exact.
+    {
+        Arr xb({512, 512}, randn(512 * 512)), rb({512, 512});
+        CHECK_OK(fp_prox(op, 0.5, &xb.a, &rb.a, &serial, nullptr, nullptr));
+        std::deque<Arr> zb;
+        for (int k = 0; k < 8; ++k) zb.emplace_back(std::vector<int64_t>{512, 512});
+        std::atomic<int> bad{0};
+        std::vector<std::thread> ts;
+        for (int k = 0; k < 8; ++k)
+            ts.emplace_back([&, k] {
+                fp_options o = opts(-1, 0);
+                for (int rep = 0; rep < 20; ++rep)
+                    if (fp_prox(op, 0.5, &xb.a, &zb[k].a, &o, nullptr, nullptr) != FP_OK || zb[k].data != rb.data)
+                        ++bad;
+            });
+        for (auto &t : ts) t.join();
+        CHECK(bad.load() == 0);
+    }
+
 #if !defined(_WIN32) && !defined(FP_TSAN)  // TSan cannot start threads after fork
     Arr z({rows, n});
     fp_options o = opts(-1, 4);
@@ -2426,6 +2481,51 @@ static void test_concurrent_callers() {
     int status = -1;
     CHECK(pid > 0 && waitpid(pid, &status, 0) == pid);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    // Forks while another thread keeps the pool busy (audit C6): each child
+    // builds its own pool and computes the serial result, within 5 s.
+    {
+        fp_op *sop;
+        CHECK_OK(fp_op_soft(0.3, nullptr, &sop));
+        const int64_t m = int64_t(1) << 20;
+        Arr xs({m}, randn(m)), rs({m});
+        CHECK_OK(fp_prox(sop, 1.0, &xs.a, &rs.a, &serial, nullptr, nullptr));
+        std::atomic<bool> stop{false};
+        std::thread busy([&] {
+            Arr zz({m});
+            fp_options o8 = opts(-1, 8);
+            while (!stop.load()) fp_prox(sop, 1.0, &xs.a, &zz.a, &o8, nullptr, nullptr);
+        });
+        int ok = 0;
+        for (int f = 0; f < 20; ++f) {
+            std::fflush(nullptr);
+            const pid_t child = fork();
+            if (child == 0) {
+                Arr zc({m});
+                fp_options o8 = opts(-1, 8);
+                bool good = true;
+                for (int rep = 0; rep < 5; ++rep)
+                    good = good && fp_prox(sop, 1.0, &xs.a, &zc.a, &o8, nullptr, nullptr) == FP_OK && zc.data == rs.data;
+                _exit(good ? 0 : 1);
+            }
+            if (child < 0) continue;
+            int st = -1;
+            bool done = false;
+            for (int wait = 0; wait < 500 && !done; ++wait) {  // up to 5 s
+                done = waitpid(child, &st, WNOHANG) == child;
+                if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (!done) {
+                kill(child, SIGKILL);
+                waitpid(child, &st, 0);
+            }
+            ok += done && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        stop = true;
+        busy.join();
+        CHECK(ok == 20);
+        fp_op_free(sop);
+    }
 #endif
     fp_op_free(op);
 }

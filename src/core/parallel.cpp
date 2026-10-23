@@ -1,8 +1,10 @@
 // Thread pool for the batching layer; see parallel.hpp.
 //
 // One pool per process, created on first use and grown to the largest thread
-// count requested. Between jobs workers spin briefly, then sleep on a
-// condition variable. The
+// count requested. Between jobs workers spin briefly (FASTPROX_SPIN_US, 50
+// µs by default), then sleep on a condition variable. A call returns once
+// every piece is done and every worker that entered the job has left; it
+// does not wait for workers still waking up (audit C6). The
 // pool is never destroyed: joining threads from static destructors can
 // deadlock (under the Windows loader lock, for instance), and the threads end
 // with the process. After fork() the child has none of the parent's threads,
@@ -81,8 +83,21 @@ long process_id() noexcept {
 }
 
 // Spin this long before sleeping, so that back-to-back calls (a solver loop)
-// find their workers awake, as OpenMP runtimes do.
-constexpr auto kSpin = std::chrono::microseconds(50);
+// find their workers awake, as OpenMP runtimes do: FASTPROX_SPIN_US
+// microseconds, read once, from 0 (sleep at once) to 100 000, default 50
+// (audit C9).
+std::chrono::microseconds spin_time() noexcept {
+    static const std::chrono::microseconds t = [] {
+        long v = 50;
+        if (const char *s = std::getenv("FASTPROX_SPIN_US")) {
+            char *end = nullptr;
+            const long u = std::strtol(s, &end, 10);
+            if (end != s && *end == '\0' && u >= 0) v = std::min(u, 100000L);
+        }
+        return std::chrono::microseconds(v);
+    }();
+    return t;
+}
 
 // Set while this thread runs pieces of a pool job, so that a nested
 // parallel_run runs serially instead of locking run_m_ again (audit C10:
@@ -106,10 +121,13 @@ inline void cpu_relax() noexcept {
 #endif
 }
 
-// Spins on pred() for up to kSpin; true when it became true.
+// Spins on pred() for up to spin_time(); true when it became true. With a
+// spin time of 0, one check.
 template <class Pred>
 bool spin_until(Pred pred) noexcept {
-    const auto end = std::chrono::steady_clock::now() + kSpin;
+    const auto spin = spin_time();
+    if (spin.count() == 0) return pred();
+    const auto end = std::chrono::steady_clock::now() + spin;
     for (;;) {
         for (int i = 0; i < 64; ++i) {
             if (pred()) return true;
@@ -125,6 +143,12 @@ class Pool {
     long pid() const noexcept { return pid_; }
 
     // False when another caller holds the pool.
+    //
+    // The job is announced in ctl_ (generation, CLOSED, workers allowed in,
+    // workers inside). The caller works too, closes the job once every piece
+    // is claimed, and waits only for the workers inside it: a worker that
+    // wakes late finds the job closed and goes back to wait. The job fields
+    // are written only while no worker is inside a job.
     bool run(int nt, int64_t count, int64_t grain, ChunkFn fn, void *ctx) noexcept {
         std::unique_lock<std::mutex> busy(run_m_, std::try_to_lock);
         if (!busy.owns_lock()) return false;
@@ -135,20 +159,23 @@ class Pool {
         count_ = count;
         grain_ = grain;
         next_.store(0, std::memory_order_relaxed);
-        pending_.store(nw, std::memory_order_relaxed);
         {
-            // Generation and participant count in one word, so that a worker
-            // reads a consistent pair; the job fields above are published with it.
+            // The job fields above are published with the new generation.
             std::lock_guard<std::mutex> lk(m_);
-            const uint64_t gen = (state_.load(std::memory_order_relaxed) >> 16) + 1;
-            state_.store(gen << 16 | static_cast<uint64_t>(nw), std::memory_order_release);
+            const uint64_t gen = gen_of(ctl_.load(std::memory_order_relaxed)) + 1;
+            ctl_.store(gen << kGenShift | static_cast<uint64_t>(nw) << kNwShift, std::memory_order_release);
         }
         if (nw > 0) wake_.notify_all();
-        work(0);
-        const auto done = [&] { return pending_.load(std::memory_order_acquire) == 0; };
-        if (!spin_until(done)) {
-            std::unique_lock<std::mutex> lk(m_);
-            done_.wait(lk, done);
+        work(0);  // returns once every piece is claimed
+        const uint64_t w = ctl_.fetch_or(kClosed, std::memory_order_acq_rel) | kClosed;
+        if (active_of(w) != 0) {
+            // The workers inside finish their pieces; their decrements release
+            // their output to this acquire.
+            const auto done = [&] { return active_of(ctl_.load(std::memory_order_acquire)) == 0; };
+            if (!spin_until(done)) {
+                std::unique_lock<std::mutex> lk(m_);
+                done_.wait(lk, done);
+            }
         }
         return true;
     }
@@ -169,9 +196,9 @@ class Pool {
         if (have >= want) return;
         try {
             threads_.reserve(static_cast<size_t>(want));
-            // A new worker starts from the current generation, so it takes
-            // part in the job about to be posted however late it starts.
-            const uint64_t gen = state_.load(std::memory_order_relaxed) >> 16;
+            // A new worker starts from the current generation, so it enters
+            // the job about to be posted if it starts before that job closes.
+            const uint64_t gen = gen_of(ctl_.load(std::memory_order_relaxed));
             for (; have < want; ++have) {
                 threads_.emplace_back([this, have, gen] { worker(have, gen); });
                 nthreads_.store(have + 1, std::memory_order_relaxed);
@@ -183,23 +210,45 @@ class Pool {
 
     void worker(int index, uint64_t seen) noexcept {
         for (;;) {
-            const auto posted = [&] {
-                return (state_.load(std::memory_order_acquire) >> 16) != seen;
-            };
+            const auto posted = [&] { return gen_of(ctl_.load(std::memory_order_acquire)) != seen; };
             if (!spin_until(posted)) {
                 std::unique_lock<std::mutex> lk(m_);
                 wake_.wait(lk, posted);
             }
-            const uint64_t st = state_.load(std::memory_order_acquire);
-            seen = st >> 16;
-            if (index >= static_cast<int>(st & 0xffff)) continue;
+            // Enter the open job, if this worker is allowed in and it is not
+            // closed yet; otherwise note its generation and wait for the next.
+            // A worker that slept through several jobs enters whichever is
+            // open: the fields it then reads are that job's.
+            uint64_t w = ctl_.load(std::memory_order_acquire);
+            bool entered = false;
+            for (;;) {
+                if ((w & kClosed) || index >= nw_of(w)) {
+                    seen = gen_of(w);
+                    break;
+                }
+                if (ctl_.compare_exchange_weak(w, w + 1, std::memory_order_acquire, std::memory_order_acquire)) {
+                    seen = gen_of(w);
+                    entered = true;
+                    break;
+                }
+            }
+            if (!entered) continue;
             work(index + 1);
-            if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            const uint64_t left = ctl_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            if ((left & kClosed) && active_of(left) == 0) {
                 std::lock_guard<std::mutex> lk(m_);
                 done_.notify_one();
             }
         }
     }
+
+    // ctl_: generation (31 bits) << 33 | CLOSED << 32 | workers allowed in
+    // (16 bits) << 16 | workers inside (16 bits).
+    static constexpr int kGenShift = 33, kNwShift = 16;
+    static constexpr uint64_t kClosed = uint64_t(1) << 32;
+    static uint64_t gen_of(uint64_t w) noexcept { return w >> kGenShift; }
+    static int nw_of(uint64_t w) noexcept { return static_cast<int>((w >> kNwShift) & 0xffff); }
+    static int active_of(uint64_t w) noexcept { return static_cast<int>(w & 0xffff); }
 
     const long pid_;
     [[maybe_unused]] Pool *const abandoned_;  // a parent process's pool, kept reachable on purpose
@@ -208,8 +257,7 @@ class Pool {
     std::condition_variable wake_, done_;
     std::vector<std::thread> threads_;
     std::atomic<int> nthreads_{0};
-    std::atomic<uint64_t> state_{0};  // generation << 16 | participating workers
-    std::atomic<int> pending_{0};
+    std::atomic<uint64_t> ctl_{0};
     std::atomic<int64_t> next_{0};
     ChunkFn fn_ = nullptr;
     void *ctx_ = nullptr;

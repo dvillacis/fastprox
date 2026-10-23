@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `FASTPROX_SPIN_US`: the pool's spin time after a call, in microseconds (default 50, 0 to sleep at once), read once (audit C9). 1000 empty 15-thread jobs a millisecond apart burn 0.15–0.19 s of process CPU at 0, against about 0.9 s at the default.
+- `./profile_kernels core [case]` in `bench/profile_kernels.cpp` profiles the core: workspace bytes, elementwise throughput, derivatives, the pool's cold latency, the grain, strided rows and the spin (audit C11). CI builds it and runs its `elem` case.
 - The sorted ℓ1 norm (OWL, SLOPE) and the weighted nuclear norm (feedback U5):
   - **The operator.** `fp_op_sorted_l1(w)` and `fp.SortedL1(weights)`: $g(z) = \sum_k w_k \lvert z \rvert_{(k)}$ with nonincreasing weights $w \ge 0$. Its prox, by a sort and pool-adjacent-violators (Bogdan et al., 2015), costs O(n log n): 1.9× isotonic regression plus a NumPy sort on rows of 10⁴. With equal weights it is soft thresholding, bit for bit. Derivatives in x, the step and the weights average over the pooled blocks.
   - **On matrices.** `fp.WeightedNuclearNorm(w)`, i.e. $\sum_k w_k \sigma_k(X)$, is `Spectral(SortedL1(w))`. Before, unequal weights were refused with no alternative; the refusal now points to these two.
@@ -21,6 +23,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The thread pool returns once every piece is done and every worker that joined the call has left, instead of waiting for every worker to wake (audit C6). One atomic control word (generation, closed flag, workers allowed, workers inside) replaces the generation and the pending count; a worker that wakes after the call closed its job goes back to wait. On an Apple M5 Pro under heavy background load (load average 20), an empty 15-thread job took 0.6–1 µs warm (119–185 µs before) and 15–26 µs cold (91–231 µs), and soft thresholding on 2^18 entries at 15 threads 28 µs (98–198 µs).
+- The pieces of prox and jvp scale with the thread count (audit C7): about 8 row pieces per thread (at least 512 entries each) and 4 elementwise pieces per thread (8192 to 16 384 entries), instead of 16 384 entries whatever the count. 1D TV on 2^15 entries in rows of 16 at 15 threads took 43–56 µs (168–185 µs), soft on 2^15 entries 8 µs (14 µs). The vjp's blocks, which fix the order of its sums, are unchanged, so results are still bit-identical for any thread count.
 - `ctx.deriv` is a `DerivInfo` of four fields (feedback U4): `residual, iters = ctx.deriv` now fails; use the attributes. `examples/image_denoising.py` and `examples/autodiff_frameworks.py` solve to `tol=1e-8` before differentiating isotropic TV, so that their derivatives are not flagged.
 
 ## [1.0.0rc2] — 2026-10-23

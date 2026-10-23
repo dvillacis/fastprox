@@ -1,9 +1,16 @@
 // Single-thread profile of 1D TV: fastprox against proxTV, with hardware
-// counters where the machine exposes them.
+// counters where the machine exposes them; and (audit C11) a profile of the
+// core: workspace bytes, elementwise throughput, derivatives, the pool's
+// latency, the grain, strided rows and the spin's CPU time.
 //
-//   c++ -O2 -std=c++17 bench/profile_kernels.cpp -Iinclude -Lbuild/c -lfastprox -ldl \
-//       -Wl,-rpath,build/c -o profile_kernels
+//   c++ -O2 -std=c++17 bench/profile_kernels.cpp src/core/parallel.cpp -Iinclude -Isrc \
+//       -Lbuild/c -lfastprox -ldl -pthread -Wl,-rpath,build/c -o profile_kernels
 //   ./profile_kernels [path/to/libproxtv_tv1.so] [n] [reps]
+//   ./profile_kernels core [wsbytes|elem|deriv|cold|grain|strided|spin]
+//
+// The core cases time the library through its C API, except cold's empty
+// job and spin, which time the pool (src/core/parallel.cpp, compiled into
+// this binary) directly.
 //
 // proxTV is loaded at run time through the extern "C" shim that
 // bench/compare_external.py builds (build/external/libproxtv_tv1.*); without
@@ -19,6 +26,7 @@
 //
 // SPDX-License-Identifier: MIT
 #include "fastprox.h"
+#include "core/parallel.hpp"
 
 #include <dlfcn.h>
 
@@ -31,8 +39,16 @@
 #include <cstring>
 #include <functional>
 #include <random>
+#include <ctime>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #if defined(__linux__)
 #include <linux/perf_event.h>
@@ -214,7 +230,309 @@ void profile(const char *title, std::vector<Solver> &solvers, const std::string 
 
 }  // namespace
 
+namespace {
+
+// ---- core (audit C11) ----------------------------------------------------------
+
+using Clock = std::chrono::steady_clock;
+double us_since(Clock::time_point t0) {
+    return std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
+}
+// Best of reps calls of f, in microseconds.
+template <class F>
+double best_us(int reps, F &&f) {
+    double b = 1e300;
+    for (int r = 0; r < reps; ++r) {
+        const auto t0 = Clock::now();
+        f();
+        b = std::min(b, us_since(t0));
+    }
+    return b;
+}
+double quantile(std::vector<double> v, double q) {
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, static_cast<size_t>(q * static_cast<double>(v.size())))];
+}
+std::vector<double> normals(size_t n, uint64_t seed = 1) {
+    std::mt19937_64 r(seed);
+    std::normal_distribution<double> N;
+    std::vector<double> v(n);
+    for (auto &a : v) a = N(r);
+    return v;
+}
+fp_array arr(double *d, int ndim, const int64_t *shape, const int64_t *strides) {
+    fp_array a{};
+    a.data = d;
+    a.dtype = FP_F64;
+    a.ndim = ndim;
+    a.shape = shape;
+    a.strides = strides;
+    a.device = FP_DEVICE_CPU;
+    return a;
+}
+// Bytes the allocator has handed out, for the deltas around a call.
+size_t heap_in_use() {
+#if defined(__APPLE__)
+    malloc_statistics_t st;
+    malloc_zone_statistics(nullptr, &st);
+    return st.size_in_use;
+#elif defined(__GLIBC__)
+    return mallinfo2().uordblks;
+#else
+    return 0;
+#endif
+}
+fp_options topts(int threads, int keep = 0) {
+    fp_options o;
+    fp_options_init(&o);
+    o.threads = threads;
+    o.keep_structure = keep;
+    return o;
+}
+
+void core_wsbytes() {
+    std::printf("[wsbytes] tv1d, one row: workspace bytes and best-of-5 prox\n");
+    fp_op *op;
+    check(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &op), "fp_op_tv1d");
+    for (int64_t n : {int64_t(1) << 16, int64_t(1) << 20, int64_t(1) << 23}) {
+        std::vector<double> x = normals(static_cast<size_t>(n)), z(x.size());
+        const int64_t shape[1] = {n}, st[1] = {1};
+        fp_array xa = arr(x.data(), 1, shape, st), za = arr(z.data(), 1, shape, st);
+        for (int t : {1, 0}) {
+            fp_options o = topts(t);
+            fp_workspace *ws;
+            const size_t before = heap_in_use();
+            check(fp_workspace_create(op, &xa, &o, &ws), "fp_workspace_create");
+            const size_t bytes = heap_in_use() - before;
+            const double us = best_us(5, [&] { check(fp_prox(op, 1.0, &xa, &za, &o, ws, nullptr), "fp_prox"); });
+            std::printf("  n=2^%-2d t=%d  %10zu bytes  prox %9.1f us\n", static_cast<int>(std::log2(n)), t, bytes, us);
+            fp_workspace_free(ws);
+        }
+    }
+    fp_op_free(op);
+}
+
+void core_elem() {
+    std::printf("[elem] ns per entry, t=1, 2^16 entries, best of 3000\n");
+    const int64_t n = int64_t(1) << 16;
+    std::vector<double> x = normals(static_cast<size_t>(n)), z(x.size()), w(x.size(), 0.7);
+    const int64_t shape[1] = {n}, st[1] = {1}, ws1[1] = {n};
+    fp_array xa = arr(x.data(), 1, shape, st), za = arr(z.data(), 1, shape, st);
+    fp_array wa = arr(w.data(), 1, ws1, st);
+    struct Case {
+        const char *name;
+        fp_op *op;
+    };
+    std::vector<Case> cases;
+    auto add = [&](const char *name, fp_status s, fp_op *op) {
+        check(s, name);
+        cases.push_back({name, op});
+    };
+    fp_op *o;
+    add("soft", fp_op_soft(0.3, nullptr, &o), o);
+    add("soft weighted", fp_op_soft(0.3, &wa, &o), o);
+    add("elastic net", fp_op_elastic_net(0.3, 0.2, &o), o);
+    add("huber", fp_op_huber(0.5, 0.5, &o), o);
+    add("box", fp_op_box(-0.5, 0.5, nullptr, nullptr, &o), o);
+    add("nonneg", fp_op_nonneg(&o), o);
+    add("mcp", fp_op_mcp(0.3, 3.0, nullptr, &o), o);
+    add("l0", fp_op_l0(0.3, nullptr, &o), o);
+    fp_options opt = topts(1);
+    for (const Case &c : cases) {
+        const double out = best_us(3000, [&] { check(fp_prox(c.op, 1.0, &xa, &za, &opt, nullptr, nullptr), c.name); });
+        std::vector<double> y(x);
+        fp_array ya = arr(y.data(), 1, shape, st);
+        const double in = best_us(3000, [&] { check(fp_prox(c.op, 1.0, &ya, &ya, &opt, nullptr, nullptr), c.name); });
+        std::printf("  %-14s out of place %6.3f ns  in place %6.3f ns\n", c.name, 1e3 * out / n, 1e3 * in / n);
+        fp_op_free(c.op);
+    }
+    const double floor = best_us(3000, [&] {
+        for (int64_t i = 0; i < n; ++i) z[i] = std::copysign(std::max(std::fabs(x[i]) - 0.3, 0.0), x[i]);
+    });
+    std::printf("  %-14s %6.3f ns (a hand-written loop)\n", "soft floor", 1e3 * floor / n);
+}
+
+void core_deriv() {
+    std::printf("[deriv] 256 x 1000, kept structure, best of 30, us\n");
+    const int64_t shape[2] = {256, 1000}, st[2] = {1000, 1};
+    const size_t N = 256 * 1000;
+    std::vector<double> x = normals(N), z(N), g = normals(N, 2), out(N);
+    fp_array xa = arr(x.data(), 2, shape, st), za = arr(z.data(), 2, shape, st);
+    fp_array ga = arr(g.data(), 2, shape, st), oa = arr(out.data(), 2, shape, st);
+    fp_op *ops[3];
+    check(fp_op_soft(0.3, nullptr, &ops[0]), "soft");
+    check(fp_op_nonneg(&ops[1]), "nonneg");
+    check(fp_op_huber(0.5, 0.5, &ops[2]), "huber");
+    const char *names[3] = {"soft", "nonneg", "huber"};
+    for (int k = 0; k < 3; ++k)
+        for (int t : {1, 15}) {
+            fp_options o = topts(t, 1);
+            fp_workspace *ws;
+            check(fp_workspace_create(ops[k], &xa, &o, &ws), "ws");
+            const double tp = best_us(30, [&] { check(fp_prox(ops[k], 1.0, &xa, &za, &o, ws, nullptr), "prox"); });
+            const double tj = best_us(30, [&] { check(fp_jvp(ops[k], ws, &ga, 0.3, nullptr, &oa), "jvp"); });
+            std::vector<double> gp(static_cast<size_t>(std::max<int64_t>(1, fp_op_nparams(ops[k]))));
+            const int64_t pshape[1] = {fp_op_nparams(ops[k])}, pst[1] = {1};
+            fp_array pa = arr(gp.data(), 1, pshape, pst);
+            double gg = 0.0;
+            const double tv = best_us(30, [&] {
+                check(fp_vjp(ops[k], ws, &ga, &oa, &gg, pshape[0] ? &pa : nullptr), "vjp");
+            });
+            const double tv0 = best_us(30, [&] { check(fp_vjp(ops[k], ws, &ga, &oa, nullptr, nullptr), "vjp"); });
+            std::printf("  %-7s t=%-2d prox %8.1f  jvp %8.1f  vjp %8.1f  vjp(no sums) %8.1f\n", names[k], t, tp,
+                        tj, tv, tv0);
+            fp_workspace_free(ws);
+        }
+    for (fp_op *op : ops) fp_op_free(op);
+}
+
+void core_cold() {
+    std::printf("[cold] empty parallel_for: warm median of 20000, cold (300 us sleep) median and p99 of 300\n");
+    for (int nt : {4, 8, 15}) {
+        auto job = [&] { fp::parallel_for(nt, nt, 1, [](int, int64_t, int64_t) {}); };
+        std::vector<double> warm, cold;
+        for (int i = 0; i < 20000; ++i) {
+            const auto t0 = Clock::now();
+            job();
+            warm.push_back(us_since(t0));
+        }
+        for (int i = 0; i < 300; ++i) {
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+            const auto t0 = Clock::now();
+            job();
+            cold.push_back(us_since(t0));
+        }
+        std::printf("  nt=%-2d warm %6.2f us  cold median %7.2f us  p99 %7.2f us\n", nt, median(warm),
+                    median(cold), quantile(cold, 0.99));
+    }
+    std::printf("[cold] soft prox: warm and cold medians of 200, us\n");
+    fp_op *op;
+    check(fp_op_soft(0.3, nullptr, &op), "soft");
+    for (int e : {18, 20, 22}) {
+        const int64_t n = int64_t(1) << e;
+        std::vector<double> x = normals(static_cast<size_t>(n)), z(x.size());
+        const int64_t shape[1] = {n}, st[1] = {1};
+        fp_array xa = arr(x.data(), 1, shape, st), za = arr(z.data(), 1, shape, st);
+        for (int t : {1, 4, 8, 15}) {
+            fp_options o = topts(t);
+            std::vector<double> warm, cold;
+            for (int i = 0; i < 200; ++i) {
+                const auto t0 = Clock::now();
+                check(fp_prox(op, 1.0, &xa, &za, &o, nullptr, nullptr), "prox");
+                warm.push_back(us_since(t0));
+            }
+            for (int i = 0; i < 200; ++i) {
+                std::this_thread::sleep_for(std::chrono::microseconds(300));
+                const auto t0 = Clock::now();
+                check(fp_prox(op, 1.0, &xa, &za, &o, nullptr, nullptr), "prox");
+                cold.push_back(us_since(t0));
+            }
+            std::printf("  2^%d t=%-2d warm %8.1f  cold %8.1f\n", e, t, median(warm), median(cold));
+        }
+    }
+    fp_op_free(op);
+}
+
+void core_grain() {
+    std::printf("[grain] best of 7, warm, us\n");
+    const int ts[] = {1, 2, 4, 5, 8, 15};
+    fp_op *soft, *tv;
+    check(fp_op_soft(0.3, nullptr, &soft), "soft");
+    check(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv), "tv1d");
+    for (int e : {15, 16, 18, 20, 23}) {
+        const int64_t n = int64_t(1) << e;
+        std::vector<double> x = normals(static_cast<size_t>(n)), z(x.size());
+        const int64_t shape[1] = {n}, st[1] = {1};
+        fp_array xa = arr(x.data(), 1, shape, st), za = arr(z.data(), 1, shape, st);
+        std::printf("  soft 2^%-2d", e);
+        for (int t : ts) {
+            fp_options o = topts(t);
+            const double us = best_us(7, [&] { check(fp_prox(soft, 1.0, &xa, &za, &o, nullptr, nullptr), "soft"); });
+            std::printf("  t=%-2d %8.1f", t, us);
+        }
+        std::printf("\n");
+    }
+    for (int e : {15, 16, 17, 18}) {
+        const int64_t N = int64_t(1) << e, rows = N / 16;
+        std::vector<double> x = normals(static_cast<size_t>(N)), z(x.size());
+        const int64_t shape[2] = {rows, 16}, st[2] = {16, 1};
+        fp_array xa = arr(x.data(), 2, shape, st), za = arr(z.data(), 2, shape, st);
+        std::printf("  tv1d 2^%-2d in rows of 16", e);
+        for (int t : ts) {
+            fp_options o = topts(t);
+            fp_workspace *ws;
+            check(fp_workspace_create(tv, &xa, &o, &ws), "ws");
+            const double us = best_us(7, [&] { check(fp_prox(tv, 0.5, &xa, &za, &o, ws, nullptr), "tv1d"); });
+            std::printf("  t=%-2d %8.1f", t, us);
+            fp_workspace_free(ws);
+        }
+        std::printf("\n");
+    }
+    fp_op_free(soft);
+    fp_op_free(tv);
+}
+
+void core_strided() {
+    std::printf("[strided] tv1d, t=1, best of 30, us\n");
+    fp_op *tv;
+    check(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv), "tv1d");
+    std::vector<double> x = normals(4096 * 256), z(x.size());
+    struct Case {
+        const char *name;
+        int64_t shape[2], st[2];
+        int axis;
+    } cases[] = {{"(4096, 256) axis -1", {4096, 256}, {256, 1}, -1}, {"(256, 4096) axis 0", {256, 4096}, {4096, 1}, 0}};
+    for (auto &c : cases) {
+        fp_array xa = arr(x.data(), 2, c.shape, c.st), za = arr(z.data(), 2, c.shape, c.st);
+        fp_options o = topts(1);
+        o.axis = c.axis;
+        fp_workspace *ws;
+        check(fp_workspace_create(tv, &xa, &o, &ws), "ws");
+        const double us = best_us(30, [&] { check(fp_prox(tv, 0.5, &xa, &za, &o, ws, nullptr), "tv1d"); });
+        std::printf("  %-22s %9.1f\n", c.name, us);
+        fp_workspace_free(ws);
+    }
+    fp_op_free(tv);
+}
+
+void core_spin() {
+    const char *env = std::getenv("FASTPROX_SPIN_US");
+    std::printf("[spin] 1000 empty 15-thread jobs, 1 ms apart (FASTPROX_SPIN_US=%s)\n", env ? env : "unset");
+    const std::clock_t c0 = std::clock();
+    const auto t0 = Clock::now();
+    for (int i = 0; i < 1000; ++i) {
+        fp::parallel_for(15, 15, 1, [](int, int64_t, int64_t) {});
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const double cpu = static_cast<double>(std::clock() - c0) / CLOCKS_PER_SEC;
+    std::printf("  process CPU %.3f s, wall %.3f s\n", cpu, us_since(t0) * 1e-6);
+}
+
+int core_main(int argc, char **argv) {
+    const std::string which = argc > 2 ? argv[2] : "";
+    struct Entry {
+        const char *name;
+        void (*run)();
+    } entries[] = {{"wsbytes", core_wsbytes}, {"elem", core_elem},       {"deriv", core_deriv}, {"cold", core_cold},
+                   {"grain", core_grain},     {"strided", core_strided}, {"spin", core_spin}};
+    std::printf("fastprox %s, core profile\n", fp_version_string());
+    bool any = false;
+    for (const Entry &e : entries)
+        if (which.empty() || which == e.name) {
+            e.run();
+            any = true;
+        }
+    if (!any) {
+        std::fprintf(stderr, "unknown case %s\n", which.c_str());
+        return 2;
+    }
+    return 0;
+}
+
+}  // namespace
+
 int main(int argc, char **argv) {
+    if (argc > 1 && std::strcmp(argv[1], "core") == 0) return core_main(argc, argv);
     const char *ptv_path = argc > 1 && argv[1][0] ? argv[1] : nullptr;
     const int64_t n = argc > 2 ? std::atoll(argv[2]) : 100000;
     const int reps = argc > 3 ? std::atoi(argv[3]) : 21;
