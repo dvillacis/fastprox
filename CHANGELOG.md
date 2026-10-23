@@ -23,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The valgrind CI job builds at `-O1 -g` instead of `-O0`, installs valgrind without refreshing the package index first, and runs `test_core` with `FASTPROX_TEST_LIGHT=1`. That runs the tests sized for throughput and concurrency small and skips the fork stress, whose code paths ASan, TSan and the fuzzer cover at full size. Before, the job took 9–29 minutes, most of it `-O0` code under memcheck and the 256 × 1000 elementwise checks of audit C5.
 - Elementwise prox loops run on by-value kernels (audit C4): soft thresholding, the elastic net, Huber, the box, the nonnegative orthant, the log barrier and ℓ1 over a box hand their per-call constants to the loop as plain values, so the compiler vectorises it, in place too. On 2^16 entries, one thread, Apple M5 Pro, in ns per entry (out of place / in place):
 
   | Operator | Before | After |

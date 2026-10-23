@@ -61,6 +61,18 @@ void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 
 // ---------------------------------------------------------------- mini framework
 static int g_fail = 0, g_checks = 0;
+
+// FASTPROX_TEST_LIGHT=1 (the valgrind job): the tests sized for throughput
+// and concurrency run small, and the fork stress is skipped. The code paths
+// are the same; valgrind looks for uninitialised reads and leaks, which do
+// not depend on the size, and ASan, TSan and the fuzzer run the full sizes.
+static bool light() {
+    static const bool on = [] {
+        const char *s = std::getenv("FASTPROX_TEST_LIGHT");
+        return s && *s && std::strcmp(s, "0") != 0;
+    }();
+    return on;
+}
 #define CHECK(cond)                                                                   \
     do {                                                                              \
         ++g_checks;                                                                   \
@@ -2449,10 +2461,11 @@ static void test_concurrent_callers() {
     // Eight callers at the default thread count on 512 x 512 (audit C6): one
     // holds the pool at a time, the others run serially, every result exact.
     {
-        Arr xb({512, 512}, randn(512 * 512)), rb({512, 512});
+        const int64_t side = light() ? 64 : 512;
+        Arr xb({side, side}, randn(side * side)), rb({side, side});
         CHECK_OK(fp_prox(op, 0.5, &xb.a, &rb.a, &serial, nullptr, nullptr));
         std::deque<Arr> zb;
-        for (int k = 0; k < 8; ++k) zb.emplace_back(std::vector<int64_t>{512, 512});
+        for (int k = 0; k < 8; ++k) zb.emplace_back(std::vector<int64_t>{side, side});
         std::atomic<int> bad{0};
         std::vector<std::thread> ts;
         for (int k = 0; k < 8; ++k)
@@ -2483,8 +2496,9 @@ static void test_concurrent_callers() {
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
     // Forks while another thread keeps the pool busy (audit C6): each child
-    // builds its own pool and computes the serial result, within 5 s.
-    {
+    // builds its own pool and computes the serial result, within 5 s. Not in
+    // light mode: under valgrind each child takes seconds.
+    if (!light()) {
         fp_op *sop;
         CHECK_OK(fp_op_soft(0.3, nullptr, &sop));
         const int64_t m = int64_t(1) << 20;
@@ -3135,7 +3149,7 @@ static void test_refine() {
 // the same bits for every thread count and layout; and a projection's
 // gamma gradient is exactly 0, even for an infinite cotangent.
 static void test_elementwise_fast_paths() {
-    const int64_t rows = 256, n = 1000, N = rows * n;
+    const int64_t rows = light() ? 16 : 256, n = light() ? 256 : 1000, N = rows * n;
     for (const auto &c : derivative_cases(n)) {
         fp_op *op;
         CHECK_OK(c.make(&op));

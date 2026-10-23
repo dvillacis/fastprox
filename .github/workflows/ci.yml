@@ -78,10 +78,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y valgrind
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      # The image's package index usually has valgrind; refresh it only if not.
+      - run: |
+          sudo apt-get install -y --no-install-recommends valgrind ||
+            { sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind; }
+      # -O1 -g, as valgrind's manual advises: its reports stay accurate, and
+      # the run is several times faster than -O0 under memcheck's slowdown.
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O1 -g" -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O1 -g"
       - run: cmake --build build
       - name: Memcheck
+        env: { FASTPROX_TEST_LIGHT: "1" }  # throughput-sized tests small, no fork stress
         run: |
           for t in build/tests/c/test_header build/tests/c/test_core build/tests/c/test_maxflow build/tests/c/test_eibfs; do
             valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite \
