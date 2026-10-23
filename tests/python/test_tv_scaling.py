@@ -75,3 +75,29 @@ def test_huge_aniso_converges_quickly():
     op, x = setup("aniso2")
     _, info = op.solve(x * 1e280, 1e280, **KW)  # 1e280: in the step range
     assert info.converged and info.gap >= 0.0 and info.iters < 100
+
+
+def _edges(name, n):
+    if name == "tree_star":
+        return np.stack([np.zeros(n - 1, int), np.arange(1, n)], 1)
+    return np.stack([np.arange(n - 1), np.arange(1, n)], 1)
+
+
+@pytest.mark.parametrize("name", sorted(OPS) + ["graph", "tree_path", "tree_star"])
+def test_tiny_image_heavy_weights(name):
+    """An image near the smallest normal double scales up by 2^1020; that
+    checked gamma, not gamma w, so heavy weights overflowed there (fuzz,
+    2026-10-23): TreeTV returned inf and NaN, GraphTV a NaN gap, TVAniso
+    stopped unconverged. The scale-up now stops where gamma w reaches the
+    step range. The step is far above the image's variation, so the prox is
+    the image's mean."""
+    if name in OPS:
+        cls, k, shape = OPS[name]
+        op = cls(k, weights=[64.0] * k)
+    else:
+        shape = (16,)
+        op = (fp.GraphTV if name == "graph" else fp.TreeTV)(16, _edges(name, 16), weights=64.0)
+    x = np.random.default_rng(4).standard_normal(shape) * 2.0**-1021
+    z, info = op.solve(x, 1.0, **KW)
+    assert info.converged and np.isfinite(info.gap) and info.gap >= 0.0
+    np.testing.assert_allclose(z, np.full(shape, x.mean()), rtol=1e-9, atol=0)

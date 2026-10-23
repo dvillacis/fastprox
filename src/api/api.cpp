@@ -302,9 +302,7 @@ fp_status read_steps(const fp_op &op, const fp_array *sa, const Arr &x, int axis
 }
 
 // The step range (audit A1): gamma times the operator's largest parameter at
-// most 2^960, which leaves 2^64 of headroom for the kernels' sums of scaled
-// thresholds and capacities; then the operator's own check (SCAD, MCP).
-constexpr double kMaxScaledStep = 0x1p960;
+// most kMaxScaledStep (op.hpp); then the operator's own check (SCAD, MCP).
 fp_status step_ok(const fp_op &op, double g) noexcept {
     const double s = op.step_scale();
     if (s > 0.0 && !(g * s <= kMaxScaledStep)) return FP_EPARAM;

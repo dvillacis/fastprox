@@ -97,6 +97,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - ‖u₀‖² underflowed for small rows, which passed them as inside. The inside test and the iteration now run on the centred row and γ scaled by a power of two that brings the largest entry to [½, 1). Bisection runs in the exponent, so a root 150 orders of magnitude below its bracket takes a few steps, not 500.
 
   On such rows the old results were off by up to 100% of max|x|; they now agree with a 700-digit solver to 2·10⁻¹⁶. Ordinary rows change only by rounding, at the same speed. Tested in `tests/python/test_tv1d_l2.py`: the fuzz input against the closed form for two rigid blocks, and scale invariance over 2^±600 for 300 rows with weights over 150 orders of magnitude.
+- Graph TV, tree TV and image TV keep the step range when they scale up an image near the smallest normal double (found by the nightly fuzz run). The scale-up checked `gamma` but not `gamma` times the weights, so with weights above 1 the scaled capacities overflowed. A path of 8 nodes with one entry of 2.4e-308 and `gamma` = w = 3.9 gave inf and NaN from `TreeTV`. `GraphTV` returned a NaN gap and `TVAniso` stopped unconverged. The scale-up now stops where `gamma` times the largest weight reaches 2^960. The result is unchanged where nothing overflowed.
 
 ## [0.5.1] — 2026-10-21
 

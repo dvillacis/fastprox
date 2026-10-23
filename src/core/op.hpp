@@ -42,6 +42,11 @@
 
 namespace fp {
 
+// The step range (audit A1): gamma step_scale() at most 2^960, which leaves
+// 2^64 of headroom for the kernels' sums of scaled thresholds and capacities.
+// Kernels that rescale their input keep the scaled step within it too.
+constexpr double kMaxScaledStep = 0x1p960;
+
 // Derivative of one entry of an elementwise prox:
 //   dz = j dx + dg dgamma + sum_k pv[k] dtheta[pi[k]].
 struct ElemDeriv {
@@ -168,7 +173,7 @@ struct fp_op {
     virtual bool conj_homogeneous() const noexcept { return false; }
     // An upper bound on the factors the kernel multiplies its step by (lambda,
     // a weight, 1/delta, ...); 0 when it ignores the step (projections). The
-    // step range of every call is gamma step_scale() <= 2^960 (audit A1).
+    // step range of every call is gamma step_scale() <= kMaxScaledStep (audit A1).
     virtual double step_scale() const noexcept { return 1.0; }
     // Whether one row or image can use several threads on the CPU
     // (fp_op_device_check): elementwise maps, and image operators that say so.

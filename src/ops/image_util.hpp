@@ -11,7 +11,6 @@
 #include "core/workspace.hpp"
 
 #include <algorithm>
-#include <cfloat>
 #include <cmath>
 #include <cstring>
 
@@ -47,15 +46,18 @@ struct Geom {
 // Springer 2017, Proposition 24.8(iii)), with the dual scaled by c and the
 // gap by c^2. The squares in the stopping target and the gap overflow beyond
 // |d| ~ 1e154 and underflow below ~1e-154. e is 0, and the image is solved
-// as before bit for bit, when max |d| is in [2^-64, 2^65), when d == 0, and
-// when 2^-e gamma would overflow.
-inline int rescale_exponent(const double *d, int64_t N, double gamma) noexcept {
+// as before bit for bit, when max |d| is in [2^-64, 2^65) and when d == 0.
+// Scaling up, the scaled step 2^-e step stays in the step range (step: gamma
+// times the operator's step_scale(), its largest threshold or capacity): a
+// small image with a large step is scaled up only that far, and not at all
+// when the step is already at the top of the range.
+inline int rescale_exponent(const double *d, int64_t N, double step) noexcept {
     double m = 0.0;
     for (int64_t i = 0; i < N; ++i) m = std::max(m, std::fabs(d[i]));
     if (!(m > 0.0)) return 0;
-    const int e = std::ilogb(m);
+    int e = std::ilogb(m);
     if (e >= -64 && e <= 64) return 0;
-    if (e < 0 && gamma > std::ldexp(DBL_MAX, e)) return 0;
+    if (e < 0 && step > 0.0) e = std::min(0, std::max(e, std::ilogb(step) + 1 - std::ilogb(kMaxScaledStep)));
     return e;
 }
 

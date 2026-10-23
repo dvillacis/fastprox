@@ -287,7 +287,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         // Far from unit scale, solve at a power-of-two scale (image_util.hpp),
         // unless an active step would underflow there.
         const double gamma0 = c.gamma;
-        int e = na ? rescale_exponent(d, N, c.gamma) : 0;
+        int e = na ? rescale_exponent(d, N, c.gamma * step_scale()) : 0;
         for (int a = 0; a < k && e; ++a)
             if (lam[a] > 0.0 && !(std::ldexp(lam[a], -e) > 0.0)) e = 0;
         if (e) {
