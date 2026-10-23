@@ -23,6 +23,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Row operators' workspaces hold per-thread scratch for at most as many threads as there are rows (audit C2). Before, one row of 2²³ samples for 1D TV allocated 10.6 GB at 15 threads instead of 704 MB. Pages were touched lazily, so the time was the same, but with strict overcommit, or Windows commit accounting, the call could fail with `FP_ENOMEM`. Spectral derivatives size their scratch the same way.
+- Thread counts are capped at 4 times the CPUs the process may run on, and at 4096 (audit C3). `fp_options.threads = 100000` on soft thresholding of 2²⁶ entries created 4095 permanent pool threads, and the call took 14× longer than serially. The environment variables are capped the same way.
+- A `parallel_run` from inside a pool job now runs serially on its thread (audit C10). From the caller's thread it called `try_lock` on a mutex that thread already held, which is undefined behaviour. No kernel nests today, so this is a guard for future kernels.
 - Images holding a NaN, in TV in 2 and 3 dimensions, graph TV and tree TV (audit A8):
   - **Certificate.** Such an image used to report a perfect certificate: gap 0, `converged`, and 0 iterations (1 for tree TV). It now reports a NaN gap and 0 iterations, and does not by itself make the call `FP_ENOTCONV`, since more iterations cannot fix it. `fp_info.gap`, a sum over the batch, is then NaN, and `IterInfo.converged` stays True.
   - **Dual.** The NaN dual that `fp_workspace_get_dual` returns for such an image was rejected by `fp_workspace_set_dual`. Now `set` stores NaN entries as 0 and rejects only ±Inf, so a dual read back can always be set again, including as Python's `warm_start=`.

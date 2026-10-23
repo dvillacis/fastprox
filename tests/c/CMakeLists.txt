@@ -11,6 +11,13 @@ add_executable(test_core test_core.cpp)
 target_link_libraries(test_core PRIVATE fastprox::fastprox)
 add_test(NAME core COMMAND test_core)
 
+# The thread pool is internal: compiled into its test.
+find_package(Threads REQUIRED)
+add_executable(test_parallel test_parallel.cpp ${PROJECT_SOURCE_DIR}/src/core/parallel.cpp)
+target_include_directories(test_parallel PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_parallel PRIVATE Threads::Threads)
+add_test(NAME parallel COMMAND test_parallel)
+
 # The max-flow engine is internal: tested from its header.
 add_executable(test_maxflow test_maxflow.cpp)
 target_include_directories(test_maxflow PRIVATE ${PROJECT_SOURCE_DIR}/src)

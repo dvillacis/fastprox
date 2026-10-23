@@ -90,7 +90,8 @@ typedef struct fp_workspace fp_workspace; /* opaque, one per concurrent caller *
 
 typedef struct {
     int    axis;           /* operator axis; negative counts from the end */
-    int    threads;        /* 0 = fp_default_threads(), 1 = serial */
+    int    threads;        /* 0 = fp_default_threads(), 1 = serial; values above
+                              4 x the available CPUs (at most 4096) count as that cap */
     double tol;            /* relative duality-gap tolerance (iterative ops) */
     int    max_iter;       /* iteration cap (iterative ops) */
     int    tie;            /* fp_tie, for nonconvex ops */
@@ -607,7 +608,8 @@ FP_API int         fp_abi_version(void);
 FP_API const char *fp_version_string(void);
 /* Threads used when fp_options.threads is 0: the environment variable
  * FASTPROX_NUM_THREADS, else the first number in OMP_NUM_THREADS, else the
- * CPUs the process may run on (read once). 1 in builds without threads. */
+ * CPUs the process may run on (read once), at most 4 x those CPUs and 4096.
+ * 1 in builds without threads. */
 FP_API int         fp_default_threads(void);
 
 #ifdef __cplusplus

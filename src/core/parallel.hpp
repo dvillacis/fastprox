@@ -18,17 +18,25 @@
 namespace fp {
 
 // Threads used when fp_options.threads is 0: FASTPROX_NUM_THREADS, else the
-// first number in OMP_NUM_THREADS, else the CPUs this process may run on.
-// Read once; 1 in builds without threads.
+// first number in OMP_NUM_THREADS, else the CPUs this process may run on;
+// at most max_threads(). Read once; 1 in builds without threads.
 int default_threads() noexcept;
+
+// The cap on any thread count (audit C3): 4 times the CPUs this process may
+// run on, at most 4096. The pool runs one job at a time, so more threads gain
+// nothing; the margin covers containers whose affinity under-reports the
+// CPUs. 1 in builds without threads.
+int max_threads() noexcept;
 
 using ChunkFn = void (*)(void *ctx, int tid, int64_t begin, int64_t end);
 
 // Calls fn(ctx, tid, b, e) on pieces [b, e) covering [0, count), with tid in
 // [0, nt) naming the caller's per-thread scratch. The caller takes part as
 // tid 0. Runs serially (one call with tid 0) when nt <= 1, when another
-// caller is using the pool, or when no thread can be started. fn must not
-// throw and must not call parallel_run.
+// caller is using the pool, or when no thread can be started; nt is capped at
+// max_threads(). fn must not throw. A call from inside fn runs serially on
+// the calling thread, with tid 0: fn's tid indexes only scratch that belongs
+// to its own call (audit C10).
 void parallel_run(int nt, int64_t count, int64_t grain, ChunkFn fn, void *ctx) noexcept;
 
 template <class F>
