@@ -2971,7 +2971,11 @@ static void test_refine() {
             CHECK_OK(fp_workspace_deriv_exact(ws, &e1, &m1));
             CHECK_OK(fp_workspace_deriv_exact(wf, &e2, &m2));
             CHECK(e1 == e2 && m1 == m2);
-            if (oi >= 1) CHECK(e1 == 1);  // polished, exact graph and tree TV
+            // Graph and tree TV are exact by now. Whether anisotropic TV's
+            // polish certified the regions depends on the image, which
+            // std::normal_distribution draws differently with MSVC's library
+            // (its exactness is checked on fixed data in test_refine.py).
+            if (oi >= 2) CHECK(e1 == 1);
             if (oi == 0) CHECK(m1 < mu);  // less smoothing at a smaller gap
             // Errors.
             CHECK(fp_workspace_refine(op, ws, -1.0, 10, nullptr, nullptr) == FP_EPARAM);
