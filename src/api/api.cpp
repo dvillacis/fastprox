@@ -229,6 +229,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.dual.resize(static_cast<size_t>(B) * static_cast<size_t>(k) * static_cast<size_t>(N));
         w.image_gaps.resize(static_cast<size_t>(B));
         w.image_iters.resize(static_cast<size_t>(B));
+        w.image_zerr.resize(static_cast<size_t>(B));
         if (keep) {
             const size_t bytes = static_cast<size_t>(w.numel) * item;
             w.xsave.resize(bytes / sizeof(double) + 1);
@@ -1535,6 +1536,22 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info) {
     if (!ws || !info || !ws->info_valid) return FP_EINVAL;
     *info = ws->info;
     return ws->info_status;
+}
+
+FP_API fp_status fp_workspace_image_info(const fp_workspace *ws, double *gaps, int *iters,
+                                         double *zerrs, int64_t count) {
+    if (!ws || !ws->info_valid || !ws->image_ndim) return FP_EINVAL;
+    int64_t images = 1;  // the batch shape's size: x's shape without the image axes
+    for (int d = 0; d < ws->ndim - ws->image_ndim; ++d) images *= ws->shape[d];
+    if (count != images) return FP_ESHAPE;
+    const bool held = ws->numel != 0;  // an empty batch keeps no per-image results
+    const int *its = reinterpret_cast<const int *>(ws->image_iters.data());
+    for (int64_t r = 0; r < count; ++r) {
+        if (gaps) gaps[r] = held ? ws->image_gaps.data()[r] : 0.0;
+        if (iters) iters[r] = held ? its[r] : 0;
+        if (zerrs) zerrs[r] = held ? ws->image_zerr.data()[r] : 0.0;
+    }
+    return FP_OK;
 }
 
 FP_API fp_status fp_vjp_device(const fp_op *op, const fp_workspace *ws, const fp_array *g, fp_array *gx,

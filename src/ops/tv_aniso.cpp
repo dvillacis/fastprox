@@ -329,6 +329,8 @@ struct TVAniso final : ImageOp<TVAniso> {
         if (e) {  // back to the input's scale; the saved structure is scale-free but its gap
             scale2(zz, N, e);
             scale2(q, k * N, e);
+            c.scale_exp = e;
+            c.scaled_gap = c.gap;
             c.gap = std::ldexp(c.gap, 2 * e);
             c.gamma = gamma0;
             if (c.save) *view(c.save, N).gap = c.gap;

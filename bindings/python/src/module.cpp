@@ -63,6 +63,8 @@ fp_array view(const A &a) {
 
 using I8In = nb::ndarray<nb::ro, const int8_t, nb::device::cpu>;
 using I8Out = nb::ndarray<int8_t, nb::device::cpu>;
+using F64Out = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using I32Out = nb::ndarray<int32_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
 // An int8 kink or branch array as an fp_array.
 template <class A>
@@ -385,6 +387,16 @@ NB_MODULE(_fastprox, m) {
         check(fp_workspace_deriv_info(ws.p, &r, &it), "fp_workspace_deriv_info");
         return std::make_tuple(r, it);
     }, "ws"_a);
+
+    m.def("image_info", [](const Workspace &ws, std::optional<F64Out> gaps,
+                           std::optional<I32Out> iters, std::optional<F64Out> zerrs, int64_t count) {
+        for (size_t n : {gaps ? gaps->shape(0) : size_t(count), iters ? iters->shape(0) : size_t(count),
+                         zerrs ? zerrs->shape(0) : size_t(count)})
+            if (n != size_t(count)) throw nb::value_error("image_info: an array's size is not count");
+        check(fp_workspace_image_info(ws.p, gaps ? gaps->data() : nullptr, iters ? iters->data() : nullptr,
+                                      zerrs ? zerrs->data() : nullptr, count),
+              "fp_workspace_image_info");
+    }, "ws"_a, "gaps"_a.none(), "iters"_a.none(), "zerrs"_a.none(), "count"_a);
 
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
           "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000, "tie"_a = 0,

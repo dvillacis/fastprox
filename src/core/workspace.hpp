@@ -80,7 +80,9 @@ struct fp_workspace {
     int image_sets = 0;
     size_t image_bytes = 0, image_thread_bytes = 0, struct_bytes = 0;
     fp::Buffer<double> image_work, image_thread, structure, dual;
-    fp::Buffer<double> image_gaps, image_iters;  // per image results of the last call
+    // Per image results of the last call: gaps, iterations, and the relative
+    // error of z the gap certifies, sqrt(2 gap) / |x|.
+    fp::Buffer<double> image_gaps, image_iters, image_zerr;
     // Derivative solves (conjugate gradients) of image operators: settings,
     // per image results, and the worst of the last jvp/vjp.
     double deriv_tol = 0.0;

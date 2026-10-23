@@ -21,6 +21,7 @@ differentiation::
 from __future__ import annotations
 
 import contextlib
+import math
 import operator
 import threading
 from typing import NamedTuple
@@ -79,8 +80,12 @@ class IterInfo(NamedTuple):
     problem at the returned point (summed over the batch;
     $\lVert z - z^* \rVert_2^2 \le 2\,\mathrm{gap}$ per image), the iterations
     (the maximum over the batch), whether every image reached the tolerance,
-    and the dual of shape (ndim, *x.shape), which
-    ``warm_start=`` accepts back. ``gap`` is NaN when an image contains a NaN;
+    the dual of shape (ndim, *x.shape), which
+    ``warm_start=`` accepts back, and (since 1.0) ``zerr``, the certified
+    relative error of the worst image,
+    $\max_i \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert_2 \ge \lVert z_i - z_i^* \rVert_2 / \lVert x_i \rVert_2$,
+    in the units ``ztol=`` takes (0 for an image of zeros). ``gap`` and ``zerr``
+    are NaN when an image contains a NaN;
     ``converged`` says whether no image stopped at ``max_iter`` (an image with
     a NaN is not iterated and counts as finished)."""
 
@@ -89,6 +94,7 @@ class IterInfo(NamedTuple):
     ties: int
     converged: bool
     dual: np.ndarray | None
+    zerr: float = float("nan")
 
 
 class Grads:
@@ -299,6 +305,31 @@ def _vec(v):
     if v is None:
         return None
     return np.ascontiguousarray(v, dtype=np.float64).reshape(-1)
+
+
+def _gap_tol(tol, ztol, default):
+    """The gap tolerance of a call from ``tol=`` or ``ztol=`` (feedback U1):
+    the gap tol * |x|^2 / 2 certifies |z - z*| <= sqrt(tol) |x|, so ztol
+    asks for tol = ztol^2."""
+    if ztol is None:
+        return default if tol is None else float(tol)
+    if tol is not None:
+        raise ValueError("pass tol or ztol, not both")
+    ztol = float(ztol)
+    if not 0.0 <= ztol < float("inf"):
+        raise ValueError(f"ztol must be finite and >= 0, got {ztol}")
+    if ztol > 0.0 and ztol * ztol < np.finfo(np.float64).tiny:
+        raise ValueError(f"ztol={ztol} is below 1e-154: its square, the gap tolerance, underflows")
+    return ztol * ztol
+
+
+def _zerr(gaps, xx):
+    """max_i sqrt(2 gap_i) / |x_i| from the per-image gaps and squared norms:
+    0 for an image of zeros (its gap is 0) and for no images, NaN when an
+    image holds a NaN (its gap is NaN)."""
+    if gaps.size == 0:
+        return 0.0
+    return float(np.max(np.sqrt(2.0 * np.maximum(gaps, 0.0) / np.where(xx > 0, xx, 1.0))))
 
 
 def _deriv_tol(tol):
@@ -897,32 +928,41 @@ class _ImageOperator(Operator):
             raise ValueError(f"{type(self).__name__} needs at least {self.ndim} axes")
         return shape[:len(shape) - self.ndim]
 
+    _default_tol = 1e-6
+
     def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
-             tol=1e-6, max_iter=1000, warm_start=None, warm=False):
+             tol=None, ztol=None, max_iter=1000, warm_start=None, warm=False):
         r"""$\operatorname{prox}_{\gamma g}(x)$; see the class docstring. ``gamma``
         may be (since 1.1) an array that broadcasts to the batch shape: one
-        step per image."""
-        z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, max_iter,
-                               warm_start, warm)
+        step per image. ``tol`` (default 1e-6) or ``ztol`` (since 1.0; not
+        both) sets the accuracy: ``ztol`` is the relative error of $z$ to
+        certify, $\lVert z - z^* \rVert_2 \le \mathrm{ztol}\,\lVert x \rVert_2$ per image."""
+        z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, ztol,
+                               max_iter, warm_start, warm, keep or ctx is not None)
         return (z, ctx) if keep else z
 
     def prox_conj(self, y, sigma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
-                  tol=1e-6, max_iter=1000, warm_start=None, warm=False):
+                  tol=None, ztol=None, max_iter=1000, warm_start=None, warm=False):
         r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
-        (Moreau)."""
-        z, ctx, _ = self._iter(y, sigma, out, threads, keep, ctx, copy, True, tol, max_iter,
-                               warm_start, warm)
+        (Moreau); ``tol`` and ``ztol`` as in :meth:`prox`, relative to $y$."""
+        z, ctx, _ = self._iter(y, sigma, out, threads, keep, ctx, copy, True, tol, ztol,
+                               max_iter, warm_start, warm, keep or ctx is not None)
         return (z, ctx) if keep else z
 
-    def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=1e-6, max_iter=1000,
-              warm_start=None, ctx=None, warm=False):
-        """``(z, info)`` with ``info`` an :class:`IterInfo` (gap and dual)."""
-        z, _, info = self._iter(x, gamma, out, threads, False, ctx, copy, False, tol, max_iter,
-                                warm_start, warm)
+    def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=None, ztol=None,
+              max_iter=1000, warm_start=None, ctx=None, warm=False):
+        """``(z, info)`` with ``info`` an :class:`IterInfo` (gap, certified
+        error and dual); ``tol`` and ``ztol`` as in :meth:`prox`."""
+        z, _, info = self._iter(x, gamma, out, threads, False, ctx, copy, False, tol, ztol,
+                                max_iter, warm_start, warm, True)
         return z, info
 
-    def _iter(self, x, step, out, threads, keep, ctx, copy, conj, tol, max_iter, warm_start,
-              warm):
+    def _tol(self, x, tol, ztol):
+        """The C tolerance for tol= or ztol=."""
+        return _gap_tol(tol, ztol, self._default_tol)
+
+    def _iter(self, x, step, out, threads, keep, ctx, copy, conj, tol, ztol, max_iter,
+              warm_start, warm, want_info):
         _, threads = _axis_threads(-1, threads)
         x = _input(x, copy)
         if x.ndim < self.ndim:
@@ -930,6 +970,7 @@ class _ImageOperator(Operator):
                              f"least {self.ndim} dimensions")
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
+        tol = self._tol(x, tol, ztol)
 
         def call(ws):
             nonlocal x, steps
@@ -944,9 +985,13 @@ class _ImageOperator(Operator):
                 res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol),
                               int(max_iter), steps=steps)
             gap, iters, ties, conv = res
+            if not want_info:
+                return None
             dual = np.empty((self.ndim, *x.shape), np.float64)
             _C.get_dual(ws, dual)
-            return IterInfo(gap, iters, ties, conv, dual)
+            zerrs = np.empty(math.prod(x.shape[:x.ndim - self.ndim]), np.float64)
+            _C.image_info(ws, None, None, zerrs, zerrs.size)
+            return IterInfo(gap, iters, ties, conv, dual, float(zerrs.max()) if zerrs.size else 0.0)
 
         if keep or ctx is not None:
             ctx = self._context(x, -1, threads, ctx)
@@ -971,7 +1016,12 @@ class TVAniso(_ImageOperator):
     varying regularisation; the operator then takes only images of that
     shape.
     Iterative (accelerated dual block methods with exact 1D TV steps): each
-    image stops when its duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$.
+    image stops when its duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$,
+    which certifies $\lVert z - z^* \rVert_2 \le \sqrt{\mathrm{tol}}\,\lVert x \rVert_2$:
+    the default 1e-6 gives $z$ to 1e-3 relative, ``tol=1e-10`` to 1e-5.
+    ``ztol=`` (since 1.0) asks for that relative error directly, and
+    ``info.zerr`` reports the one certified (see "Inexact proxes inside outer
+    solvers" in the API docs).
     ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
     ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
     dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
@@ -1010,7 +1060,10 @@ class GraphTV(_ImageOperator):
     max-flow (Chambolle and Darbon; Hochbaum), each part of the graph cut at
     its mean value: exact up to rounding where a part ends at a trivial cut,
     else within $\mathrm{tol} \cdot (\max x - \min x)$ at every node, so ``tol=0`` (the
-    default) asks for the solution to rounding. ``info.gap`` is the duality
+    default) asks for the solution to rounding. ``ztol=`` (since 1.0) asks for
+    $\lVert z - z^* \rVert_2 \le \mathrm{ztol}\,\lVert x \rVert_2$ per signal instead,
+    through that bound, and ``info.zerr`` is the error the gap certifies, as
+    for :class:`TVAniso`. ``info.gap`` is the duality
     gap with the flow as the dual, ``info.iters`` the number of max-flow
     solves; ``info.dual`` (shape (1, *x.shape)) is $q$ with $z = x - q$. Warm
     starts have no effect. With ``tol=0`` ``jvp`` and ``vjp`` are exact:
@@ -1048,21 +1101,23 @@ class GraphTV(_ImageOperator):
         self._w = np.ones(1) if w is None else w
         self._layout = [("weights", self._w.size, w is None)]
 
-    def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
-             tol=0.0, max_iter=1000, warm_start=None, warm=False):
-        return super().prox(x, gamma, out=out, threads=threads, keep=keep, ctx=ctx, copy=copy,
-                            tol=tol, max_iter=max_iter, warm_start=warm_start, warm=warm)
+    _default_tol = 0.0
 
-    def prox_conj(self, y, sigma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
-                  tol=0.0, max_iter=1000, warm_start=None, warm=False):
-        return super().prox_conj(y, sigma, out=out, threads=threads, keep=keep, ctx=ctx,
-                                 copy=copy, tol=tol, max_iter=max_iter, warm_start=warm_start,
-                                 warm=warm)
-
-    def solve(self, x, gamma=1.0, *, out=None, threads=0, copy=False, tol=0.0, max_iter=1000,
-              warm_start=None, ctx=None, warm=False):
-        return super().solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
-                             max_iter=max_iter, warm_start=warm_start, ctx=ctx, warm=warm)
+    def _tol(self, x, tol, ztol):
+        """``tol`` bounds each node's error by tol (max x - min x), so
+        |z - z*| <= sqrt(n) tol (max x - min x), and ztol asks for
+        tol = ztol min_i |x_i| / (sqrt(n) (max x_i - min x_i))."""
+        if ztol is None or tol is not None:
+            return _gap_tol(tol, ztol, self._default_tol)
+        _gap_tol(None, ztol, 0.0)  # validates ztol
+        ztol = float(ztol)
+        xs = x.reshape(-1, x.shape[-1]) if x.size else np.zeros((0, 1))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            span = np.max(xs, axis=1, initial=-np.inf) - np.min(xs, axis=1, initial=np.inf)
+            norm = np.sqrt(np.sum(np.square(xs, dtype=np.float64), axis=1))
+            t = ztol * norm / (np.sqrt(xs.shape[1]) * span)
+        t = t[np.isfinite(t)]  # constant signals (exact at any tol) and NaN ones
+        return float(np.min(t)) if t.size else 0.0
 
 
 class TreeTV(GraphTV):
@@ -1617,30 +1672,30 @@ def tv1d_l2(x, gamma=1.0, *, weights=None, axis=-1, out=None, threads=0, copy=Fa
     return _once(_C.tv1d_l2(_vec(weights)), x, gamma, axis, out, threads, copy)
 
 
-def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
+def tv_aniso(x, gamma=1.0, *, weights=None, ndim=2, tol=None, ztol=None, max_iter=1000, warm_start=None,
              out=None, threads=0, copy=False):
     r"""prox of $\gamma \sum_a w_a \mathrm{TV}_a$ on the last ``ndim`` (2 or 3) axes.
     Returns ``(z, info)``; ``info.gap`` certifies the result and ``info.dual``
     can be passed back as ``warm_start``."""
-    return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
+    return TVAniso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol,
                                         max_iter=max_iter, warm_start=warm_start)
 
 
-def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=1e-6, max_iter=1000, warm_start=None,
+def tv_iso(x, gamma=1.0, *, weights=None, ndim=2, tol=None, ztol=None, max_iter=1000, warm_start=None,
            out=None, threads=0, copy=False):
     r"""prox of $\gamma \sum_p \lVert (w_a D_a z)_p \rVert_2$ (isotropic TV) on the
     last ``ndim`` (2 or 3) axes. Returns ``(z, info)`` as :func:`tv_aniso`."""
-    return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol,
+    return TVIso(ndim, weights).solve(x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol,
                                       max_iter=max_iter, warm_start=warm_start)
 
 
-def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=0.0, max_iter=1000, out=None,
+def graph_tv(x, edges, gamma=1.0, *, n=None, weights=None, tol=None, ztol=None, max_iter=1000, out=None,
              threads=0, copy=False):
     r"""prox of $\gamma \sum_e w_e \lvert z_u - z_v \rvert$ over ``edges`` (pairs
     $(u, v)$) on the last axis. Returns ``(z, info)`` as :func:`tv_aniso`."""
     x = np.asarray(x)
     return GraphTV(x.shape[-1] if n is None else n, edges, weights).solve(
-        x, gamma, out=out, threads=threads, copy=copy, tol=tol, max_iter=max_iter)
+        x, gamma, out=out, threads=threads, copy=copy, tol=tol, ztol=ztol, max_iter=max_iter)
 
 
 def tree_tv(x, edges, gamma=1.0, *, n=None, weights=None, out=None, threads=0, copy=False):

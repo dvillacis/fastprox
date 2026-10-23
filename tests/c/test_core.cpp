@@ -2773,6 +2773,113 @@ static void test_kept_point_lifetime() {
     }
 }
 
+// fp_workspace_image_info: the per-image gaps, iterations and certified
+// errors behind fp_info (feedback U1), for the three iterative operators, on
+// a batch of 2 x 3 images with a NaN in one.
+static void test_image_info() {
+    const int64_t side = 12, B = 6;
+    std::vector<int64_t> edges;
+    for (int64_t i = 0; i < side; ++i)
+        for (int64_t j = 0; j < side; ++j) {
+            if (j + 1 < side) edges.insert(edges.end(), {i * side + j, i * side + j + 1});
+            if (i + 1 < side) edges.insert(edges.end(), {i * side + j, (i + 1) * side + j});
+        }
+    fp_op *ops[3];
+    CHECK_OK(fp_op_tv_iso(2, nullptr, &ops[0]));
+    CHECK_OK(fp_op_tv_aniso(2, nullptr, &ops[1]));
+    CHECK_OK(fp_op_graph_tv(side * side, static_cast<int64_t>(edges.size()) / 2, edges.data(), nullptr, &ops[2]));
+    for (fp_op *op : ops) {
+        const bool graph = op == ops[2];
+        const std::vector<int64_t> shape = graph ? std::vector<int64_t>{2, 3, side * side}
+                                                 : std::vector<int64_t>{2, 3, side, side};
+        Arr x(shape, randn(B * side * side)), z(shape);
+        x.data[4 * side * side + 5] = std::nan("");  // image (1, 1)
+        fp_options o = opts(-1, 2, 1);
+        o.tol = graph ? 1e-3 : 1e-8;
+        o.max_iter = 100000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        double gaps[B], zerrs[B];
+        int iters[B];
+        CHECK(fp_workspace_image_info(ws, gaps, iters, nullptr, B) == FP_EINVAL);  // before a call
+        fp_info info{};
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &z.a, &o, ws, &info));
+        CHECK(fp_workspace_image_info(ws, gaps, iters, nullptr, B - 1) == FP_ESHAPE);
+        CHECK(fp_workspace_image_info(ws, gaps, iters, nullptr, 1) == FP_ESHAPE);
+        CHECK_OK(fp_workspace_image_info(ws, gaps, iters, zerrs, B));
+        double sum = 0.0;
+        int most = 0;
+        for (int64_t r = 0; r < B; ++r) {
+            sum += gaps[r];
+            most = std::max(most, iters[r]);
+            CHECK(r == 4 ? std::isnan(gaps[r]) && iters[r] == 0 : gaps[r] >= 0.0 && iters[r] > 0);
+            double xx = 0.0;
+            for (int64_t i = 0; i < side * side; ++i) xx += x.data[r * side * side + i] * x.data[r * side * side + i];
+            CHECK(r == 4 ? std::isnan(zerrs[r]) : std::fabs(zerrs[r] - std::sqrt(2.0 * gaps[r] / xx)) <= 1e-12 * zerrs[r]);
+        }
+        CHECK(std::isnan(sum) && std::isnan(info.gap) && most == info.iters);
+        double g2[B];
+        CHECK_OK(fp_workspace_image_info(ws, g2, nullptr, nullptr, B));
+        CHECK(std::memcmp(g2, gaps, sizeof gaps) == 0);
+        CHECK_OK(fp_workspace_image_info(ws, nullptr, nullptr, nullptr, B));
+        // The clean images alone: the same gaps, bit for bit, summing to fp_info.gap.
+        x.data[4 * side * side + 5] = 0.0;
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &z.a, &o, ws, &info));
+        CHECK_OK(fp_workspace_image_info(ws, g2, iters, nullptr, B));
+        sum = 0.0;
+        for (int64_t r = 0; r < B; ++r) {
+            sum += g2[r];
+            if (r != 4) CHECK(g2[r] == gaps[r]);
+        }
+        CHECK(sum == info.gap);
+        // In place, and scaled by 2^600 and 2^-600 (with the step), where |x|^2
+        // overflows and underflows: the same certified errors.
+        for (double c : {1.0, std::ldexp(1.0, 600), std::ldexp(1.0, -600)}) {
+            Arr y(x), yz(shape);
+            for (double &v : y.data) v *= c;
+            CHECK_OK(fp_prox(op, 0.4 * c, &y.a, &yz.a, &o, ws, nullptr));
+            double ze[B], zi[B];
+            CHECK_OK(fp_workspace_image_info(ws, nullptr, nullptr, ze, B));
+            CHECK_OK(fp_prox(op, 0.4 * c, &y.a, &y.a, &o, ws, nullptr));
+            CHECK_OK(fp_workspace_image_info(ws, nullptr, nullptr, zi, B));
+            for (int64_t r = 0; r < B; ++r) {
+                CHECK(ze[r] == zi[r] && y.data == yz.data);
+                if (r != 4) CHECK(std::fabs(ze[r] - zerrs[r]) <= 1e-6 * zerrs[r] + 1e-300);
+            }
+        }
+        // A failed call: no results.
+        CHECK(fp_prox(op, 1e300, &x.a, &z.a, &o, ws, &info) == FP_EPARAM);
+        CHECK(fp_workspace_image_info(ws, gaps, iters, nullptr, B) == FP_EINVAL);
+        fp_workspace_free(ws);
+        // An empty batch of two images: zeros.
+        std::vector<int64_t> eshape = shape;
+        eshape[1] = 1;
+        eshape.back() = graph ? side * side : 0;
+        if (graph) eshape[0] = 0;
+        Arr e(eshape), ez(eshape);
+        CHECK_OK(fp_workspace_create(op, &e.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.4, &e.a, &ez.a, &o, ws, nullptr));
+        const int64_t ne = graph ? 0 : 2;
+        gaps[0] = gaps[1] = 7.0;
+        iters[0] = iters[1] = 7;
+        CHECK_OK(fp_workspace_image_info(ws, gaps, iters, zerrs, ne));
+        if (!graph) CHECK(gaps[0] == 0.0 && gaps[1] == 0.0 && iters[0] == 0 && iters[1] == 0 && zerrs[0] == 0.0);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    fp_op *soft;
+    CHECK_OK(fp_op_soft(1.0, nullptr, &soft));
+    Arr x({3}, {0.5, 2.0, -3.0}), z({3});
+    fp_options o = opts(-1, 1, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(soft, &x.a, &o, &ws));
+    CHECK_OK(fp_prox(soft, 1.0, &x.a, &z.a, &o, ws, nullptr));
+    CHECK(fp_workspace_image_info(ws, nullptr, nullptr, nullptr, 1) == FP_EINVAL);  // not an image operator
+    CHECK(fp_workspace_image_info(nullptr, nullptr, nullptr, nullptr, 1) == FP_EINVAL);
+    fp_workspace_free(ws);
+    fp_op_free(soft);
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3467,6 +3574,7 @@ int main() {
     test_huge_counts();
     test_failed_branch_keeps_override();
     test_kept_point_lifetime();
+    test_image_info();
     test_nan_images();
     test_aliasing();
     test_descriptor_bounds();

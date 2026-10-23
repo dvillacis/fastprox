@@ -35,27 +35,29 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import IterInfo
+from . import IterInfo, _gap_tol
 from . import _tv_jax as _tvj
 from ._interop import Spec, check_dtype, check_step, is_float, spectral_step_grad, steps
 
 __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 
-def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
+def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
+         **params):
     r"""$\operatorname{prox}_{\gamma g}(x)$. ``gamma`` is a scalar or (since 1.1) one step per
     row, image or matrix, broadcasting to the batch shape, as in
-    :func:`fastprox.torch.prox`. ``axis`` (row operators), ``tol`` and
-    ``max_iter`` (iterative operators) are passed on when given."""
-    return _apply(op, x, gamma, False, axis, threads, tol, max_iter, params)
+    :func:`fastprox.torch.prox`. ``axis`` (row operators), ``tol``, ``ztol``
+    and ``max_iter`` (iterative operators) are passed on when given."""
+    return _apply(op, x, gamma, False, axis, threads, tol, ztol, max_iter, params)
 
 
-def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None, **params):
+def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
+              **params):
     r"""$\operatorname{prox}_{\sigma g^*}(y)$ (Moreau's identity), with a scalar ``sigma``."""
-    return _apply(op, y, sigma, True, axis, threads, tol, max_iter, params)
+    return _apply(op, y, sigma, True, axis, threads, tol, ztol, max_iter, params)
 
 
-def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
+def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params):
     x = jnp.asarray(x)
     check_dtype(x.dtype)
     check_step(step, conj)
@@ -68,7 +70,8 @@ def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
             static[k] = np.asarray(v)  # integer arrays must be concrete
         else:
             static[k] = v
-    spec = Spec(op, static, names, conj, threads, {"axis": axis, "tol": tol, "max_iter": max_iter})
+    spec = Spec(op, static, names, conj, threads,
+                {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter})
     if spec.spectral:
         return _spectral(spec, x)(x, jnp.asarray(step, x.dtype), *values)
     return _function(spec)(x, jnp.asarray(step, x.dtype), *values)
@@ -197,14 +200,17 @@ def _spectral(spec, x):
 # ---------------------------------------------------------------------------
 
 
-def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, max_iter=1000,
-           warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
+def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, ztol=None,
+           max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
+           deriv_max_iter=10000):
     r"""Isotropic TV of ``TVIso(ndim, weights)`` on the last ``ndim`` axes of
     ``x``, in JAX operations on ``x``'s device; differentiable (reverse
     mode) in ``x``, ``gamma`` and ``weights``. ``gamma`` is a number or one
     step per image, broadcasting to the batch shape ``x.shape[:-ndim]``. Each image stops when its
-    duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$; ``tol`` and
-    ``max_iter`` are static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
+    duality gap is at most $\mathrm{tol} \cdot \lVert x \rVert_2^2 / 2$ (``tol`` defaults to
+    1e-6), which certifies $\lVert z - z^* \rVert_2 \le \sqrt{\mathrm{tol}}\,\lVert x \rVert_2$;
+    ``ztol`` (since 1.0) asks for that relative error of $z$ instead (``tol`` $= \mathrm{ztol}^2$).
+    ``tol``, ``ztol`` and ``max_iter`` are static under ``jit``. ``warm_start`` takes the ``dual`` of an earlier
     call (shape (ndim, *x.shape)). With ``return_info=True`` returns
     ``(z, info)``, an :class:`IterInfo` of JAX arrays. The backward is the C
     kernel's: one unknown per flat region, solved by conjugate gradients to
@@ -214,19 +220,20 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=1e-6, 
     $\max(10^{-10}, 100\,\varepsilon)$ at the tightest. ``pixel_weights`` (since
     0.3), as in :func:`fastprox.torch.tv_iso`: $\alpha \ge 0$ broadcasting to x.shape,
     differentiable."""
-    return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
-                      deriv_tol, deriv_max_iter, pixel_weights)
+    return _device_tv(True, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
+                      warm_start, return_info, deriv_tol, deriv_max_iter, pixel_weights)
 
 
-def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=1e-6, max_iter=1000,
-             warm_start=None, return_info=False, deriv_tol=None, deriv_max_iter=10000):
+def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None, ztol=None,
+             max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
+             deriv_max_iter=10000):
     r"""Anisotropic TV of ``TVAniso(ndim, weights)``, as :func:`tv_iso`: a
     plain dual method, with the dual in the C kernel's form; its derivatives
     are exact region averages. ``edge_weights`` (since 0.3), as in
     :func:`fastprox.torch.tv_aniso`: $\beta \ge 0$ of shape (ndim, ...)
     broadcasting to (ndim, *x.shape), differentiable."""
-    return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
-                      deriv_tol, deriv_max_iter, edge_weights)
+    return _device_tv(False, x, gamma, ndim, weights, _gap_tol(tol, ztol, 1e-6), max_iter,
+                      warm_start, return_info, deriv_tol, deriv_max_iter, edge_weights)
 
 
 def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
@@ -247,7 +254,8 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
                 z = z + 0 * jnp.sum(jnp.asarray(t, x.dtype))
         if not return_info:
             return z
-        return z, IterInfo(jnp.zeros((), x.dtype), 0, 0, jnp.asarray(True), jnp.zeros((ndim,) + x.shape, x.dtype))
+        return z, IterInfo(jnp.zeros((), x.dtype), 0, 0, jnp.asarray(True),
+                           jnp.zeros((ndim,) + x.shape, x.dtype), jnp.zeros((), x.dtype))
     try:  # under jit values cannot be checked, and an Inf image is a NaN image
         has_inf = bool(jnp.isinf(x).any())
     except jax.errors.ConcretizationTypeError:
@@ -290,7 +298,9 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
     if not return_info:
         return z
     dual = _tvj.dual_out(u, w, iso).reshape((ndim,) + x.shape)
-    return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual)
+    xx = jnp.sum(jnp.square(xb).reshape(xb.shape[0], -1), axis=1)
+    zerr = jnp.sqrt(2 * jnp.maximum(gap, 0) / jnp.where(xx > 0, xx, 1))  # NaN for a NaN image
+    return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual, jnp.max(zerr))
 
 
 def _spatial(sw, x, ndim, iso):
