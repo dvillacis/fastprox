@@ -35,7 +35,7 @@ Version 1 is a small, exact and fast library of proximal operators and projectio
 
 **Non-goals for version 1:**
 
-- **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl.
+- **No solver framework.** No FISTA, PDHG or ADMM drivers beyond a reference loop for isotropic TV. Those belong in the user's code or in PyProximal and ProximalAlgorithms.jl. Bilevel algorithms (implicit, MAID-type, single-loop) also belong in a separate package on the public API. fastprox gives them derivatives, certificates and the structure they need (Section 7; decision of 2026-10-23).
 - **No GPU kernels in the C core for 1.0.** The C library is CPU only up to 1.0. Before that, the PyTorch and JAX wrappers run the iterative image operators on the input's device, written in framework tensor operations (0.3). The array interface reserves a device field, so a GPU backend in the C core can follow in 1.x without changing the API. Its design is in Section 8, "GPU backend".
 - **No SVD or eigendecomposition in the core.** Matrix prox maps such as the nuclear norm need one, so they come in 1.x with the decomposition supplied by the caller (Section 5, "Spectral operators"). Planned at first for version 2; revised 20 October 2026.
 - **No automatic modelling.** No parser or DSL for composite objectives, unlike ProxImaL.
@@ -107,7 +107,7 @@ Version 1 ships 20 operators in five groups. Seventeen are exact, by closed form
 | Log penalty | log(1 + \|t\|/ε) | root of a quadratic, then comparison with zero | O(n) | yes | 0.2 |
 
 - **Graph TV precision.** Parametric max-flow is exact for TV with finitely many levels. For real-valued data it returns a solution exact to a user-set precision, the approach of Chambolle and Darbon and of Hochbaum. The number of max-flow calls grows with the logarithm of the value range divided by that precision.
-- **What is deliberately missing.** TGV, Hessian-Schatten norms and nonconvex TV (such as the TV quasinorm) have no exact prox. They are better handled by the user's splitting method on top of the operators above, using a weighted TV or a pointwise nonconvex prox as the inner step.
+- **What is deliberately missing.** TGV, ICTV, the Schatten-1 Hessian norm and nonconvex TV (such as the TV quasinorm) have no exact prox. They are better handled by the user's splitting method on top of the operators above, using a weighted TV or a pointwise nonconvex prox as the inner step. Revised 23 October 2026: Huber-smoothed TV, the Frobenius Hessian norm (second-order TV) and filter-bank priors with learned potentials come in 1.x, with a duality gap like isotropic TV ("Analysis priors" below).
 
 ### Spectral operators (1.x, design)
 
@@ -192,6 +192,204 @@ The workspace built for the prox on s also holds the spectral scratch, about 8k 
 - **Shapes and dtypes:** square and rectangular (m < n, m > n), batched, float32 and float64.
 - **Determinism:** the threading test, with bit-identical output for any thread count.
 
+### Analysis priors: smoothed TV, second-order TV and learned potentials (1.x, design)
+
+An analysis prior applies scalar potentials to the responses of a bank of small filters:
+
+g(z) = Σ\_k Σ\_p α\_{k,p} φ\_k(‖(W\_k z)\_p‖₂)
+
+- **Filters.** W\_k is a group of c\_k filters, so (W\_k z)\_p ∈ ℝ^{c\_k}. A group of one filter gives a scalar response and φ\_k(|·|).
+- **Potentials.** φ\_k is a scalar potential: |t|, the Huber function, or a learned spline (stage 2 below).
+- **Pixel weights.** α\_{k,p} ≥ 0, and 1 without them.
+
+Isotropic and anisotropic TV are the case W = forward differences and φ = |t|. They keep their own kernels. The form gives four additions, in this order. Each keeps the 1.0 ABI, since each is a new constructor.
+
+| Stage | Operator | W | φ | What it serves |
+| --- | --- | --- | --- | --- |
+| 1 | Huber-smoothed TV, isotropic and anisotropic, 2D and 3D | forward differences, axis weights | h\_δ | the smooth lower level of bilevel TV papers; a linearly convergent prox; derivatives without flat regions |
+| 2 | spline potentials, pointwise and on groups | none | learned φ, convex or weakly convex | the potentials of learned ridge regularisers, with an exact prox |
+| 3 | analysis prior with a filter bank; second-order TV as a fixed instance | given filters, up to 9 taps per axis | \|t\|, Huber, elastic net, convex spline | second-order TV, filter-bank priors (Kunisch and Pock), learned convex ridge regularisers (CRR) |
+| 4 | weakly convex potentials in the analysis prior | given filters | weakly convex spline | weakly convex ridge regularisers (WCRR) |
+
+The comparative study of Hertrich et al. (2025, Section 2.1, (6)) writes the learned ridge regularisers as R(x) = Σ\_j ⟨1, ψ\_j(W\_j x)⟩ with learnable spline potentials ψ\_j, which is this form. Trained bilevel on BSD68 at σ = 0.1, CRR reaches 28.01 dB, WCRR 28.60 and an ICNN 27.90 (their results, as collected in `research_notes/`). ICNNs have no structure for a prox kernel to use: their prox is a general minimisation through a network, which belongs in a framework. DeepInverse ships one (`deepinv/models/icnn.py`). They are not planned.
+
+**Stage 1: Huber-smoothed TV.**
+
+- **The function.**
+  - Isotropic: g(z) = Σ\_p α\_p h\_δ(‖(W D z)\_p‖₂).
+  - Anisotropic: g(z) = Σ\_a w\_a Σ\_p β\_{a,p} h\_δ(|(D\_a z)\_p|).
+  - The Huber function is that of `fp_op_huber`: h\_δ(t) = t²/(2δ) for |t| ≤ δ, |t| − δ/2 otherwise, with δ > 0. It is Beck's H\_μ (6.43), with μ = δ.
+  - The smoothing is that of Hintermüller and Stadler (2006) and of the bilevel TV papers. De los Reyes, Schönlieb and Valkonen (2017, Definition 2.1) write it with γ = 1/δ, and their experiments take γ = 100, that is δ = 0.01.
+  - Since |t| − δ/2 ≤ h\_δ(t) ≤ |t|, the operator tends to TV as δ → 0. The solutions satisfy ‖z\_δ − z\_TV‖² ≤ γ δ Σ\_p α\_p (anisotropic: γ δ Σ\_a w\_a Σ\_p β\_{a,p}), by strong convexity of the prox objective.
+- **Dual.**
+  - h\_δ is the Moreau envelope of the norm (Beck, Example 6.54), so its conjugate is the ball indicator plus (δ/2)‖·‖² (Corollary 6.56). With c\_p = γα\_p, (c\_p h\_δ)\*(u) = ι\_{‖u‖ ≤ c\_p} + δ‖u‖²/(2c\_p).
+  - With G = W D, the prox dual is min\_u ½‖x − Gᵀu‖² + Σ\_p δ‖u\_p‖²/(2γα\_p) subject to ‖u\_p‖ ≤ γα\_p, and z = x − Gᵀu.
+  - Its separable part is σ-strongly convex with σ = δ/(γ α\_max). A pixel with α\_p = 0 is free (u\_p = 0), as now.
+- **Method.**
+  - The constant-momentum FISTA for strongly convex problems (V-FISTA; Beck, Section 10.7.7 and Theorem 10.42), on the split f̃(u) = ½‖x − Gᵀu‖² + (σ/2)‖u‖² and ψ̃\_p = ψ\_p − (σ/2)‖·‖², which stays convex.
+    - Step τ = 1/(L + σ), with L = 4 Σ w\_a² as in the isotropic kernel.
+    - The dual step is u⁺\_p = proj\_{‖·‖ ≤ γα\_p}(y\_p / (1 + τ(δ/(γα\_p) − σ))), with y = v + τ(G z(v) − σ v), in closed form.
+    - The momentum is (√κ − 1)/(√κ + 1), with κ = 1 + γ α\_max L / δ.
+  - The rate is linear: of order √κ log(1/tol) iterations. In 2D at γ = 0.1, δ = 0.01 and unit weights, κ = 81. The plain TV kernels converge sublinearly, because their dual is degenerate.
+  - Restarts are off. Below δ of about the certified error of a TV solve, the TV kernels are the better choice, and the docs say so.
+  - Anisotropic Huber TV uses the same dual method, with intervals in place of balls. The accelerated block method of `TVAniso` needs exact 1D steps, and 1D Huber TV has no direct algorithm. The linear rate should make the block method unnecessary; the gate checks this.
+- **Certificate.** Unchanged in form.
+  - gap = Σ\_p [γα\_p h\_δ(‖g\_p‖) + δ‖u\_p‖²/(2γα\_p) − ⟨g\_p, u\_p⟩] with g = G z(u). Every term is ≥ 0 by Fenchel–Young, and ‖z − z\*‖² ≤ 2·gap (Beck, Lemma 12.7, with σ = 1 for the primal).
+  - Stopping, warm starts through the dual, NaN images and the power-of-two rescaling are as for `TVIso`. The rescaled solve uses δ/c, since prox(c x; c γ, c δ) = c prox(x; γ, δ).
+- **Derivatives.**
+  - The prox objective has a Lipschitz gradient, so the prox is differentiable except where ‖g\_p‖ = δ. The system is (I + Gᵀ H G) dz = r, with H\_p = (γα\_p/δ) I where ‖g\_p‖ < δ and H\_p = (γα\_p/‖g\_p‖)(I − n\_p n\_pᵀ) where ‖g\_p‖ > δ, n\_p = g\_p/‖g\_p‖.
+  - Its eigenvalues lie in [1, 1 + γ α\_max L / δ]. Conjugate gradients therefore need no flat regions, no union-find and no curvature cap. They use the Jacobi preconditioner of the isotropic derivative.
+  - The isotropic derivative's cap (decision of 2026-10-18) is this H with δ at the certified error level, so the H-apply kernel is shared.
+  - At ‖g\_p‖ = δ the default is the quadratic piece. The kink mask gives code 1 where |‖g\_p‖ − δ| ≤ tol, and `fp_workspace_set_branch` picks the quadratic (−1) or the linear (+1) piece.
+  - The conjugate-gradient tolerance defaults to the accuracy the gap certifies, as for `TVIso`.
+- **Parameters.**
+  - θ = (w\_0, …, w\_{ndim−1}, α or β in C order when given, δ).
+  - With v = Jᵀḡ from conjugate gradients, the gradient in a parameter ϑ is −Σ\_p ⟨(G v)\_p, ∂\_ϑ(γα\_p ∇h\_δ(g\_p))⟩, plus the product rule through G for the axis weights, as now.
+  - In δ: ∂\_δ ∇h\_δ(g) = −g/δ² on the quadratic piece and 0 on the linear one, so δ can be learned.
+
+```c
+/* Huber-smoothed TV (1.x): g(z) = sum_p alpha_p h_delta(|(w_0 D_0 z, ..., )_p|_2)
+ * (isotropic) or sum_a w_a sum_p beta_{a,p} h_delta(|(D_a z)_p|) (anisotropic),
+ * h_delta as fp_op_huber, delta > 0 and finite (else FP_EPARAM). pixel_weights,
+ * edge_weights: NULL, or as fp_op_tv_iso_weighted and fp_op_tv_aniso_weighted.
+ * theta = (w..., alpha or beta in C order when given, delta). Iterative with a
+ * duality gap, dual in the workspace, NaN images and rescaling as fp_op_tv_iso. */
+FP_API fp_status fp_op_tv_iso_huber(int ndim, const fp_array *axis_weights,
+                                    const fp_array *pixel_weights, double delta, fp_op **out);
+FP_API fp_status fp_op_tv_aniso_huber(int ndim, const fp_array *axis_weights,
+                                      const fp_array *edge_weights, double delta, fp_op **out);
+```
+
+- **Python.** `fp.TVIsoHuber(delta, ndim=2, weights=None, pixel_weights=None)` and `fp.TVAnisoHuber(delta, ndim=2, weights=None, edge_weights=None)`, with `grads.delta` alongside the existing fields.
+- **PyTorch and JAX.** The device-native TV path, with the dual step above and the conjugate-gradient backward without regions.
+- **Tests.**
+  - The gap is recomputed independently.
+  - The bound ‖z\_δ − z\_TV‖² ≤ γδΣα\_p, against `TVIso` and `TVAniso` for δ from 1e-1 to 1e-4.
+  - CVXPY fixtures through its `huber` atom, rescaled.
+  - Finite differences in x, γ, the weights and δ.
+  - The linear rate: iterations against √κ log(1/tol).
+  - The scaling identity, the kink sides, and determinism.
+
+**Stage 2: spline potentials.**
+
+- **The potential.** φ: ℝ → ℝ with φ(0) = 0 and φ′ = s + λ₁ sign.
+  - s is continuous and piecewise linear through (t\_j, c\_j), j = 0, …, K − 1, for K ≥ 2 strictly increasing knots. Past the ends it is extended linearly with the slopes of the end pieces.
+  - λ₁ ≥ 0 adds an ℓ1 kink at 0, which gives sparsity.
+  - The pointwise operator is g(z) = Σ\_i w\_i φ(z\_i).
+  - Special cases are Huber (knots ±δ), the elastic net, Huber plus (ε/2)t² (De los Reyes, Schönlieb and Valkonen's H¹ term on a scalar response), and learned spline potentials.
+- **Convexity and the step condition.**
+  - Let m\_j be the slopes of s, the two extensions included. φ is convex when every m\_j ≥ 0. Otherwise it is weakly convex with modulus ρ = −min\_j m\_j.
+  - The prox is single-valued and Lipschitz when 1 + γ w\_i m\_j > 0 on every piece, that is γ ρ max w < 1. Otherwise the call returns FP\_EPARAM, as MCP does for b ≤ γ max w.
+- **Prox, exact.**
+  - z solves z + γ w φ′(z) ∋ x. The map F(z) = z + γ w s(z) is continuous, strictly increasing and piecewise linear. λ₁ adds a jump of 2γwλ₁ at 0, and that interval of x maps to 0.
+  - A binary search over F(t\_j) = t\_j + γ w c\_j, computed on the fly so that per-entry weights work, finds the piece. Then z = t\_j + (x − F(t\_j)) / (1 + γ w m\_j).
+  - This is exact to rounding, at about log₂ K comparisons per entry. The value φ(z) comes from prefix integrals of s at the knots, so `fp_value` is exact too.
+- **Derivatives.**
+  - In x: ∂z/∂x = 1/(1 + γ w m\_j) on the piece, and 0 in the dead zone.
+  - In the step and the weights: off the dead zone, ∂z/∂γ = −w φ′(z)/(1 + γ w m\_j), and the same with γ for w.
+  - In the coefficients: s(z) = (1 − θ) c\_j + θ c\_{j+1} with θ = (z − t\_j)/(t\_{j+1} − t\_j). So ∂z/∂c\_j = −γ w (1 − θ)/(1 + γ w m\_j) and ∂z/∂c\_{j+1} = −γ w θ/(1 + γ w m\_j), two nonzeros per entry; the extensions use the end pair.
+  - In λ₁: ∂z/∂λ₁ = −γ w sign(z)/(1 + γ w m\_j).
+  - Gradients in the coefficients and λ₁ are sums across rows, in the fixed blocks of `reduction_blocks`. The knots are fixed and are not parameters.
+- **Kinks.** Code 1 where z sits at a knot (the slope changes), code 2 where x is at an end of the dead zone. `fp_workspace_set_branch` picks the piece. There are no ties.
+- **Group form.** g(z) = Σ\_g c\_g φ(‖z\_g‖), by the norm-composition kernel of group Huber, SCAD and MCP (Beck, Theorem 6.18, for φ + ι\_{[0,∞)}, which needs only convexity). Weakly convex potentials take the same step condition as group SCAD and MCP.
+
+```c
+/* Spline potential (1.x): g(z) = sum_i w_i phi(z_i), phi(0) = 0, phi' = s + l1 sign(z),
+ * s continuous piecewise linear through (knots[j], coef[j]), K >= 2 strictly
+ * increasing finite knots, extended linearly past the ends; l1 >= 0. weights
+ * as fp_op_scad. The prox needs 1 + gamma w_i m > 0 for every slope m of s
+ * (else FP_EPARAM). theta = (coef..., l1, w...) (w only when weights are given). */
+FP_API fp_status fp_op_spline(const fp_array *knots, const fp_array *coef, double l1,
+                              const fp_array *weights, fp_op **out);
+/* The group form sum_g c_g phi(|z_g|_2), groups as fp_op_group_l2.
+ * theta = (coef..., l1, c...). */
+FP_API fp_status fp_op_group_spline(const fp_array *knots, const fp_array *coef, double l1,
+                                    int64_t n, const int64_t *groups, int64_t ngroups,
+                                    const fp_array *group_weights, fp_op **out);
+```
+
+- **Python.** `fp.Spline(knots, coef, l1=0.0, weights=None)` and `fp.GroupSpline(knots, coef, l1=0.0, groups=None, group_weights=None)`, with `grads.coef`, `grads.l1` and `grads.weights`. Both are elementwise or radial classes, so `jacobian_diag` and the kink API apply.
+- **Tests.**
+  - Against minimisation on a refined grid, as for the nonconvex maps.
+  - Huber and the elastic net as special cases, to rounding.
+  - Finite differences in the coefficients and in λ₁.
+  - Inputs at the step-condition boundary, and one-sided differences at knots.
+  - Membership of `CASES`.
+
+**Stage 3: analysis prior with a filter bank.**
+
+- **Filters.**
+  - Filter f is a small array w\_f of shape s\_f (up to 9 per axis), anchored at its first entry: (w\_f ⋆ z)\_p = Σ\_q w\_f[q] z\_{p+q}.
+  - The response is zero wherever p + q leaves the image for some q in the support (the valid response, extended by zero). The two-tap forward differences of the TV kernels are this case, so W = D gives the isotropic and anisotropic TV operators exactly. Those keep their kernels.
+- **Groups and potentials.**
+  - Each filter belongs to a group k. The group's response at p is the vector of its filters' responses.
+  - Each group has one potential, given as an operator handle: `fp_op_soft` (λ|t|), `fp_op_elastic_net`, `fp_op_huber` or a convex `fp_op_spline`. For a group of more than one filter it is applied to the norm, as in the group forms.
+  - The potentials' parameters are copied at construction, as for every other operator, so the handles may be freed afterwards. Other operators return FP\_EINVAL.
+  - Internally a potential provides φ, φ′, φ″, ∂\_θφ′, the conjugate's value and the prox of its conjugate. All four of the above have these in closed form.
+- **Method.**
+  - The dual method of stage 1, with W in place of G: u\_{k,p} ∈ ℝ^{c\_k} and z(u) = x − Σ\_k W\_kᵀ u\_k. The dual step of group k is the prox of (γα φ\_k ∘ ‖·‖)\*, in closed form by the Moreau identity from the potential's own radial prox.
+  - The step is τ = 1/L, with L = Σ\_f ‖w\_f‖₁². This holds by Young's inequality ‖w ⋆ z‖ ≤ ‖w‖₁‖z‖, and gives the TV kernel's 4 Σ w\_a² for differences.
+  - When every potential has a Lipschitz derivative (the Huber function, the elastic net without its ℓ1 part, a spline with λ₁ = 0), its conjugate is strongly convex and V-FISTA applies as in stage 1. Otherwise the method is FISTA with the isotropic kernel's gradient restarts.
+- **Certificate.** gap = Σ\_{k,p} [γα\_{k,p} φ\_k(‖g\_{k,p}‖) + (γα\_{k,p} φ\_k)\*(‖u\_{k,p}‖) − ⟨g\_{k,p}, u\_{k,p}⟩]. The conjugates are in closed form (an indicator, quadratics, piecewise quadratics for splines), so ‖z − z\*‖² ≤ 2·gap as for TV.
+- **Derivatives.** At the solution, z − x + γ Σ\_k W\_kᵀ α\_k ∇φ\_k(W\_k z) ∋ 0.
+  - **Smooth entries.** H\_{k,p} = γα\_{k,p}[φ″(r) n nᵀ + (φ′(r)/r)(I − n nᵀ)] with r = ‖g\_{k,p}‖, and γα φ″(0) I at r = 0 where φ′(0) = 0.
+  - **Flat entries.** These are g\_{k,p} = 0 under |t| or λ₁ > 0, read from the dual strictly inside its bound as `TVIso` reads them. They give constraints (W\_k dz)\_p = 0.
+  - **Without flat entries:** conjugate gradients on (I + Wᵀ H W) dz = r.
+  - **With flat entries:** the constraints merge pixels into regions only when W is a difference operator, so there is no union-find here. The design is MINRES on the symmetric saddle-point system with blocks I + W\_Aᵀ H W\_A and W\_Fᵀ in the first row and W\_F and 0 in the second, for the unknowns (dz, μ) and the right-hand side (r, 0). It is consistent, μ need not be unique and dz is, and it uses a block-diagonal preconditioner.
+  - **The alternative to measure first:** the isotropic kernel's cap, with flat entries treated as Huber at the certified error level. That is plain conjugate gradients, but stiffer as the gap shrinks. The gate decides.
+  - **Parameters.**
+    - θ = (the filters in order, α\_k in C order when given, then each potential's θ in group order).
+    - With v = Jᵀḡ and s\_{k,p} = α\_{k,p} ∇φ\_k(g\_{k,p}) (the dual over γ), the gradient in filter entry w\_f[q] is −γ Σ\_p (s\_{f,p} v\_{p+q} + (H W v)\_{f,p} z\_{p+q}). That is two correlations per filter, O(N |w\_f|).
+    - The potentials' gradients go through ∂\_θφ′ at r.
+- **Second-order TV.** `fp_op_tv2` is a fixed instance.
+  - One group holds the second differences D\_aa for each axis and √2 D\_ab for a < b: 3 filters in 2D, 6 in 3D. With |t| this is Σ\_p α\_p ‖∇²z\_p‖\_F, the Frobenius (Schatten-2) Hessian norm; with h\_δ it is its Huber smoothing.
+  - L = 64 in 2D and 144 in 3D. Affine images have zero responses, so they are fixed points of the prox.
+  - The Schatten-1 Hessian norm needs a 2 × 2 or 3 × 3 eigendecomposition per pixel, and waits for the closed-form small decompositions of the spectral operators.
+
+```c
+/* Analysis prior (1.x): g(z) = sum_k sum_p alpha_{k,p} phi_k(|(W_k z)_p|_2) on the
+ * last ndim (2 or 3) axes, batched over the others. nfilt filters: fshapes holds
+ * nfilt * ndim extents (each 1..9), filters their entries concatenated in C
+ * order; group[f] in [0, ngroups), every group nonempty; potentials: ngroups
+ * handles among fp_op_soft, fp_op_elastic_net, fp_op_huber and a convex
+ * fp_op_spline (copied; else FP_EINVAL). pixel_weights: NULL or
+ * (ngroups, image shape), finite and >= 0; the operator then takes only that
+ * shape. theta = (filters, alpha, potentials' theta in group order).
+ * Iterative with a duality gap, as fp_op_tv_iso. */
+FP_API fp_status fp_op_analysis(int ndim, int64_t nfilt, const int64_t *fshapes,
+                                const fp_array *filters, const int64_t *group, int64_t ngroups,
+                                const fp_op *const *potentials, const fp_array *pixel_weights,
+                                fp_op **out);
+/* Second-order TV: sum_p alpha_p |Hessian of z at p|_F by forward second
+ * differences, with h_delta in place of the norm when delta > 0. */
+FP_API fp_status fp_op_tv2(int ndim, const fp_array *pixel_weights, double delta, fp_op **out);
+```
+
+- **Python.**
+  - `fp.Analysis(filters, groups=None, potentials=fp.Soft(1.0), pixel_weights=None)`, where filters is a list of arrays and potentials one operator or one per group.
+  - `fp.TV2(ndim=2, pixel_weights=None, delta=0.0)`.
+  - `grads.filters` is a list, beside `grads.pixel_weights` and `grads.potentials`, one `Grads` per group.
+  - The PyTorch and JAX device paths use the framework's convolutions for W and Wᵀ, with the pointwise dual steps fused.
+- **Tests.**
+  - Forward differences as filters, against `TVIso` and `TVAniso` within the gaps.
+  - Second-order TV against CVXPY, and affine images as fixed points.
+  - The gap recomputed independently.
+  - Finite differences in x, the filters, the pixel weights and the spline coefficients.
+  - MINRES against the capped system on images with large flat sets.
+  - Determinism and the allocation counter.
+
+**Stage 4: weakly convex potentials.**
+
+- **When the prox exists.** A weakly convex spline (modulus ρ) inside the analysis prior has no conjugate dual. The prox objective P(z) = ½‖z − x‖² + γ Σ α φ(‖W z‖) is m-strongly convex with m = 1 − γ ρ α\_max L, which must be > 0 (else FP\_EPARAM).
+- **The primal method.** With λ₁ = 0, ∇P is Lipschitz, and the method is the constant-momentum accelerated gradient for strongly convex problems (Beck, Theorem 10.42, with no nonsmooth part).
+- **Certificate.** It stops on ‖∇P(z)‖² ≤ 2m·tol·½‖x‖², and reports gap = ‖∇P(z)‖²/(2m), a bound on P(z) − P\*. Then ‖z − z\*‖² ≤ 2·gap/m, and the docs state the factor 1/m.
+- **Derivatives.** As in stage 3. I + Wᵀ H W ⪰ m I, so conjugate gradients apply.
+
+**Not planned here.**
+- **ICNNs** (above).
+- **TGV and ICTV.** They couple a second variable inside the norm, so their prox is not the prox of potentials on one linear operator. It needs a primal–dual solver whose iterates are not dual-feasible, which breaks the gap certificate. The single-loop route needs only the dual projections they are built from (Section 7, "Coderivatives for nonsmooth bilevel methods").
+- **The Schatten-1 Hessian norm** (above).
+
 ## Algorithms in detail
 
 The implementation follows published direct algorithms and is written from the papers, not from existing code (Section 12 explains why). This section fixes the choices that matter for speed, exactness and derivatives.
@@ -248,9 +446,98 @@ Every operator exposes Jacobian-vector products (JVP) and vector-Jacobian produc
 | Anisotropic, isotropic and graph TV | no simple closed form | the dual variables; derivatives by implicit differentiation of the dual optimality conditions, solved with conjugate gradients |
 
 - **Parameter derivatives.** For 1D TV, the derivative in γ or in w\_i is constant on each segment and depends only on the segment length, the weights at its two ends and the signs of the jumps there, so it is also O(n). For thresholding maps, the derivative in λ is −γ ψ'(z\_i) / (1 + γλ ψ''(z\_i)) on the support.
-- **Kinks.** At points where the prox is not differentiable (an entry exactly at a threshold, a segment boundary with zero jump), the library returns the Jacobian of the active structure it selected, consistent with the tie rule in Section 4. Callers that need a full Clarke Jacobian are out of scope.
+- **Kinks.** At points where the prox is not differentiable (an entry exactly at a threshold, a segment boundary with zero jump), the library returns the Jacobian of the active structure it selected, consistent with the tie rule in Section 4. Callers that need a full Clarke Jacobian are out of scope. Revised 23 October 2026: the regular and limiting coderivatives at kinks, and mixtures of the one-sided pieces, come in 1.x ("Coderivatives for nonsmooth bilevel methods" below).
 - **Iterative operators.** For isotropic and multi-dimensional TV, the VJP solves a linear system on the dual active set by conjugate gradients, warm-started and stopped at a user tolerance. The returned residual tells bilevel codes with inexactness control, such as MAID-type methods, how accurate the hypergradient is.
 - **Verification.** Every derivative is tested against finite differences away from kinks, and the JVP and VJP are tested for adjointness: ⟨v, J u⟩ = ⟨Jᵀ v, u⟩ to rounding.
+
+### Coderivatives for nonsmooth bilevel methods (1.x, design)
+
+**Why coderivatives.** Where an inner problem is nonsmooth, its solution map has no derivative at kinks. Its adjoint equation then becomes an inclusion over a coderivative, Fréchet (regular) or limiting. The default derivatives of Section 7 return one element: the Jacobian of the selected piece. Two kinds of method need more.
+- **Single-loop methods.** These take one inner step, one adjoint step and one outer step per iteration, and never solve the inner problem. Suonperä and Valkonen (2026, Algorithm 5.1) do this for nonsmooth inner problems:
+  - the inner step is a primal–dual proximal splitting (PDPS) step, whose dual update is the prox of a conjugate, a projection onto pointwise balls for TV;
+  - the adjoint step is a projected gradient step on a quadratic (their (5.20)), over a set built from that projection's structure: (5.21) for the Fréchet coderivative, (5.22) for the limiting one.
+- **Implicit or adjoint methods that want a chosen element.** Examples are the element of least norm, or one consistent with an optimistic or pessimistic selection (Suonperä and Valkonen, Section 3). They need the whole set at the kinks, not one of its elements.
+
+fastprox does not ship these methods: bilevel algorithms belong in a separate package on the public API (decision of 2026-10-23). The sets, however, are known exactly and cheaply only inside the operator. fastprox provides them for three families, in this order.
+
+**Family 1: balls of a dual or a conjugate (closed form).**
+- **Which operators.**
+  - After `fp_prox_conj` with `keep_structure`, operators whose conjugate prox projects onto a product of balls: group ℓ2, with the ℓ2 norm as one group (Euclidean balls), and soft thresholding (intervals, the one-dimensional case). In a PDPS method for TV with K = ∇, the dual step is `fp_prox_conj` of group ℓ2.
+  - After `fp_prox` with `keep_structure`, the dual balls of isotropic TV, of the analysis prior with |t| potentials (Section 5) and, as intervals, of anisotropic TV. These serve adjoint inclusions written on the prox's own dual.
+- **The multiplier.**
+  - For a conjugate projection, ball j with radius r\_j maps y\_j to u\_j = y\_j / max(1, ‖y\_j‖/r\_j). So y\_j = (1 + ν\_j) u\_j with ν\_j = max(0, ‖y\_j‖/r\_j − 1). This is the quantity of Suonperä and Valkonen's Remark 6.2. It recovers the normal-cone element [Δw\_d + K u\_p]\_j = v\_j u\_{d,j} from the PDPS projection without recomputing it. (Their remark writes B(0, 1) for a ball of radius C.)
+  - For an image dual, the optimality condition g\_p ∈ N\_{B(γα\_p)}(u\_p), with g = W D z, gives g\_p = ν\_p u\_p with ν\_p = ‖g\_p‖/(γα\_p) on the sphere, from the saved z.
+- **The codes**, per ball, with a tolerance as in `fp_workspace_kinks`:
+  - 0: inside, ‖u\_j‖ < r\_j, read as the isotropic kernel reads its flat entries;
+  - 1: strictly active, ‖u\_j‖ = r\_j and ν\_j > tol;
+  - 2: degenerate, ‖u\_j‖ = r\_j and ν\_j ≤ tol.
+  - Code 2 is the existing kink code of group ℓ2 and of isotropic TV.
+- **The sets.** Per ball, for the adjoint pair (w\_j ∈ ℝ^{c}, λ\_j ∈ ℝ), from Suonperä and Valkonen's Lemma 5.5 and Corollary 5.6:
+
+| Code | Fréchet, (5.21) | Limiting, (5.22) |
+| --- | --- | --- |
+| 0 | λ\_j = 0 | λ\_j = 0 |
+| 1 | ⟨w\_j, u\_j⟩ = 0, λ\_j free | the same |
+| 2 | ⟨w\_j, u\_j⟩ ≥ 0 and λ\_j ≥ 0 | {λ\_j ≥ 0, ⟨w\_j, u\_j⟩ ≥ 0} ∪ {λ\_j ≤ 0, ⟨w\_j, u\_j⟩ = 0} |
+
+- **The projections.** Each is in closed form, O(c) per ball. The limiting case projects onto every convex piece and keeps the nearest, with ties going to the first piece, so the result is deterministic.
+- **A discrepancy to settle before implementing.** Lemma 5.5's (5.18) states the third case as λ\_j⟨w\_j, u\_j⟩ ≥ 0 and max(⟨w\_j, u\_j⟩, λ\_j) ≥ 0. That set also contains {λ\_j = 0, ⟨w\_j, u\_j⟩ < 0} (case c.6 of its proof), which the two branches of (5.22) leave out. If (5.18) is the intended set, the limiting projection gets that third piece.
+
+**Family 2: elementwise prox maps at kinks (closed form).**
+- **Which operators.** Elementwise operators whose prox is piecewise linear in x: soft thresholding, the elastic net, Huber, box and orthant, ℓ1 over a box, SCAD, MCP and spline potentials, and their group forms in the norm. The maps with jumps at ties (ℓ0, ℓq and the log penalty) have unbounded coderivatives there and return FP\_EINVAL.
+- **The sets.** Let a and b be the slopes in x of the pieces on the x − ε and x + ε sides of a kink, the pieces `fp_workspace_set_branch` already selects (sides −1 and +1).
+  - The regular coderivative is the upper adjoint of the directional derivative (Rockafellar and Wets, Proposition 8.37, 8(26)): D̂\*prox(x)(y) = {v : v h ≤ y prox′(x; h) for all h}. That is the segment {v : a y ≤ v ≤ b y}, empty when (b − a) y < 0.
+  - The limiting coderivative adds the two one-sided values: D\*prox(x)(y) = D̂\*prox(x)(y) ∪ {a y, b y}.
+  - Away from kinks both are {slope · y}.
+- **Jointly in x and the parameters.** At a kink, the two pieces' rows J\_− and J\_+ (derivatives in x, γ and θ) agree on the kink's hyperplane x = κ(γ, θ). The same argument gives the regular coderivative {(1 − s) y J\_−ᵀ + s y J\_+ᵀ : s ∈ [0, 1]} when (b − a) y ≥ 0 and the empty set otherwise. The limiting coderivative adds the endpoints s = 0 and s = 1.
+- **Group forms.** For a group in the norm (group soft thresholding at ‖x\_g‖ = γλc\_g, group SCAD, MCP and splines), the pieces meet on a sphere rather than a hyperplane. The directional derivative is still J\_− h or J\_+ h by the side of the normal n, with J\_+ − J\_− = c nᵀ by continuity. So the same holds with (b − a) y replaced by ⟨c, y⟩: v = J\_−ᵀ y + t n with 0 ≤ t ≤ ⟨c, y⟩. Its projection is a small quadratic programme with two linear constraints, solved by cases.
+- **Fractional branches.** So every element is a mixture of the two pieces with a weight s\_i ∈ [0, 1] per kink entry. `fp_workspace_set_branch_weights` generalises `fp_workspace_set_branch` (s = 0 is side −1, s = 1 side +1), and `fp_jvp` and `fp_vjp` then differentiate the mixture. That includes the parameter gradients, which is what a hypergradient through the selected element needs.
+- **The projections.** Per entry, onto the graph of the coderivative in the (y, v) plane:
+  - a convex cone at a kink in the regular case;
+  - the cone and the two lines v = a y and v = b y in the limiting case, the nearest kept;
+  - the line v = slope · y elsewhere.
+  - Each is closed form in O(1). The call also returns the s that represents the projected v, to pass to `fp_workspace_set_branch_weights`.
+
+**Family 3: polyhedral rows (design only, later).**
+- **Which operators.** The simplex, the ℓ1 ball, the hyperplane with a box, isotonic regression, and 1D, anisotropic, graph and tree TV. They also have piecewise-affine prox maps, so 8(26) gives the regular coderivative as a polyhedral cone. The pieces are indexed by the kink structure: which threshold entries join the support, which zero-jump edges join or split.
+- **Why not closed form.** One isolated kink in a row is the segment of family 2, between the two pieces' VJPs. Several kinks in one row interact: one entry joining the support moves τ for the others, and one edge joining moves a segment's mean. The set is then a cone over 2^m pieces, and its projection is a small quadratic programme over the m kink entries of the row.
+- **What is planned.** The kink mask already counts m per row. The design is a QP in the row's kink coordinates, solved exactly by an active-set method, scheduled when a user needs more than isolated kinks.
+
+```c
+/* Family 1 (1.x). After fp_prox_conj on fp_op_group_l2 (groups NULL: the l2
+ * norm) or fp_op_soft, or after fp_prox on fp_op_tv_iso, fp_op_tv_aniso or
+ * fp_op_analysis with |t| potentials, both with keep_structure: per ball, the
+ * multiplier nu >= 0 and the code 0 (inside), 1 (active, nu > tol) or 2
+ * (degenerate). codes FP_I8 and nu (either may be NULL) have one entry per ball. */
+FP_API fp_status fp_workspace_multipliers(const fp_workspace *ws, double tol,
+                                          fp_array *codes, fp_array *nu);
+typedef enum { FP_CODERIV_FRECHET = 0, FP_CODERIV_LIMITING = 1 } fp_coderiv_kind;
+/* Family 1: projects (w, lambda) onto the coderivative set of the saved
+ * projection, per ball; w has the shape of the dual, lambda one entry per ball.
+ * Family 2: projects (y, v) per entry onto the graph of the coderivative of
+ * the prox, w = y and lambda = v of the shape of x, and writes the mixture
+ * weight to s (may be NULL). Outputs may alias inputs. */
+FP_API fp_status fp_project_coderiv(const fp_op *op, const fp_workspace *ws,
+                                    fp_coderiv_kind kind, double tol,
+                                    const fp_array *w, const fp_array *lambda,
+                                    fp_array *w_out, fp_array *lambda_out, fp_array *s);
+/* Family 2: mixture weights s in [0, 1] (the shape of x) for the entries at a
+ * kink within tol; fp_jvp and fp_vjp differentiate (1 - s) J_- + s J_+ there.
+ * NULL clears it, as fp_workspace_set_branch(ws, NULL, 0). */
+FP_API fp_status fp_workspace_set_branch_weights(fp_workspace *ws, const fp_array *s,
+                                                 double tol);
+```
+
+- **Python.**
+  - `ctx.multipliers(tol)` returns (codes, nu).
+  - `op.project_coderivative(ctx, w, lam, kind="limiting", tol=0.0)` returns (w, lam) for family 1, and (y, v, s) for family 2.
+  - `jvp` and `vjp` take `branch_weights=s` beside `branch=`.
+- **Tests.**
+  - Family 1: the sets against the case analysis of Lemma 5.5; each projection's variational inequality on each piece; the codes at the boundary within tol.
+  - Family 2: the sets against 8(26) evaluated on the one-sided differences. The mixture's VJP is checked between the two one-sided VJPs, and the empty case for (b − a) y < 0.
+  - Determinism for both.
+  - A PDPS denoising run against Suonperä and Valkonen's Section 6 setup, in the bilevel package's test suite rather than here.
+- **Out of fastprox.** The PDPS loop, the adjoint objective, the step sizes and the choice of element belong to the bilevel package.
 
 ## Architecture
 
@@ -718,6 +1005,36 @@ The papers below are the sources each kernel is implemented from. The first grou
 - V. Vineet and P. J. Narayanan, CUDA cuts, CVPR Workshops 2008 (abstract); Y. Komura, Comput. Phys. Commun. 194, 2015 (abstract, and its generalisation, arXiv 1603.08357, Section 2).
 - J. Demmel and K. Veselić, Jacobi's method is more accurate than QR, SIAM J. Matrix Anal. Appl. 13(4), 1992 (abstract).
 - P. Ahrens, J. Demmel and H. D. Nguyen, Algorithms for efficient reproducible floating point summation, ACM TOMS 46(3), 2020 — not used: it gives the same sums across GPU models, which is not promised.
+
+**Checked for the analysis priors and the coderivatives** (2026-10-23, in the user's Notability library; printed pages)
+
+- A. Beck, *First-Order Methods in Optimization*, SIAM 2017 (N):
+  - (6.43) and Example 6.54, pp. 163–164: the Huber function as the Moreau envelope of the norm.
+  - Corollary 6.56, p. 165: the conjugate of a Moreau envelope, f\* + (μ/2)‖·‖².
+  - Example 6.62, p. 167: its gradient.
+  - Theorem 6.18, p. 142: norm composition, for g proper, closed and convex with dom g ⊆ [0, ∞).
+  - Section 10.7.7 and Theorem 10.42, pp. 301–302: V-FISTA, with momentum (√κ − 1)/(√κ + 1).
+  - Lemma 12.7, p. 356: ‖x̄ − x\*‖² ≤ (2/σ)(q\_opt − q(ȳ)).
+  - Section 12.4.4, p. 365: 2D TV denoising by the dual.
+- J. C. De los Reyes, C.-B. Schönlieb and T. Valkonen, [Bilevel parameter learning for higher-order total variation regularisation models](https://doi.org/10.1007/s10851-016-0662-8), JMIV 57, 2017 (N): Definition 2.1, the Huber function with γ = 1/δ; Section 5.1, γ = 100 and an H¹ weight μ = 1e-10.
+- K. Kunisch and T. Pock, A bilevel optimization approach for parameter learning in variational models, SIAM J. Imaging Sci. 6(2), 2013 (N): (2.1), filter-bank regularisers Σ\_k ϑ\_k ‖K\_k x‖\_p^p with fixed convolution filters and learned weights ϑ.
+- E. Suonperä and T. Valkonen, Single-loop approaches to nonsmooth bilevel optimisation, arXiv 2606.19143, 2026 (N):
+  - Algorithm 5.1, p. 39.
+  - Lemma 5.5 with (5.17)–(5.18), pp. 36–38.
+  - Corollary 5.6 with (5.20)–(5.22), p. 38: read from the PDF's text layer, since the transcription garbles the cases.
+  - Remark 6.2, p. 44.
+- R. T. Rockafellar and R. J.-B. Wets, *Variational Analysis*, Springer 1998 (N): Proposition 8.37 and 8(26), the regular coderivative as the upper adjoint of the graphical derivative, which for a single-valued semidifferentiable map is its directional derivative.
+- C. Clason and T. Valkonen, Introduction to nonsmooth analysis and optimization, arXiv 2001.00216 (N): the upper and lower adjoints of set-valued maps and the relations between derivatives and coderivatives, p. 293.
+- J. Hertrich et al., Learning regularization functionals for inverse problems: a comparative study, arXiv 2510.01755 (N): Section 2.1, (6)–(7), the ridge-regulariser form and its gradient.
+
+**Cited for the analysis priors from bibliographic records only** (not opened; check before citing in kernel headers)
+
+- M. Hintermüller and G. Stadler, SIAM J. Sci. Comput. 28, 2006, doi:10.1137/040613263 — Huber-regularised TV in semismooth Newton methods.
+- A. Goujon, S. Neumayer, P. Bohra, S. Ducotterd and M. Unser, A neural-network-based convex regularizer for inverse problems, IEEE TCI, 2023, doi:10.1109/TCI.2023.3306100 (CRR-NN); A. Goujon, S. Neumayer and M. Unser, Learning weakly convex regularizers for convergent image-reconstruction algorithms, SIAM J. Imaging Sci., doi:10.1137/23M1565243 (WCRR). Their knot grids, constraints and inner solvers are not yet checked.
+- P. Bohra, J. Campos, H. Gupta, S. Aziznejad and M. Unser, Learning activation functions in deep (spline) neural networks, IEEE OJSP, 2020, doi:10.1109/OJSP.2020.3039379 — linear-spline activations.
+- S. Lefkimmiatis, J. P. Ward and M. Unser, Hessian Schatten-norm regularization for linear inverse problems, IEEE TIP 22, 2013, doi:10.1109/TIP.2013.2237919 — second-order TV and its dual prox.
+- Y. Chen, R. Ranftl and T. Pock, Insights into analysis operator learning, IEEE TIP, 2014, doi:10.1109/TIP.2014.2299065 — bilevel learning of filters and potentials.
+- K. Bredies, K. Kunisch and T. Pock, Total generalized variation, SIAM J. Imaging Sci. 3(3), 2010, doi:10.1137/090769521.
 
 **To check before citing in code**
 
