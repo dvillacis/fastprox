@@ -391,7 +391,7 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
 // depend on the thread count (no row_grain or elem_piece here).
 template <class T>
 fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, const Arr &gx,
-                     double *tot) {
+                     double *tot, bool want = true) {
     int nt = ws.nthreads;
     const int64_t P = op.nparams();
     const int64_t W = P + 2;
@@ -422,7 +422,7 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                                int64_t wstep) {
                                split_rows(rp, ws.steps_on, pos, len, [&](int64_t i0, int64_t m, int64_t row) {
                                    op.vjp_run(save + pos + i0, gd + off[0] + i0 * gs, gs, xd + off[1] + i0 * os,
-                                              os, m, ws.step(row), a, widx + i0 * wstep, wstep, conj, sigma,
+                                              os, m, ws.step(row), want ? a : nullptr, widx + i0 * wstep, wstep, conj, sigma,
                                               ws.tie, side ? side + pos + i0 : nullptr, ktol);
                                });
                            });

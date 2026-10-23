@@ -120,6 +120,7 @@ struct TVIso final : ImageOp<TVIso> {
     double w[3];
     std::unique_ptr<fp_op> tv;  // exact 1D TV, for a single active axis
     Vec alpha;                  // pixel weights (C order over ashape), or empty
+    double alphamax_ = vmax(alpha);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     int64_t ashape[3] = {1, 1, 1};
 
     TVIso(int kk, const double *ww, std::unique_ptr<fp_op> t, Vec al = {}, const int64_t *ash = nullptr)
@@ -130,7 +131,7 @@ struct TVIso final : ImageOp<TVIso> {
     }
 
     const char *name() const noexcept override { return "tv_iso"; }
-    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (alpha.empty() ? 1.0 : vmax(alpha)); }
+    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (alpha.empty() ? 1.0 : alphamax_); }
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }

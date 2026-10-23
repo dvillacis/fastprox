@@ -3128,6 +3128,155 @@ static void test_refine() {
     for (fp_op *op : ops) fp_op_free(op);
 }
 
+// Elementwise kernels and derivative loops (audits C4, C5): for every
+// elementwise operator of derivative_cases, the prox is the same bits in
+// every layout (contiguous, in place, strided, kept) and dtype; a vjp asked
+// for no sum gives the gx of one asked for all; the parameter gradients are
+// the same bits for every thread count and layout; and a projection's
+// gamma gradient is exactly 0, even for an infinite cotangent.
+static void test_elementwise_fast_paths() {
+    const int64_t rows = 256, n = 1000, N = rows * n;
+    for (const auto &c : derivative_cases(n)) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        fp_options probe = opts(-1, 1);
+        Arr one({1, n}, randn(n)), oz({1, n});
+        bool elementwise = true;
+        {
+            // Elementwise iff the row result does not depend on the other
+            // entries: change entry 0, compare the rest.
+            CHECK_OK(fp_prox(op, c.gamma, &one.a, &oz.a, &probe, nullptr, nullptr));
+            Arr two(one), tz({1, n});
+            two.data[0] += 3.0;
+            CHECK_OK(fp_prox(op, c.gamma, &two.a, &tz.a, &probe, nullptr, nullptr));
+            for (int64_t i = 1; i < n && elementwise; ++i) elementwise = oz.data[i] == tz.data[i];
+        }
+        if (!elementwise) {
+            fp_op_free(op);
+            continue;
+        }
+        Arr x({rows, n}, randn(N, 1.5)), z({rows, n}), g({rows, n}, randn(N));
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &probe, nullptr, nullptr));
+        Arr y(x);
+        CHECK_OK(fp_prox(op, c.gamma, &y.a, &y.a, &probe, nullptr, nullptr));  // in place
+        CHECK(y.data == z.data);
+        Vec x3(static_cast<size_t>(3 * N));
+        for (int64_t i = 0; i < N; ++i) x3[static_cast<size_t>(3 * i)] = x.data[static_cast<size_t>(i)];
+        const int64_t s3[2] = {3 * n, 3};
+        fp_array xs = x.a;
+        xs.data = x3.data();
+        xs.strides = s3;
+        Arr zs({rows, n});
+        CHECK_OK(fp_prox(op, c.gamma, &xs, &zs.a, &probe, nullptr, nullptr));  // strided
+        CHECK(zs.data == z.data);
+        // float32 in place and out of place.
+        std::vector<float> xf(static_cast<size_t>(N)), zf(xf.size()), yf;
+        for (int64_t i = 0; i < N; ++i) xf[static_cast<size_t>(i)] = static_cast<float>(x.data[static_cast<size_t>(i)]);
+        yf = xf;
+        fp_array xfa = x.a, zfa = x.a, yfa = x.a;
+        xfa.dtype = zfa.dtype = yfa.dtype = FP_F32;
+        xfa.data = xf.data();
+        zfa.data = zf.data();
+        yfa.data = yf.data();
+        CHECK_OK(fp_prox(op, c.gamma, &xfa, &zfa, &probe, nullptr, nullptr));
+        CHECK_OK(fp_prox(op, c.gamma, &yfa, &yfa, &probe, nullptr, nullptr));
+        CHECK(yf == zf);
+        // Kept, at several thread counts and layouts: the same prox, the same
+        // gx with and without the sums, the same sums.
+        const int64_t P = fp_op_nparams(op);
+        std::vector<Vec> sums;
+        for (int t : {1, 2, 15}) {
+            for (int layout = 0; layout < 3; ++layout) {
+                // 0: C order; 1: rows reversed (negative stride); 2: the
+                // transpose along axis 0.
+                Arr xl({rows, n}), zl({rows, n}), gl({rows, n}), gx({rows, n}), gx0({rows, n});
+                fp_options o = opts(-1, t, 1);
+                fp_array xa = x.a, ga = g.a, za = zl.a, gxa = gx.a, gx0a = gx0.a;
+                int64_t sh[2] = {rows, n}, st[2] = {n, 1};
+                Vec xt, gt, zt, gxt, gx0t;
+                if (layout == 1) {
+                    st[0] = -n;
+                    for (fp_array *a : {&xa, &ga}) a->strides = st;
+                    xa.data = x.data.data() + (rows - 1) * n;
+                    ga.data = g.data.data() + (rows - 1) * n;
+                    for (fp_array *a : {&za, &gxa, &gx0a}) a->strides = st;
+                    za.data = zl.data.data() + (rows - 1) * n;
+                    gxa.data = gx.data.data() + (rows - 1) * n;
+                    gx0a.data = gx0.data.data() + (rows - 1) * n;
+                } else if (layout == 2) {
+                    // The same rows stored transposed, the operator along axis 0.
+                    xt.resize(static_cast<size_t>(N));
+                    gt.resize(static_cast<size_t>(N));
+                    zt.resize(static_cast<size_t>(N));
+                    gxt.resize(static_cast<size_t>(N));
+                    gx0t.resize(static_cast<size_t>(N));
+                    for (int64_t r = 0; r < rows; ++r)
+                        for (int64_t j = 0; j < n; ++j) {
+                            xt[static_cast<size_t>(j * rows + r)] = x.data[static_cast<size_t>(r * n + j)];
+                            gt[static_cast<size_t>(j * rows + r)] = g.data[static_cast<size_t>(r * n + j)];
+                        }
+                    sh[0] = n;
+                    sh[1] = rows;
+                    st[0] = rows;
+                    st[1] = 1;
+                    for (fp_array *a : {&xa, &ga, &za, &gxa, &gx0a}) {
+                        a->shape = sh;
+                        a->strides = st;
+                    }
+                    xa.data = xt.data();
+                    ga.data = gt.data();
+                    za.data = zt.data();
+                    gxa.data = gxt.data();
+                    gx0a.data = gx0t.data();
+                    o.axis = 0;
+                }
+                fp_workspace *ws;
+                CHECK_OK(fp_workspace_create(op, &xa, &o, &ws));
+                CHECK_OK(fp_prox(op, c.gamma, &xa, &za, &o, ws, nullptr));
+                Arr gp({std::max<int64_t>(P, 1)});
+                double gg = 0.0;
+                CHECK_OK(fp_vjp(op, ws, &ga, &gxa, &gg, P ? &gp.a : nullptr));
+                CHECK_OK(fp_vjp(op, ws, &ga, &gx0a, nullptr, nullptr));
+                if (layout == 2) {
+                    bool same = true;
+                    for (int64_t r = 0; r < rows; ++r)
+                        for (int64_t j = 0; j < n; ++j) {
+                            same = same && zt[static_cast<size_t>(j * rows + r)] == z.data[static_cast<size_t>(r * n + j)];
+                            same = same && gxt[static_cast<size_t>(j * rows + r)] == gx0t[static_cast<size_t>(j * rows + r)];
+                        }
+                    CHECK(same);
+                } else {
+                    CHECK(zl.data == z.data);
+                    CHECK(gx.data == gx0.data);
+                }
+                gp.data.push_back(gg);
+                sums.push_back(gp.data);
+                fp_workspace_free(ws);
+            }
+        }
+        // The blocks of the sums follow the C order of the batch: C order and
+        // its transpose along axis 0 visit the entries in another order, so
+        // they are compared with each other only within a layout.
+        for (size_t i = 3; i < sums.size(); ++i) CHECK(sums[i] == sums[i % 3]);
+        if (std::string(c.name) != "nonneg" && std::string(c.name).rfind("box", 0) != 0) {
+            fp_op_free(op);
+            continue;
+        }
+        // A projection: gamma's gradient is exactly 0, an infinite g included.
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
+        Arr gi(g), gx({rows, n});
+        gi.data[7] = INFINITY;
+        double gg = -1.0;
+        CHECK_OK(fp_vjp(op, ws, &gi.a, &gx.a, &gg, nullptr));
+        CHECK(gg == 0.0);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3824,6 +3973,7 @@ int main() {
     test_kept_point_lifetime();
     test_image_info();
     test_refine();
+    test_elementwise_fast_paths();
     test_nan_images();
     test_aliasing();
     test_descriptor_bounds();

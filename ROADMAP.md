@@ -204,8 +204,8 @@ its row to the decisions table when it lands.
 
 **Speed (1.0.x)**
 
-- [ ] C4: Vectorise the elementwise prox loops, contiguous and in place — [spec](docs/audit-2026-10.md#c4)
-- [ ] C5: Elementwise jvp and vjp: register accumulators, branch-free pieces, skip unrequested sums — [spec](docs/audit-2026-10.md#c5)
+- [x] C4: Vectorise the elementwise prox loops, contiguous and in place — [spec](docs/audit-2026-10.md#c4)
+- [x] C5: Elementwise jvp and vjp: register accumulators, branch-free pieces, skip unrequested sums — [spec](docs/audit-2026-10.md#c5)
 - [x] C6: Pool: close the job when its pieces are done, instead of waiting for every worker — [spec](docs/audit-2026-10.md#c6)
 - [x] C7: Grain: pieces scaled to the thread count for prox and jvp — [spec](docs/audit-2026-10.md#c7)
 - [ ] C8: Strided operator axis: gather and scatter rows in tiles — [spec](docs/audit-2026-10.md#c8)

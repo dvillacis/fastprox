@@ -93,6 +93,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     double w[3];
     std::unique_ptr<fp_op> tv;  // 1D TV with unit weight; gamma carries the radius
     Vec beta;                   // edge weights beta[a * N + p] for one image shape, or empty
+    double betamax_ = vmax(beta);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     int64_t eshape[3] = {1, 1, 1};
 
     TVAniso(int kk, const double *ww, std::unique_ptr<fp_op> t, Vec b = {}, const int64_t *shape = nullptr)
@@ -103,7 +104,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     }
 
     const char *name() const noexcept override { return "tv_aniso"; }
-    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (beta.empty() ? 1.0 : vmax(beta)); }
+    double step_scale() const noexcept override { return std::max({w[0], w[1], w[2]}) * (beta.empty() ? 1.0 : betamax_); }
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(beta.size()); }
     int image_ndim() const noexcept override { return k; }

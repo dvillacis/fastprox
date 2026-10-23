@@ -40,10 +40,11 @@ inline double pos(double a) noexcept { return std::max(a, 0.0); }
 struct Soft final : ElemOp<Soft> {
     double lambda;
     Vec w;
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     Soft(double l, Vec ww) : lambda(l), w(std::move(ww)) {}
 
     const char *name() const noexcept override { return "soft"; }
-    double step_scale() const noexcept override { return lambda * vmax(w); }
+    double step_scale() const noexcept override { return lambda * wmax_; }
     bool conj_homogeneous() const noexcept override { return true; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
@@ -60,6 +61,32 @@ struct Soft final : ElemOp<Soft> {
         const double xd = static_cast<double>(x);
         const double tau = gamma * lambda * w[wi(i)];
         return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
+    }
+    // By-value kernels (audit C4): tau as prox1 forms it, (gamma lambda) w.
+    static constexpr bool kUniformKernel = true, kIndexedKernel = true;
+    template <class T>
+    struct UK {
+        double tau;
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda * w[0]}; }
+    template <class T>
+    struct IK {
+        double gl;
+        const double *w;
+        T operator()(T x, int64_t i) const noexcept {
+            const double xd = static_cast<double>(x);
+            const double tau = gl * w[i];
+            return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
+        }
+    };
+    template <class T, class F>
+    void with_indexed_kernel(double gamma, F &&f) const {
+        f(IK<T>{gamma * lambda, w.data()});
     }
     // Pieces: 0 thresholded, 1 shifted by -s tau (the identity when tau = 0,
     // where s = 0 at x = 0). Kink 1 at |x| = tau > 0.
@@ -81,8 +108,22 @@ struct Soft final : ElemOp<Soft> {
         }
         return e;
     }
+    // deriv_piece(x, piece_of(x)), without branches on the data (audit C5):
+    // both pieces' values formed, then selected; a mispredicted branch per
+    // entry cost more than the derivative itself on random data.
     ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
-        return deriv_piece(x, gamma, i, piece_of(x, gamma, i));
+        const int64_t k = wi(i);
+        const double tau = gamma * lambda * w[k];
+        const bool on = !(tau > 0.0) || std::fabs(x) > tau;
+        const double s = static_cast<double>(x > 0) - static_cast<double>(x < 0);  // sgn(x)
+        const double dg = -s * lambda * w[k], pv = -s * gamma * lambda;
+        ElemDeriv e;
+        e.j = on ? 1.0 : 0.0;
+        e.dg = on ? dg : 0.0;
+        e.np = on;
+        e.pi[0] = k;
+        e.pv[0] = on ? pv : 0.0;
+        return e;
     }
     int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
         const double tau = gamma * lambda * w[wi(i)];
@@ -112,6 +153,17 @@ struct ElasticNet final : ElemOp<ElasticNet> {
         return static_cast<T>(std::copysign(pos(std::fabs(xd) - gamma * l1), xd) /
                               (1.0 + gamma * l2));
     }
+    static constexpr bool kUniformKernel = true;
+    template <class T>
+    struct UK {
+        double a, b;  // gamma l1 and 1 + gamma l2, as prox1 forms them
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            return static_cast<T>(std::copysign(pos(std::fabs(xd) - a), xd) / b);
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * l1, 1.0 + gamma * l2}; }
     ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
         ElemDeriv e;
         const double tau = gamma * l1;
@@ -155,6 +207,20 @@ struct Huber final : ElemOp<Huber> {
         if (std::fabs(xd) <= c) return static_cast<T>(xd * (delta / c));
         return static_cast<T>(xd - gamma * lambda * std::copysign(1.0, xd));
     }
+    static constexpr bool kUniformKernel = true;
+    template <class T>
+    struct UK {
+        double c, r, gl;  // delta + gamma lambda, delta / c, gamma lambda
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            return static_cast<T>(std::fabs(xd) <= c ? xd * r : xd - gl * std::copysign(1.0, xd));
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double gamma) const noexcept {
+        const double c = delta + gamma * lambda;
+        return {c, delta / c, gamma * lambda};
+    }
     ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
         ElemDeriv e;
         const double c = delta + gamma * lambda;
@@ -164,7 +230,9 @@ struct Huber final : ElemOp<Huber> {
         if (std::fabs(x) <= c) {
             // With q = x / c (|q| <= 1 here), delta / c and gamma lambda / c (in
             // [0, 1]): no product grows past its factors, where c^2 and
-            // x delta lambda over- or underflow (audit K10).
+            // x delta lambda over- or underflow (audit K10). A branch, not a
+            // select: the division here costs more than the misprediction
+            // (audit C5, measured).
             const double q = x / c, rd = delta / c, rl = gamma * lambda / c;
             e.j = rd;
             e.dg = -q * rd * lambda;
@@ -183,6 +251,7 @@ struct Huber final : ElemOp<Huber> {
 
 // Projection onto lo <= z <= hi. theta = (lo..., hi...).
 struct Box final : ElemOp<Box> {
+    static constexpr bool kGammaFree = true;  // a projection: dz/dgamma = 0 (audit C5)
     Vec lo, hi;
     Box(Vec a, Vec b) : lo(std::move(a)), hi(std::move(b)) {}
 
@@ -213,6 +282,34 @@ struct Box final : ElemOp<Box> {
         const double xd = static_cast<double>(x);
         const double l = lo[li(i)], h = hi[hj(i)];
         return static_cast<T>(xd < l ? l : (xd > h ? h : xd));
+    }
+    static constexpr bool kUniformKernel = true, kIndexedKernel = true;
+    template <class T>
+    struct UK {
+        double l, h;
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            return static_cast<T>(xd < l ? l : (xd > h ? h : xd));
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double) const noexcept { return {lo[0], hi[0]}; }
+    template <class T, bool LP, bool HP>
+    struct IK {
+        Par<LP> lo;
+        Par<HP> hi;
+        T operator()(T x, int64_t i) const noexcept {
+            const double xd = static_cast<double>(x);
+            const double l = lo[i], h = hi[i];
+            return static_cast<T>(xd < l ? l : (xd > h ? h : xd));
+        }
+    };
+    template <class T, class F>
+    void with_indexed_kernel(double, F &&f) const {
+        const bool lp = lo.size() > 1, hp = hi.size() > 1;
+        if (lp && hp) f(IK<T, true, true>{par<true>(lo), par<true>(hi)});
+        else if (lp) f(IK<T, true, false>{par<true>(lo), par<false>(hi)});
+        else f(IK<T, false, true>{par<false>(lo), par<true>(hi)});
     }
     // Pieces (since 0.3 explicit): 0 clipped to the lower bound, 1 inside, 2
     // clipped to the upper bound. Kinks 1 at x = lower, 2 at x = upper.
@@ -253,6 +350,7 @@ struct Box final : ElemOp<Box> {
 };
 
 struct NonNeg final : ElemOp<NonNeg> {
+    static constexpr bool kGammaFree = true;  // a projection: dz/dgamma = 0 (audit C5)
     const char *name() const noexcept override { return "nonneg"; }
     double step_scale() const noexcept override { return 0.0; }
     bool conj_homogeneous() const noexcept override { return true; }
@@ -266,6 +364,13 @@ struct NonNeg final : ElemOp<NonNeg> {
     T prox1(T x, double, int64_t) const noexcept {
         return x < T(0) ? T(0) : x;
     }
+    static constexpr bool kUniformKernel = true;
+    template <class T>
+    struct UK {
+        T operator()(T x) const noexcept { return x < T(0) ? T(0) : x; }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double) const noexcept { return {}; }
     // Pieces (since 0.3 explicit): 0 clipped, 1 inside; kink 1 at x = 0.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double, int64_t) const noexcept { return {x < 0 ? 0 : 1, 1.0}; }
@@ -316,6 +421,17 @@ struct LogBarrier final : ElemOp<LogBarrier> {
         const double xd = static_cast<double>(x), gl = gamma * lambda;
         return static_cast<T>(value(xd, root(xd, gl), gl));
     }
+    static constexpr bool kUniformKernel = true;
+    template <class T>
+    struct UK {
+        double gl;
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            return static_cast<T>(value(xd, root(xd, gl), gl));
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda}; }
     ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
         ElemDeriv e;
         const double gl = gamma * lambda, r = root(x, gl);
@@ -339,11 +455,12 @@ struct LogBarrier final : ElemOp<LogBarrier> {
 struct L1Box final : ElemOp<L1Box> {
     double lambda;
     Vec w, lo, hi;
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     L1Box(double l, Vec ww, Vec a, Vec b)
         : lambda(l), w(std::move(ww)), lo(std::move(a)), hi(std::move(b)) {}
 
     const char *name() const noexcept override { return "l1_box"; }
-    double step_scale() const noexcept override { return lambda * vmax(w); }
+    double step_scale() const noexcept override { return lambda * wmax_; }
     int64_t nparams() const noexcept override {
         return static_cast<int64_t>(w.size() + lo.size() + hi.size());
     }
@@ -369,6 +486,50 @@ struct L1Box final : ElemOp<L1Box> {
         const double y = std::copysign(pos(std::fabs(xd) - tau), xd);
         const double l = lo[at(lo, i)], h = hi[at(hi, i)];
         return static_cast<T>(y < l ? l : (y > h ? h : y));
+    }
+    static constexpr bool kUniformKernel = true, kIndexedKernel = true;
+    template <class T>
+    struct UK {
+        double tau, l, h;
+        T operator()(T x) const noexcept {
+            const double xd = static_cast<double>(x);
+            const double y = std::copysign(pos(std::fabs(xd) - tau), xd);
+            return static_cast<T>(y < l ? l : (y > h ? h : y));
+        }
+    };
+    template <class T>
+    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda * w[0], lo[0], hi[0]}; }
+    template <class T, bool WP, bool LP, bool HP>
+    struct IK {
+        double gl;
+        Par<WP> w;
+        Par<LP> lo;
+        Par<HP> hi;
+        T operator()(T x, int64_t i) const noexcept {
+            const double xd = static_cast<double>(x);
+            const double tau = gl * w[i];
+            const double y = std::copysign(pos(std::fabs(xd) - tau), xd);
+            const double l = lo[i], h = hi[i];
+            return static_cast<T>(y < l ? l : (y > h ? h : y));
+        }
+    };
+    template <class T, bool WP, bool LP, bool HP, class F>
+    void kernel_(double gl, F &f) const {
+        f(IK<T, WP, LP, HP>{gl, par<WP>(w), par<LP>(lo), par<HP>(hi)});
+    }
+    template <class T, class F>
+    void with_indexed_kernel(double gamma, F &&f) const {
+        const double gl = gamma * lambda;
+        const int c = (w.size() > 1) << 2 | (lo.size() > 1) << 1 | (hi.size() > 1);
+        switch (c) {
+            case 1: return kernel_<T, false, false, true>(gl, f);
+            case 2: return kernel_<T, false, true, false>(gl, f);
+            case 3: return kernel_<T, false, true, true>(gl, f);
+            case 4: return kernel_<T, true, false, false>(gl, f);
+            case 5: return kernel_<T, true, false, true>(gl, f);
+            case 6: return kernel_<T, true, true, false>(gl, f);
+            default: return kernel_<T, true, true, true>(gl, f);
+        }
     }
     // Pieces: 0 thresholded (inside the bounds), 1 soft's shifted branch, 2
     // clipped at lower, 3 clipped at upper. Kinks: 1 at |x| = tau, 2 where

@@ -47,12 +47,13 @@ struct GroupL2 final : RowOp<GroupL2> {
     std::vector<int64_t> gid;  // empty: one group
     int64_t G;
     Vec c;  // group weights, length 1 or G
+    double cmax_ = vmax(c);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
 
     GroupL2(double l, std::vector<int64_t> g, int64_t ng, Vec cc)
         : lambda(l), gid(std::move(g)), G(ng), c(std::move(cc)) {}
 
     const char *name() const noexcept override { return gid.empty() ? "l2" : "group_l2"; }
-    double step_scale() const noexcept override { return lambda * vmax(c); }
+    double step_scale() const noexcept override { return lambda * cmax_; }
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(c.size()); }
     fp_status check_n(int64_t n) const noexcept override {
@@ -263,6 +264,7 @@ struct TreeL2 final : RowOp<TreeL2> {
     double l1;
     std::vector<int64_t> ptr, idx;  // groups in the caller's order
     Vec eta;                        // length 1 or G
+    double etamax_ = vmax(eta);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     std::vector<int64_t> order;     // processing order: by size, stable
     int64_t G, total, need;         // need: the smallest valid axis length
 
@@ -273,7 +275,7 @@ struct TreeL2 final : RowOp<TreeL2> {
           need(nd) {}
 
     const char *name() const noexcept override { return "tree_l2"; }
-    double step_scale() const noexcept override { return std::max(l1, vmax(eta)); }
+    double step_scale() const noexcept override { return std::max(l1, etamax_); }
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return 1 + static_cast<int64_t>(eta.size()); }
     fp_status check_n(int64_t n) const noexcept override { return n >= need ? FP_OK : FP_ESHAPE; }
