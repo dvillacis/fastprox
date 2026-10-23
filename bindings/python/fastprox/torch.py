@@ -343,6 +343,16 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         deriv_tol = float(deriv_tol)
     cfg = _TVConfig(iso, ndim, w, tol, max_iter, warm, deriv_tol, deriv_max_iter)
     sw = None if spatial is None else _spatial(spatial, x, ndim, iso)
+    if x.numel() == 0:  # an empty batch: an empty result, in the graph of every input (audit P8)
+        z = x.clone()
+        for t in (gb, wt, sw):
+            if t is not None:
+                z = z + 0 * t.sum()
+        cfg.info = _tvt.info(torch.zeros(0, dtype=x.dtype), 0, True,
+                             torch.zeros((ndim, *x.shape), dtype=x.dtype, device=x.device))
+        return (z, cfg.info) if return_info else z
+    if bool(torch.isinf(x.detach()).any()):  # one sync; the solve syncs every few iterations anyway
+        raise ValueError("x contains ±Inf; image operators reject infinite values")
     z = _DeviceTV.apply(cfg, x, gb, wt, sw)
     return (z, cfg.info) if return_info else z
 

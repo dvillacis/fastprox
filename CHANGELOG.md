@@ -34,6 +34,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Empty batches and NaN or Inf images follow one contract across the NumPy, PyTorch and JAX paths of the iterative operators (audit P8).
+  - **Empty batches:** they return an empty result with gap 0, 0 iterations and `converged`, with empty or zero gradients. Before:
+    - NumPy raised "invalid argument" (`fp_workspace_get_dual`, as the empty call never marked its dual);
+    - `fastprox.torch.tv_iso` raised `IndexError` or `RuntimeError`;
+    - `fastprox.jax.tv_iso` raised `ZeroDivisionError`.
+  - **NaN images:** on the device paths a NaN image ran all 1000 iterations and made `converged` False. It now takes none and reports a NaN gap, as on the C path since A8. The other images are unaffected, and their gradients stay finite.
+  - **±Inf:** PyTorch and eager JAX now reject it with `ValueError`, as the C path does. Under `jax.jit` such an image is treated as a NaN image.
 - Calls on one Python `Context` are serialised by a lock (audit P3). Its workspace's scratch, branch override and derivative tolerance are shared, and the GIL is released during the C calls. 4 threads making derivative calls on one context gave wrong results in 80 of 80 isotropic TV vjps (by up to 3.9e262) and in 118 of 120 soft-thresholding jvps with a branch. The cost on a tiny call is under 0.03 µs.
 - The Python bindings release the GIL in operator constructors, workspace creation, and the dual and kink copies (audit P4). Building `GraphTV` on 2·10⁶ nodes held it for 255 ms.
 - Row operators' workspaces hold per-thread scratch for at most as many threads as there are rows (audit C2). Before, one row of 2²³ samples for 1D TV allocated 10.6 GB at 15 threads instead of 704 MB. Pages were touched lazily, so the time was the same, but with strict overcommit, or Windows commit accounting, the call could fail with `FP_ENOMEM`. Spectral derivatives size their scratch the same way.
