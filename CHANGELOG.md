@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- CI builds and tests the aarch64 wheel on every pull request that touches the library, its tests or the build, as the release does. It is the wheel built by GCC for a CPU with FMA, where results depended on the thread count before `-ffp-contract=off`; only the TestPyPI dry run for 1.0.0rc2 had found that (#105).
+
 ## [1.0.0rc2] — 2026-10-23
 
 The second release candidate for 1.0, from master, on PyPI as a pre-release (`pip install --pre fastprox`). It adds the spectral operators, one step per row (`fp_prox_steps`), the device API (no CUDA kernels yet: device arrays return `FP_EINVAL`), the fixes of the audit of 2026-10-22, and the first items of the user feedback of 2026-10-23 (`ztol=`, `IterInfo.zerr`, `ConvergenceWarning`, `fp.inner_accuracy`). The new C functions join the 1.0 ABI, which the `abi` job still checks against 0.5.0. The remaining feedback items change the Python API and follow in an rc3 before 1.0.0.
