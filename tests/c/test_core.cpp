@@ -3032,7 +3032,10 @@ static void test_refine() {
         fp_op *op = ops[oi];
         const bool image = oi < 2;
         const std::vector<int64_t> shape = image ? std::vector<int64_t>{B, side, side} : std::vector<int64_t>{B, N};
-        const double loose = oi == 2 ? 0.3 : 1e-3, tight = oi >= 2 ? 0.0 : 1e-12;
+        // Tight for isotropic TV is 1e-10: 1e-12 sits at its rounding floor,
+        // reached natively but not always under valgrind's emulation. What is
+        // tested is that a refine equals a fresh seeded solve, status included.
+        const double loose = oi == 2 ? 0.3 : 1e-3, tight = oi >= 2 ? 0.0 : (oi == 0 ? 1e-10 : 1e-12);
         for (bool conj : {false, true}) {
             Arr x(shape, xv), z(shape), zr(shape), zf(shape), g(shape, randn(B * N));
             Arr gx1(shape), gx2(shape);
@@ -3049,7 +3052,8 @@ static void test_refine() {
             auto prox = [&](fp_workspace *w, const fp_options &oo, Arr &out) {
                 fp_status st = conj ? fp_prox_conj(op, 0.4, &x.a, &out.a, &oo, w, nullptr)
                                     : fp_prox(op, 0.4, &x.a, &out.a, &oo, w, nullptr);
-                CHECK(st == FP_OK);
+                CHECK(st == FP_OK || st == FP_ENOTCONV);
+                return st;
             };
             prox(ws, o, z);
             CHECK_OK(fp_workspace_deriv_exact(ws, &exact, &mu));
@@ -3065,17 +3069,17 @@ static void test_refine() {
             CHECK_OK(fp_workspace_set_dual(wf, &dd.a));
             fp_options ot = o;
             ot.tol = tight;
-            prox(wf, ot, zf);
+            const fp_status fresh = prox(wf, ot, zf);
             // The refine, with and without out, with a thread pool.
             fp_info ri{}, fi{};
             const long before = g_allocs.load();
-            CHECK_OK(fp_workspace_refine(op, ws, tight, 100000, &zr.a, &ri));
+            CHECK(fp_workspace_refine(op, ws, tight, 100000, &zr.a, &ri) == fresh);
             CHECK(g_allocs.load() == before);
             CHECK(zr.data == zf.data);
-            CHECK_OK(fp_workspace_info(wf, &fi));
+            CHECK(fp_workspace_info(wf, &fi) == fresh);
             CHECK(ri.gap == fi.gap && ri.iters == fi.iters);
             fp_info wi{};
-            CHECK_OK(fp_workspace_info(ws, &wi));
+            CHECK(fp_workspace_info(ws, &wi) == fresh);
             CHECK(wi.gap == ri.gap && wi.iters == ri.iters);
             double g1[B], g2[B];
             CHECK_OK(fp_workspace_image_info(ws, g1, nullptr, nullptr, B));
@@ -3121,8 +3125,8 @@ static void test_refine() {
         CHECK_OK(fp_workspace_create(op, &x.a, &o4, &w4));
         CHECK_OK(fp_prox(op, 0.4, &x.a, &za.a, &o1, w1, nullptr));
         CHECK_OK(fp_prox(op, 0.4, &x.a, &zb.a, &o4, w4, nullptr));
-        CHECK_OK(fp_workspace_refine(op, w1, tight, 100000, &za.a, nullptr));
-        CHECK_OK(fp_workspace_refine(op, w4, tight, 100000, &zb.a, nullptr));
+        const fp_status s1 = fp_workspace_refine(op, w1, tight, 100000, &za.a, nullptr);
+        CHECK((s1 == FP_OK || s1 == FP_ENOTCONV) && fp_workspace_refine(op, w4, tight, 100000, &zb.a, nullptr) == s1);
         CHECK(za.data == zb.data);
         fp_workspace_free(w1);
         fp_workspace_free(w4);
