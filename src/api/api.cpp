@@ -632,9 +632,12 @@ fp_status vjp_impl(const fp_op *op, const fp_workspace *ws, const fp_array *ga, 
         if (op->image_ndim())
             s = ws->dtype == FP_F32 ? image_vjp_driver<float>(*op, *ws, g, gx, tot)
                                     : image_vjp_driver<double>(*op, *ws, g, gx, tot);
-        else
-            s = ws->dtype == FP_F32 ? vjp_driver<float>(*op, *ws, g, gx, tot)
-                                    : vjp_driver<double>(*op, *ws, g, gx, tot);
+        else {
+            // Elementwise operators skip the sums nobody asked for (audit C5).
+            const bool want = ggamma != nullptr || (gpa && P > 0);
+            s = ws->dtype == FP_F32 ? vjp_driver<float>(*op, *ws, g, gx, tot, want)
+                                    : vjp_driver<double>(*op, *ws, g, gx, tot, want);
+        }
         if (s) return s;
     }
     if (ws->conj) {

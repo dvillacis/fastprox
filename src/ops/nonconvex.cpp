@@ -90,9 +90,10 @@ struct L0 final : ElemOp<L0> {
     static constexpr bool kTies = true;
     double lambda;
     Vec w;
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     L0(double l, Vec ww) : lambda(l), w(std::move(ww)) {}
     const char *name() const noexcept override { return "l0"; }
-    double step_scale() const noexcept override { return lambda * vmax(w); }
+    double step_scale() const noexcept override { return lambda * wmax_; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     bool axis_params() const noexcept override { return w.size() > 1; }
@@ -141,11 +142,12 @@ struct Lq final : ElemOp<Lq> {
     static constexpr bool kTies = true;
     double lambda, q;
     Vec w;
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     int form;  // 1: q = 1/2, 2: q = 2/3 (closed forms and cheap powers), 0: general
     Lq(double l, double qq, Vec ww)
         : lambda(l), q(qq), w(std::move(ww)), form(qq == 0.5 ? 1 : (qq == 2.0 / 3.0 ? 2 : 0)) {}
     const char *name() const noexcept override { return "lq"; }
-    double step_scale() const noexcept override { return lambda * vmax(w); }
+    double step_scale() const noexcept override { return lambda * wmax_; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     bool axis_params() const noexcept override { return w.size() > 1; }

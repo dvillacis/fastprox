@@ -510,6 +510,26 @@ def test_axis_and_strides(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_in_place_long_rows(name):
+    """About 2^15 entries in place, contiguous: the elementwise maps' by-value
+    kernels run their in-place loop (audit C4), the same bits as out of place
+    (rows of N, as the per-entry parameters have N entries; with shared ones
+    the rows form one run)."""
+    build, theta, _, gamma = CASES[name][:4]
+    op = build(theta)
+    if not op._elementwise:
+        pytest.skip("elementwise maps only")
+    x = np.random.default_rng(7).normal(scale=1.5, size=(1 << 12, N))
+    want = op.prox(x.copy(), gamma)
+    for dt in (np.float64, np.float32):
+        y = x.astype(dt)
+        ref = op.prox(y.copy(), gamma)
+        op.prox(y, gamma, out=y)
+        np.testing.assert_array_equal(y, ref)
+    np.testing.assert_array_equal(op.prox(x, gamma, out=x), want)
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_float32(name):
     build, theta, _, gamma = CASES[name][:4]
     op = build(theta)

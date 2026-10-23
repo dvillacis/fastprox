@@ -79,13 +79,14 @@ struct Base : ImageOp<D> {
     int64_t n, m;
     std::vector<int32_t> eu, ev;
     Vec w;  // one shared weight or one per edge
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
 
     Base(int64_t nn, std::vector<int32_t> u, std::vector<int32_t> v, Vec ww)
         : n(nn), m(static_cast<int64_t>(u.size())), eu(std::move(u)), ev(std::move(v)), w(std::move(ww)) {}
 
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     int image_ndim() const noexcept override { return 1; }
-    double step_scale() const noexcept override { return vmax(w); }
+    double step_scale() const noexcept override { return wmax_; }
     bool conj_homogeneous() const noexcept override { return true; }
     fp_status check_image(const int64_t *shape) const noexcept override {
         return shape[0] == n ? FP_OK : FP_ESHAPE;

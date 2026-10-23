@@ -72,12 +72,13 @@ constexpr uint8_t kInside = 1;  // code[0]: z is the piecewise mean
 
 struct TV1DL2 final : RowOp<TV1DL2> {
     Vec w, a;  // weights and their squares: length 1 or n - 1
+    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     static constexpr int kMaxIter = 100;
 
     TV1DL2(Vec ww, Vec aa) : w(std::move(ww)), a(std::move(aa)) {}
 
     const char *name() const noexcept override { return "tv1d_l2"; }
-    double step_scale() const noexcept override { return vmax(w); }
+    double step_scale() const noexcept override { return wmax_; }
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override {

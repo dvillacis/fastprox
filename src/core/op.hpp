@@ -384,9 +384,46 @@ struct ElemCall {
 //   ElemDeriv deriv1(double x, double gamma, int64_t widx) const noexcept;
 // or, with static constexpr bool kTies = true, the same with an extra tie
 // rule argument (and a bool &tied out-argument for prox1).
+// A parameter of an indexed kernel (audit C4): per entry (an array) or shared
+// by every entry (a value), fixed at compile time so that the loop has no
+// runtime stride. Par<true>{w.data()}[i] is w[i], Par<false>{v}[i] is v.
+template <bool PerEntry>
+struct Par {
+    const double *p;
+    double operator[](int64_t i) const noexcept { return p[i]; }
+};
+template <>
+struct Par<false> {
+    double v;
+    double operator[](int64_t) const noexcept { return v; }
+};
+template <bool B>
+inline Par<B> par(const std::vector<double> &v) noexcept {
+    if constexpr (B) return {v.data()};
+    else return {v[0]};
+}
+
 template <class D>
 struct ElemOp : fp_op {
     static constexpr bool kTies = false;
+    // Optional by-value kernels for the prox loop (audit C4). D may define
+    //   static constexpr bool kUniformKernel = true;
+    //   template <class T> K uniform_kernel(double gamma) const;  // !axis_params()
+    //   static constexpr bool kIndexedKernel = true;
+    //   template <class T, class F> void with_indexed_kernel(double gamma, F &&f) const;
+    // (the latter for axis_params(): it calls f(k) with a kernel whose shape,
+    // which parameters are per entry, is fixed at compile time, see Par),
+    // each a struct of plain values and const double * arrays with
+    // T operator()(T x) const, or T operator()(T x, int64_t i) const for the
+    // indexed one. It must compute exactly prox1's expression, so results are
+    // bit-identical; holding no reference to the operator, it lets the
+    // compiler keep its constants in registers and vectorise, in place too.
+    // Operators with ties keep prox1.
+    static constexpr bool kUniformKernel = false;
+    static constexpr bool kIndexedKernel = false;
+    // dz/dgamma is identically zero (projections): the vjp skips the gamma
+    // slot (audit C5).
+    static constexpr bool kGammaFree = false;
     // Operators with kinks (kKinks = true) also provide
     //   int kink1(double x, double gamma, int64_t widx, double tol, Kink &k);
     //   Piece piece_of(double x, double gamma, int64_t widx);
@@ -442,12 +479,69 @@ struct ElemOp : fp_op {
         return count;
     }
 
+    // The prox loops of a by-value kernel: k is a local copy, so the in-place
+    // loop reads and writes one pointer at one index, and the compiler needs
+    // neither alias nor overlap checks.
+    template <class T, class K>
+    static void kernel_loops(const K k, const T *x, int64_t xs, T *z, int64_t zs, int64_t len, T *save) noexcept {
+        if (save) {
+            for (int64_t i = 0; i < len; ++i) {
+                const T xi = x[i * xs];
+                save[i] = xi;
+                z[i * zs] = k(xi);
+            }
+        } else if (xs == 1 && zs == 1) {
+            if (static_cast<const void *>(x) == static_cast<const void *>(z)) {
+                T *p = z;
+                for (int64_t i = 0; i < len; ++i) p[i] = k(p[i]);
+            } else {
+                for (int64_t i = 0; i < len; ++i) z[i] = k(x[i]);
+            }
+        } else {
+            for (int64_t i = 0; i < len; ++i) z[i * zs] = k(x[i * xs]);
+        }
+    }
+    template <class T, class K>
+    static void indexed_loops(const K k, const T *x, int64_t xs, T *z, int64_t zs, int64_t len, int64_t widx,
+                              int64_t wstep, T *save) noexcept {
+        if (save) {
+            for (int64_t i = 0; i < len; ++i) {
+                const T xi = x[i * xs];
+                save[i] = xi;
+                z[i * zs] = k(xi, widx + i * wstep);
+            }
+        } else if (xs == 1 && zs == 1 && wstep == 1) {
+            if (static_cast<const void *>(x) == static_cast<const void *>(z)) {
+                T *p = z;
+                for (int64_t i = 0; i < len; ++i) p[i] = k(p[i], widx + i);
+            } else {
+                for (int64_t i = 0; i < len; ++i) z[i] = k(x[i], widx + i);
+            }
+        } else {
+            for (int64_t i = 0; i < len; ++i) z[i * zs] = k(x[i * xs], widx + i * wstep);
+        }
+    }
+
     template <class T>
     int64_t run_prox(const T *x, int64_t xs, T *z, int64_t zs, int64_t len, double gamma,
                      int64_t widx, int64_t wstep, T *save, bool conj, double sigma,
                      int tie) const noexcept {
         const D &d = static_cast<const D &>(*this);
         using C = ElemCall<D>;
+        if constexpr (D::kUniformKernel && !D::kTies) {
+            if (!conj && !this->axis_params()) {
+                kernel_loops<T>(d.template uniform_kernel<T>(gamma), x, xs, z, zs, len, save);
+                return 0;
+            }
+        }
+        if constexpr (D::kIndexedKernel && !D::kTies) {
+            if (!conj && this->axis_params()) {
+                d.template with_indexed_kernel<T>(gamma, [&](const auto k) {
+                    indexed_loops<T>(k, x, xs, z, zs, len, widx, wstep, save);
+                });
+                return 0;
+            }
+        }
         int64_t ties = 0;
         bool tied = false;
         if (conj) {
@@ -502,11 +596,30 @@ struct ElemOp : fp_op {
                  double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
                  double sigma, int tie, const int8_t *side, double tol) const noexcept {
         if (side && D::kKinks)
-            run_vjp_<T, true>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
-                              side, tol);
+            dispatch_vjp<T, true>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
+                                  side, tol);
         else
-            run_vjp_<T, false>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
-                               nullptr, tol);
+            dispatch_vjp<T, false>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie,
+                                   nullptr, tol);
+    }
+    // acc null: the caller asked for no sum, only gx. Otherwise the gamma and
+    // conjugate slots, and up to two parameters shared by every entry, are
+    // summed in registers over the run (audit C5); see run_vjp_.
+    template <class T, bool Side>
+    void dispatch_vjp(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
+                      double gamma, double *acc, int64_t widx, int64_t wstep, bool conj, double sigma,
+                      int tie, const int8_t *side, double tol) const noexcept {
+#define FP_VJP_(ACC, NP) \
+    run_vjp_<T, Side, ACC, NP>(xsave, g, gs, gx, gxs, len, gamma, acc, widx, wstep, conj, sigma, tie, side, tol)
+        if (!acc) return FP_VJP_(false, 0);
+        const int64_t P = this->nparams();
+        if (!this->axis_params()) {
+            if (P == 0) return FP_VJP_(true, 0);
+            if (P == 1) return FP_VJP_(true, 1);
+            if (P == 2) return FP_VJP_(true, 2);
+        }
+        return FP_VJP_(true, -1);
+#undef FP_VJP_
     }
 
     template <class T, bool Side>
@@ -516,6 +629,17 @@ struct ElemOp : fp_op {
         const D &d = static_cast<const D &>(*this);
         using C = ElemCall<D>;
         bool tied = false;
+        if constexpr (!Side) {
+            // Contiguous, no parameter tangent, not conjugate: the same
+            // expression in a loop the compiler can vectorise (audit C5).
+            if (!conj && !dparams && dx && dxs == 1 && dzs == 1) {
+                for (int64_t i = 0; i < len; ++i) {
+                    const ElemDeriv e = C::deriv(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie);
+                    dz[i] = static_cast<T>(e.j * static_cast<double>(dx[i]) + e.dg * dgamma + 0.0);
+                }
+                return;
+            }
+        }
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
@@ -539,7 +663,17 @@ struct ElemOp : fp_op {
         }
     }
 
-    template <class T, bool Side>
+    // Acc: the sums are wanted. NP: the parameter slots held in registers (0,
+    // 1 or 2 parameters shared by every entry), or -1 to add in memory (the
+    // parameters along the axis, whose slots vary with the entry, so no chain
+    // runs through memory). Each slot receives the same additions in the
+    // same order as when it was added to in memory: a register holds its
+    // running value over the run and writes it back at the end, and the next
+    // run reloads it, so the sequence is the block's C order whatever the
+    // runs or the thread count. An inactive slot adds +0.0, which changes no
+    // sum (a slot starts at +0.0 and is never -0.0), selected after the
+    // multiply, so a NaN g_i on it adds nothing, as before.
+    template <class T, bool Side, bool Acc, int NP>
     void run_vjp_(const T *xsave, const T *g, int64_t gs, T *gx, int64_t gxs, int64_t len,
                   double gamma, double *acc, int64_t widx, int64_t wstep, bool conj,
                   double, int tie, const int8_t *side, double tol) const noexcept {
@@ -547,6 +681,24 @@ struct ElemOp : fp_op {
         using C = ElemCall<D>;
         bool tied = false;
         const int64_t P = this->nparams();
+        if constexpr (!Acc && !Side) {
+            // gx only, contiguous, not conjugate: a loop the compiler can
+            // vectorise (audit C5).
+            if (!conj && gs == 1 && gxs == 1) {
+                for (int64_t i = 0; i < len; ++i) {
+                    const ElemDeriv e = C::deriv(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie);
+                    gx[i] = static_cast<T>(e.j * static_cast<double>(g[i]));
+                }
+                return;
+            }
+        }
+        double aP = 0.0, aX = 0.0, l0 = 0.0, l1 = 0.0;
+        if constexpr (Acc) {
+            aP = acc[P];
+            aX = acc[P + 1];
+            if constexpr (NP >= 1) l0 = acc[0];
+            if constexpr (NP == 2) l1 = acc[1];
+        }
         for (int64_t i = 0; i < len; ++i) {
             const int64_t w = widx + i * wstep;
             const double xi = static_cast<double>(xsave[i]);
@@ -554,15 +706,35 @@ struct ElemOp : fp_op {
             if constexpr (Side) e = deriv_at(d, xi, gamma, w, tie, side[i], tol);
             else e = C::deriv(d, xi, gamma, w, tie);
             const double gi = static_cast<double>(g[i * gs]);
-            for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += e.pv[k] * gi;
-            acc[P] += e.dg * gi;
+            if constexpr (Acc) {
+                if constexpr (NP == -1) {
+                    for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += e.pv[k] * gi;
+                } else if constexpr (NP == 1) {
+                    for (int k = 0; k < 3; ++k) l0 += k < e.np ? e.pv[k] * gi : 0.0;
+                } else if constexpr (NP == 2) {
+                    for (int k = 0; k < 3; ++k) {
+                        const double c = k < e.np ? e.pv[k] * gi : 0.0;
+                        l0 += k < e.np && e.pi[k] == 0 ? c : 0.0;
+                        l1 += k < e.np && e.pi[k] == 1 ? c : 0.0;
+                    }
+                }
+                if constexpr (!D::kGammaFree) aP += e.dg * gi;
+            }
             if (!conj) {
                 gx[i * gxs] = static_cast<T>(e.j * gi);
             } else {
-                const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
-                acc[P + 1] += -gi * p + e.j * gi * xi;
+                if constexpr (Acc) {
+                    const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
+                    aX += -gi * p + e.j * gi * xi;
+                }
                 gx[i * gxs] = static_cast<T>(gi - e.j * gi);
             }
+        }
+        if constexpr (Acc) {
+            acc[P] = aP;
+            acc[P + 1] = aX;
+            if constexpr (NP >= 1) acc[0] = l0;
+            if constexpr (NP == 2) acc[1] = l1;
         }
     }
 

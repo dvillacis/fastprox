@@ -23,6 +23,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Elementwise prox loops run on by-value kernels (audit C4): soft thresholding, the elastic net, Huber, the box, the nonnegative orthant, the log barrier and ℓ1 over a box hand their per-call constants to the loop as plain values, so the compiler vectorises it, in place too. On 2^16 entries, one thread, Apple M5 Pro, in ns per entry (out of place / in place):
+
+  | Operator | Before | After |
+  | --- | --- | --- |
+  | soft | 0.41–0.44 / 0.44 | 0.16 / 0.16 |
+  | elastic net | 0.19 / 0.60 | 0.19 / 0.20 |
+  | huber | 0.22 / 0.63 | 0.22 / 0.22 |
+  | box | 0.36 / 0.35 | 0.14 / 0.13 |
+  | nonneg | 0.09 / 0.23 | 0.10 / 0.12 |
+
+  The results are the same bits as before, every layout and dtype, checked against the previous library.
+- Weighted operators no longer scan their weights on every call (found while measuring C4): the step-range check of audit A1 read `step_scale()`, which took the largest weight each time. The maximum is now formed once, at construction. This affects soft thresholding, L0, Lq, group and tree ℓ2, ℓ1 over a box, the ℓ2 of differences, graph and tree TV, and the image TVs with pixel or edge weights (whose scan ran once per image). Weighted soft thresholding on 2^16 entries went from 0.92 to 0.18 ns per entry.
+- Elementwise derivatives (audit C5):
+  - A vjp asked for neither the step's nor the parameters' gradient computes only gx. Soft thresholding on 256 × 1000, one thread, went from 590–650 to 47–51 µs, and Huber from 810–850 to 46–48 µs.
+  - The step slot and up to two shared parameters are summed in registers, in the same order as before.
+  - Soft thresholding selects its pieces without branches.
+  - Contiguous JVPs without a parameter tangent run in a vectorisable loop: soft's from 540–600 to 177–180 µs, Huber's from 386–403 to 140–146 µs.
+  - The vjp's sums are the same bits as before, for every thread count and layout.
+- The step's gradient of a projection (the box and the nonnegative orthant) is exactly 0 (audit C5). Before, it summed 0 · g_i and was NaN when a cotangent entry was infinite.
 - The thread pool returns once every piece is done and every worker that joined the call has left, instead of waiting for every worker to wake (audit C6). One atomic control word (generation, closed flag, workers allowed, workers inside) replaces the generation and the pending count; a worker that wakes after the call closed its job goes back to wait. On an Apple M5 Pro under heavy background load (load average 20), an empty 15-thread job took 0.6–1 µs warm (119–185 µs before) and 15–26 µs cold (91–231 µs), and soft thresholding on 2^18 entries at 15 threads 28 µs (98–198 µs).
 - The pieces of prox and jvp scale with the thread count (audit C7): about 8 row pieces per thread (at least 512 entries each) and 4 elementwise pieces per thread (8192 to 16 384 entries), instead of 16 384 entries whatever the count. 1D TV on 2^15 entries in rows of 16 at 15 threads took 43–56 µs (168–185 µs), soft on 2^15 entries 8 µs (14 µs). The vjp's blocks, which fix the order of its sums, are unchanged, so results are still bit-identical for any thread count.
 - `ctx.deriv` is a `DerivInfo` of four fields (feedback U4): `residual, iters = ctx.deriv` now fails; use the attributes. `examples/image_denoising.py` and `examples/autodiff_frameworks.py` solve to `tol=1e-8` before differentiating isotropic TV, so that their derivatives are not flagged.
