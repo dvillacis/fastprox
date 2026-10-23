@@ -43,20 +43,27 @@
 static std::atomic<long> g_allocs{0};
 static std::atomic<long long> g_alloc_bytes{0};  // bytes requested (audit C2)
 #ifndef FP_TSAN
-void *operator new(std::size_t n) {
+// Not inlined: valgrind replaces these operators by name, and an inlined
+// delete (a bare free()) against its own new is a "mismatched free" there.
+#if defined(__GNUC__)
+#define FP_TEST_NOINLINE __attribute__((noinline))
+#else
+#define FP_TEST_NOINLINE
+#endif
+FP_TEST_NOINLINE void *operator new(std::size_t n) {
     ++g_allocs;
     g_alloc_bytes += static_cast<long long>(n);
     if (void *p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
 // libstdc++'s std::get_temporary_buffer (std::stable_sort) uses this form.
-void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
+FP_TEST_NOINLINE void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
     ++g_allocs;
     g_alloc_bytes += static_cast<long long>(n);
     return std::malloc(n ? n : 1);
 }
-void operator delete(void *p) noexcept { std::free(p); }
-void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+FP_TEST_NOINLINE void operator delete(void *p) noexcept { std::free(p); }
+FP_TEST_NOINLINE void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 #endif
 
 // ---------------------------------------------------------------- mini framework
