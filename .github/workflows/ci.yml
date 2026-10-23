@@ -93,7 +93,7 @@ jobs:
             apt-get download valgrind libc6-dbg ||
               { sudo apt-get update && apt-get download valgrind libc6-dbg; }
           fi
-          sudo apt-get install -y --no-install-recommends ~/valgrind-debs/*.deb
+          sudo dpkg -i ~/valgrind-debs/*.deb  # no network: apt-get install fetched them again
       # -O1 -g, as valgrind's manual advises: its reports stay accurate, and
       # the run is several times faster than -O0 under memcheck's slowdown.
       - run: >
