@@ -99,11 +99,17 @@ set_target_properties(fastprox PROPERTIES
 )
 
 # No -ffast-math anywhere: the direct algorithms compare running bounds and
-# determinism depends on the order of floating-point operations.
+# determinism depends on the order of floating-point operations. Nor
+# contraction of a * b + c into a fused multiply-add: GCC's default
+# (-ffp-contract=fast) fuses across statements after inlining, so the same
+# expression rounded differently in a loop with a hoisted step and in one
+# with a step per entry, and results on aarch64 Linux depended on the thread
+# count. Off, every operation rounds on its own, on every compiler and CPU.
 if(MSVC)
   target_compile_options(fastprox PRIVATE /W4 /fp:precise)
 else()
-  target_compile_options(fastprox PRIVATE -Wall -Wextra -Wno-unknown-pragmas -fno-fast-math)
+  target_compile_options(fastprox PRIVATE -Wall -Wextra -Wno-unknown-pragmas -fno-fast-math
+                                          -ffp-contract=off)
 endif()
 
 # Rows run on fastprox's own threads (src/core/parallel.cpp), not OpenMP, so
