@@ -49,6 +49,7 @@ __all__ = [
     "TreeL2", "tree_soft_threshold", "sparse_group_soft_threshold", "TV1DBall",
     "project_tv1d_ball", "TV1DL2", "tv1d_l2",
     "Spectral", "SpectralContext", "NuclearNorm", "SpectralNormBall", "PSD",
+    "SortedL1", "WeightedNuclearNorm",
     "AccuracyWarning", "ConvergenceWarning", "inner_accuracy",
 ]
 
@@ -1084,6 +1085,26 @@ class Isotonic(Operator):
         self._layout = [] if w is None else [("weights", w.size, False)]
 
 
+class SortedL1(Operator):
+    r"""The sorted $\ell_1$ norm (OWL, SLOPE; since 1.0) along the axis:
+
+    $$g(z) = \sum_k w_k \lvert z \rvert_{(k)}, \qquad \lvert z \rvert_{(1)} \ge \lvert z \rvert_{(2)} \ge \dots$$
+
+    the magnitudes in decreasing order, with ``weights`` $w_1 \ge w_2 \ge
+    \dots \ge 0$: one per entry of the axis, or a scalar (then it is
+    soft thresholding, bit for bit). By a sort and pool-adjacent-violators
+    (Bogdan et al., 2015), $O(n \log n)$. On singular values it is the
+    weighted nuclear norm: :class:`WeightedNuclearNorm`. Parameters:
+    weights."""
+
+    def __init__(self, weights):
+        w = _vec(weights)
+        if w is None or w.size == 0:
+            raise ValueError("SortedL1 needs weights")
+        super().__init__(_C.sorted_l1(w))
+        self._layout = [("weights", w.size, w.size == 1)]
+
+
 class TV1D(Operator):
     r"""$g(z) = \sum_i w_i \lvert z_{i+1} - z_i \rvert$ along the axis (1D total
     variation).
@@ -1596,7 +1617,9 @@ class Spectral:
         if not _C.spectral_check(op._op, _SPECTRAL_KINDS[kind]):
             what = "absolutely symmetric (singular values)" if kind == "svd" \
                 else "permutation invariant (eigenvalues)"
-            raise ValueError(f"{op!r} is not {what}; weights must be equal")
+            raise ValueError(f"{op!r} is not {what}: its weights must be equal. For weights "
+                             "in sorted order, sum_k w_k sigma_k with w nonincreasing, use "
+                             "SortedL1(w) or WeightedNuclearNorm(w)")
         self.op = op
         self.kind = kind
 
@@ -1758,6 +1781,17 @@ class NuclearNorm(Spectral):
 
     def __init__(self, lam=1.0):
         super().__init__(Soft(lam))
+
+
+class WeightedNuclearNorm(Spectral):
+    r"""$g(X) = \sum_k w_k \sigma_k(X)$ with $\sigma_1 \ge \sigma_2 \ge \dots$
+    the singular values and ``weights`` $w_1 \ge w_2 \ge \dots \ge 0$, one per
+    singular value ($\min(m, n)$) or a scalar (since 1.0): ``Spectral(SortedL1(w))``,
+    convex. Nondecreasing weights (as in WNNM) give a nonconvex penalty and
+    are not supported. Its parameters are those of :class:`SortedL1`."""
+
+    def __init__(self, weights, kind="svd"):
+        super().__init__(SortedL1(weights), kind)
 
 
 class SpectralNormBall(Spectral):

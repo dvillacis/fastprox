@@ -47,6 +47,7 @@ fp_status make_sum_largest(double lambda, int64_t k, bool absolute, fp_op **out)
 
 // isotonic.cpp
 fp_status make_isotonic(Vec w, bool increasing, fp_op **out);
+fp_status make_sorted_l1(Vec w, fp_op **out);
 
 // tv1d.cpp
 fp_status make_tv1d(Vec w, fp_tv1d_method method, fp_op **out);

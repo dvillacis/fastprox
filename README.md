@@ -120,7 +120,7 @@ y = fpt.prox(fp.TV1D, torch.randn(64, 1000, dtype=torch.float64), 0.5, weights=w
 | Nonconvex | ℓ0, ℓq (0 < q < 1), SCAD and MCP (weighted), log penalty, with an explicit rule at ties |
 | Groups and trees | group ℓ2, group Huber, group SCAD and MCP, tree-structured group norms, sparse group lasso |
 | Projections | ℓ2 ball, simplex, weighted ℓ1 ball, hyperplane or half-space intersected with a box, second-order cone; also the ℓ∞ norm, max and the sum of the k largest entries |
-| Signals | isotonic regression, 1D TV with per-edge weights, its ℓ2-of-differences variant, projection onto a 1D TV ball |
+| Signals | isotonic regression, the sorted ℓ1 norm (OWL, SLOPE), 1D TV with per-edge weights, its ℓ2-of-differences variant, projection onto a 1D TV ball |
 | Images | anisotropic and isotropic TV in 2D and 3D, with per-axis and per-pixel weights and warm starts; on GPUs through PyTorch and JAX |
 | Graphs | TV on any graph, exact, by parametric max-flow; TV on trees and paths by dynamic programming |
 

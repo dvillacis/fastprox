@@ -58,6 +58,11 @@ CASES = {
     "linf": (lambda t: fp.LInf(t[0]), np.array([0.9]),
              lambda x, g, t: ref.linf(x, g, t[0]), 1.0),
     "isotonic": (lambda t: fp.Isotonic(), np.zeros(0), lambda x, g, t: ref.isotonic(x), 1.0),
+    # Strictly decreasing weights 0.1 apart, so finite differences keep the order.
+    "sorted_l1": (lambda t: fp.SortedL1(t), np.linspace(1.4, 0.5, N),
+                  lambda x, g, t: ref.sorted_l1(x, g, t), 0.4),
+    "sorted_l1_scalar": (lambda t: fp.SortedL1(t), np.array([0.6]),
+                         lambda x, g, t: ref.sorted_l1(x, g, t[0]), 0.4),
     "isotonic_w": (lambda t: fp.Isotonic(t, increasing=False), W,
                    lambda x, g, t: ref.isotonic(x, t, increasing=False), 1.0),
     "tv1d": (lambda t: fp.TV1D(t), np.array([1.0]), None, 0.6),

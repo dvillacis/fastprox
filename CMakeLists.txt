@@ -66,6 +66,7 @@ add_library(fastprox
   src/ops/projections.cpp
   src/ops/radial.cpp
   src/ops/isotonic.cpp
+  src/ops/sorted_l1.cpp
   src/ops/nonconvex.cpp
   src/ops/hyperplane.cpp
   src/ops/tv1d.cpp

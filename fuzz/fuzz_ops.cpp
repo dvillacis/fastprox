@@ -12,6 +12,7 @@
 // files or generates random inputs.
 #include "fastprox.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -120,7 +121,7 @@ fp_array spatial(Bytes &b, Case &c, int k, bool edges, int xnd, const int64_t *x
 // Builds an operator from the bytes; params are sized for axis length n of
 // an array with xnd axes of extents xs.
 fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
-    const int kind = b.u8() % 35;
+    const int kind = b.u8() % 36;
     auto fill = [&](std::vector<double> &v, int64_t len) {
         v.resize(static_cast<size_t>(len > 0 ? len : 1));
         for (auto &x : v) x = b.param();
@@ -310,6 +311,12 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             a0 = vec(c.params[0]);
             c.sites = m;
             return fp_op_tree_tv(N, m, c.groups.data(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+        }
+        case 35: {  // sorted l1: weights usually sorted (nonincreasing), else FP_EPARAM
+            fill(c.params[0], b.u8() % 2 ? n : 1);
+            if (b.u8() % 4) std::sort(c.params[0].begin(), c.params[0].end(), [](double u, double v) { return u > v; });
+            a0 = vec(c.params[0]);
+            return fp_op_sorted_l1(&a0, &c.op);
         }
         case 34: {  // graph TV: random edges on the last axis, cycles and repeats allowed
             const int64_t N = xnd ? xs[xnd - 1] : 1;

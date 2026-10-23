@@ -78,6 +78,19 @@ def isotonic(x, w=None, increasing=True):
     return s * np.concatenate([np.full(c, sy / sw) for sy, sw, c in blocks])
 
 
+def sorted_l1(x, gamma, w):
+    """prox of gamma sum_k w_k |x|_(k): the magnitudes in decreasing order
+    (ties by index) minus gamma w, fitted nonincreasing by isotonic(), clipped
+    at 0, back in place with the signs."""
+    x = np.asarray(x, float)
+    w = np.broadcast_to(np.asarray(w, float), x.shape)
+    order = np.lexsort((np.arange(x.size), -np.abs(x)))
+    fit = np.maximum(isotonic(np.abs(x)[order] - gamma * w, increasing=False), 0.0)
+    z = np.empty_like(x)
+    z[order] = fit
+    return np.copysign(z, x)
+
+
 def tv1d_kkt_residual(x, z, gamma, w):
     """Largest violation of the TV1D optimality conditions, relative to scale.
 

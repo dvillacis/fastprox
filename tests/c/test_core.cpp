@@ -315,6 +315,10 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
     for (auto &v : we) v = unif(0.2, 1.5);
     keep.emplace_back(std::vector<int64_t>{n - 1}, we);
     fp_array *wm = &keep.back().a;
+    Vec wd(w);  // nonincreasing, for the sorted l1 norm
+    std::sort(wd.begin(), wd.end(), [](double a, double b) { return a > b; });
+    keep.emplace_back(std::vector<int64_t>{n}, wd);
+    fp_array *wdec = &keep.back().a;
     Vec lo(static_cast<size_t>(n)), hi(static_cast<size_t>(n));
     for (int64_t i = 0; i < n; ++i) {
         lo[i] = unif(-1, 0);
@@ -393,6 +397,7 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"tv1d_l2_w", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
+        {"sorted_l1", [=](fp_op **o) { return fp_op_sorted_l1(wdec, o); }, 0.4},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},
         {"tv1d_w", [=](fp_op **o) { return fp_op_tv1d(wm, FP_TV1D_AUTO, o); }, 0.6},
         // Nonconvex maps (the conjugate's step 1/gamma keeps SCAD's a > 1 + 1/gamma
