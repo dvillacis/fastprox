@@ -151,7 +151,7 @@ struct Base : ImageOp<D> {
     // and gamma times 2^-e, unless a positive capacity would underflow there.
     // Beyond 1e308 the value range itself overflowed (audit T9). Returns e.
     int rescale(double *d, ImageCall &c) const noexcept {
-        int e = rescale_exponent(d, n, c.gamma);
+        int e = rescale_exponent(d, n, c.gamma * this->step_scale());
         const double g = std::ldexp(c.gamma, -e);
         for (int64_t k = 0; k < m && e > 0; ++k)
             if (c.gamma * we(k) > 0.0 && !(g * we(k) > 0.0)) e = 0;
