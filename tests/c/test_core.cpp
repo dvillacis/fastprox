@@ -2258,7 +2258,7 @@ static void test_no_allocation() {
         CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
     }
     CHECK(g_allocs.load() == before);
-    // One step per row (since 1.1), strided.
+    // One step per row (since 1.0), strided.
     Vec sv(128);
     for (size_t i = 0; i < sv.size(); ++i) sv[i] = 0.2 + 0.01 * static_cast<double>(i);
     const int64_t sshape[1] = {64}, sstride[1] = {2};
@@ -2951,7 +2951,7 @@ static void test_float32() {
     fp_op_free(op);
 }
 
-// ---------------------------------------------------------------- devices (since 1.1)
+// ---------------------------------------------------------------- devices (since 1.0)
 // The device API on the CPU; tests/c/test_device.cpp covers the plugin loader.
 static void test_device_api() {
     CHECK(fp_device_available(FP_DEVICE_CPU) == 1);
@@ -3036,7 +3036,7 @@ static void test_device_api() {
     for (fp_op *op : {soft, tv1, aniso, iso}) fp_op_free(op);
 }
 
-// ---------------------------------------------------------------- one step per row (since 1.1)
+// ---------------------------------------------------------------- one step per row (since 1.0)
 // fp_prox_steps against fp_prox row by row; tests/python/test_steps.py runs
 // every operator, this covers what Python does not reach.
 static void test_prox_steps() {

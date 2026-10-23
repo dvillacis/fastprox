@@ -141,7 +141,7 @@ def check_step(step, conj):
 
 def steps(step):
     """A step for the NumPy API: a float (from any single value), or (since
-    1.1) an array of one step per row."""
+    1.0) an array of one step per row."""
     s = np.asarray(step, np.float64)
     return float(s.reshape(())) if s.size == 1 else s
 

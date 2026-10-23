@@ -1,4 +1,4 @@
-"""One step per row or image (fp_prox_steps, since 1.1): every operator against
+"""One step per row or image (fp_prox_steps, since 1.0): every operator against
 row-by-row calls with that row's step, for the prox and its derivatives."""
 
 import numpy as np

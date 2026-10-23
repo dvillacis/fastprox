@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
 
@@ -38,6 +39,14 @@ int main(void) {
     int i;
 
     CHECK(fp_abi_version() == FP_ABI_VERSION);
+    /* The library's version string is the build's (CMakeLists.txt project()
+       and FASTPROX_VERSION_SUFFIX), and begins with the header's macros. */
+    {
+        char head[32];
+        snprintf(head, sizeof head, "%d.%d.%d", FP_VERSION_MAJOR, FP_VERSION_MINOR, FP_VERSION_PATCH);
+        CHECK(strcmp(fp_version_string(), FP_EXPECTED_VERSION) == 0);
+        CHECK(strncmp(fp_version_string(), head, strlen(head)) == 0);
+    }
     CHECK(fp_op_soft(1.0, NULL, &op) == FP_OK);
     CHECK(fp_prox(op, 1.0, &xa, &za, NULL, NULL, &info) == FP_OK);
     CHECK(z[0] == 2.0 && z[1] == 0.0 && z[2] == 0.0 && z[3] == -1.0 && z[4] == 0.0);

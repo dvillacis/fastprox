@@ -290,7 +290,7 @@ def _restage(out, *inputs):
 
 
 def _steps(step, batch_shape, conj):
-    """A scalar step as (step, None), or one step per row or image (since 1.1)
+    """A scalar step as (step, None), or one step per row or image (since 1.0)
     as (1.0, an array broadcast to the batch shape)."""
     if np.ndim(step) == 0:
         return float(step), None
@@ -466,7 +466,7 @@ class Operator:
              copy=False):
         r"""$\operatorname{prox}_{\gamma g}(x)$. With ``keep=True`` returns ``(z, ctx)``.
 
-        ``gamma`` is a scalar, or (since 1.1) an array that broadcasts to the
+        ``gamma`` is a scalar, or (since 1.0) an array that broadcasts to the
         batch shape (the shape of ``x`` without ``axis``): one step per row.
         Then ``jvp``'s ``dgamma`` moves every step, and ``vjp``'s
         ``grads.gamma`` is the sum over rows of each row's gradient.
@@ -1028,7 +1028,7 @@ class _ImageOperator(Operator):
     def prox(self, x, gamma=1.0, *, out=None, threads=0, keep=False, ctx=None, copy=False,
              tol=None, ztol=None, max_iter=1000, warm_start=None, warm=False):
         r"""$\operatorname{prox}_{\gamma g}(x)$; see the class docstring. ``gamma``
-        may be (since 1.1) an array that broadcasts to the batch shape: one
+        may be (since 1.0) an array that broadcasts to the batch shape: one
         step per image. ``tol`` (default 1e-6) or ``ztol`` (since 1.0; not
         both) sets the accuracy: ``ztol`` is the relative error of $z$ to
         certify, $\lVert z - z^* \rVert_2 \le \mathrm{ztol}\,\lVert x \rVert_2$ per image."""
@@ -1447,7 +1447,7 @@ class SpectralContext:
 
 class Spectral:
     r"""An operator on the singular values (``kind="svd"``) or the eigenvalues
-    (``kind="eigh"``, symmetric matrices) of each matrix of a batch (since 1.1):
+    (``kind="eigh"``, symmetric matrices) of each matrix of a batch (since 1.0):
     $g(X) = h(\sigma(X))$ with $h$ the wrapped operator, so that
 
     $$\operatorname{prox}_{\gamma g}(X) = U \operatorname{diag}(\operatorname{prox}_{\gamma h}(s)) V^\top
@@ -1626,7 +1626,7 @@ class Spectral:
 
 class NuclearNorm(Spectral):
     r"""$g(X) = \lambda \lVert X \rVert_* = \lambda \sum_i \sigma_i(X)$: singular
-    value thresholding (since 1.1). Its parameters are those of ``Soft``."""
+    value thresholding (since 1.0). Its parameters are those of ``Soft``."""
 
     def __init__(self, lam=1.0):
         super().__init__(Soft(lam))
@@ -1634,7 +1634,7 @@ class NuclearNorm(Spectral):
 
 class SpectralNormBall(Spectral):
     r"""The indicator of $\{X : \sigma_{\max}(X) \le r\}$: singular values
-    clipped at $r$ (since 1.1)."""
+    clipped at $r$ (since 1.0)."""
 
     def __init__(self, radius=1.0):
         super().__init__(Box(-radius, radius))
@@ -1653,7 +1653,7 @@ class SpectralNormBall(Spectral):
 
 class PSD(Spectral):
     r"""The indicator of the positive semidefinite cone: negative eigenvalues
-    set to zero (since 1.1)."""
+    set to zero (since 1.0)."""
 
     kind = "eigh"
 

@@ -46,8 +46,12 @@ with Python bindings, PyTorch and JAX wrappers, and image TV that runs on GPUs.
 pip install fastprox
 ```
 
-The 1.0 release candidate, whose C ABI holds for every 1.x:
-`pip install --pre fastprox`.
+The 1.0 release candidate, with the spectral operators and whose C ABI holds
+for every 1.x: `pip install --pre fastprox`. A tagged release can also be
+installed from GitHub,
+`pip install "fastprox @ git+https://github.com/dvillacis/fastprox@v1.0.0rc2"`,
+and unreleased work from a commit of master (`@<commit>`); CI builds and tests
+every push to master. Build from a commit, never from a working tree.
 
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS
 (arm64 from 11.0, x86_64 from 10.15) and Windows (amd64). The PyTorch and JAX

@@ -61,7 +61,7 @@ inline void scatter(const T *src, T *dst, int64_t s, int64_t n) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// One step per row (fp_prox_steps, since 1.1)
+// One step per row (fp_prox_steps, since 1.0)
 // ---------------------------------------------------------------------------
 
 // The steps of a batch, one per row in canonical order (C order over the

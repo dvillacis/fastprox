@@ -1,4 +1,4 @@
-// Spectral operators (since 1.1): the k x k core of the derivative of
+// Spectral operators (since 1.0): the k x k core of the derivative of
 // X -> U diag(f(s)) V^T (singular values) or Q diag(f(s)) Q^T (eigenvalues),
 // with f the prox of an operator on the spectrum s and J its Jacobian.
 //

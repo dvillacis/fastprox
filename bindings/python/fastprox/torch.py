@@ -26,7 +26,7 @@ are copied to the CPU and the result back.
 TV in tensor operations on the input's device, GPU included, with a backward
 on the flat regions of the solution (see ``fastprox._tv_torch``).
 
-Spectral operators (since 1.1) go through :func:`prox` too, as an operator
+Spectral operators (since 1.0) go through :func:`prox` too, as an operator
 (``fp.NuclearNorm(0.5)``) or a class with its parameter
 (``fp.NuclearNorm, lam=t``). The SVD or eigendecomposition and the matrix
 products run in torch on the input's device; the prox of the spectrum and the
@@ -50,7 +50,7 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
          **params):
     r"""$\operatorname{prox}_{\gamma g}(x)$ as a differentiable tensor. ``gamma`` may be a tensor
-    that requires grad: 0-d, or (since 1.1) one step per row, image or
+    that requires grad: 0-d, or (since 1.0) one step per row, image or
     matrix, broadcasting to the batch shape (``x``'s shape without ``axis``,
     the image axes or the matrix axes); each step's gradient is
     $\langle g, \partial z / \partial \gamma \rangle$ over its rows, at the cost of one more JVP.
