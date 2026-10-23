@@ -110,12 +110,12 @@ struct fp_workspace {
     fp::Buffer<double> struct_default;
     bool override_on = false;
 
-    // Scratch of fp_spectral_jvp (since 1.1), per thread: sized by its first
+    // Scratch of fp_spectral_jvp (since 1.0), per thread: sized by its first
     // call, so that workspaces of operators never used on a spectrum do not
     // carry it.
     mutable fp::Buffer<double> spectral;
 
-    // Device and stream (since 1.1): FP_DEVICE_CPU until the CUDA plugin
+    // Device and stream (since 1.0): FP_DEVICE_CPU until the CUDA plugin
     // creates workspaces.
     fp_device device = FP_DEVICE_CPU;
     void *stream = nullptr;
@@ -134,7 +134,7 @@ struct fp_workspace {
     double gamma = 0.0;  // step used by the kernel (1/sigma in conjugate mode)
     double sigma = 0.0;
     int tie = 0;  // fp_tie rule of the last prox call
-    // One step per row (fp_prox_steps, since 1.1): the steps of the last kept
+    // One step per row (fp_prox_steps, since 1.0): the steps of the last kept
     // call in canonical row order, sized with the saved structure.
     fp::Buffer<double> steps;
     bool steps_on = false;

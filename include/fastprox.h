@@ -48,7 +48,7 @@ extern "C" {
 /* FP_I8 (since 0.2) is accepted only by the kink and branch arrays of
  * fp_workspace_kinks and fp_workspace_set_branch. */
 typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3 } fp_dtype;
-/* FP_DEVICE_CUDA (since 1.1) is DLPack's kDLCUDA; 10 (kDLROCM) is reserved. */
+/* FP_DEVICE_CUDA (since 1.0) is DLPack's kDLCUDA; 10 (kDLROCM) is reserved. */
 typedef enum { FP_DEVICE_CPU = 0, FP_DEVICE_CUDA = 2 } fp_device;
 
 /* Strided n-d array descriptor. Strides are in elements, not bytes, and may
@@ -74,7 +74,7 @@ typedef enum {
     FP_ENOTCONV, /* iterative operator stopped before tol */
     FP_EPARAM,   /* invalid operator parameter or step */
     FP_EINTERNAL, /* any other C++ exception, caught */
-    FP_EDEVICE    /* (since 1.1) a device error, now or from earlier work on the stream */
+    FP_EDEVICE    /* (since 1.0) a device error, now or from earlier work on the stream */
 } fp_status;
 
 typedef enum { FP_TIE_NONZERO = 0, FP_TIE_ZERO = 1 } fp_tie;
@@ -496,7 +496,7 @@ FP_API fp_status fp_prox(const fp_op *op, double gamma, const fp_array *x,
                          fp_array *out, const fp_options *opt,
                          fp_workspace *ws, fp_info *info);
 
-/* fp_prox with one step per row or image (since 1.1): gamma has the batch
+/* fp_prox with one step per row or image (since 1.0): gamma has the batch
  * shape, x's shape without the axis (without the image axes for the image
  * operators), FP_F32 or FP_F64, any strides (0 broadcasts one step over a
  * dimension); ndim 0 for a single row or image. Every step is checked
@@ -557,7 +557,7 @@ FP_API fp_status fp_vjp(const fp_op *op, const fp_workspace *ws,
 FP_API fp_status fp_value(const fp_op *op, const fp_array *x, const fp_options *opt, fp_array *out);
 
 /* ------------------------------------------------------------------------
- * Spectral operators (since 1.1): an operator applied to the singular values
+ * Spectral operators (since 1.0): an operator applied to the singular values
  * (FP_SPECTRAL_SVD) or the eigenvalues (FP_SPECTRAL_EIG) of each matrix of a
  * batch. The caller computes the decomposition, X = U diag(s) V^T (thin SVD,
  * k = min(m, n)) or X = Q diag(s) Q^T, and the matrix products; the prox is
@@ -590,7 +590,7 @@ FP_API fp_status fp_spectral_jvp(const fp_op *op, const fp_workspace *ws,
                                  fp_array *b, fp_array *r);
 
 /* ------------------------------------------------------------------------
- * Devices (since 1.1). CUDA kernels live in a plugin, libfastprox_cuda,
+ * Devices (since 1.0). CUDA kernels live in a plugin, libfastprox_cuda,
  * loaded on first use: from the path in the environment variable
  * FASTPROX_CUDA_PLUGIN when it is set, else from the directory of this
  * library, else by name through the system's library search path. Without

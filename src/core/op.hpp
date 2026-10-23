@@ -263,7 +263,7 @@ struct fp_op {
     // given shape (image operators). The indicator of a set is 0 when x lies
     // in it up to atol = tol * max(1, max |x_i|) and INFINITY otherwise. scr has
 // value_doubles(n) doubles.
-    // Spectral use (since 1.1, fp_op_spectral_check): kSpectralSvd when the
+    // Spectral use (since 1.0, fp_op_spectral_check): kSpectralSvd when the
     // map is absolutely symmetric (permutation and sign invariant, so it can
     // act on singular values), kSpectralEig when it is permutation invariant
     // (eigenvalues); both bits for the former.

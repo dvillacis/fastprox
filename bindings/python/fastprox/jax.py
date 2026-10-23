@@ -23,7 +23,7 @@ TV in JAX operations on the input's device, GPU included, under ``jit`` and
 ``vmap``, with a backward on the flat regions of the solution (see
 ``fastprox._tv_jax``).
 
-Spectral operators (since 1.1) go through :func:`prox` too, as in
+Spectral operators (since 1.0) go through :func:`prox` too, as in
 ``fastprox.torch``. The decomposition and the matrix products run in JAX on
 the input's device; the prox of the spectrum and the k x k core of the
 derivative run in callbacks on the CPU.
@@ -46,7 +46,7 @@ __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
 def prox(op, x, gamma=1.0, *, axis=None, threads=0, tol=None, ztol=None, max_iter=None,
          **params):
-    r"""$\operatorname{prox}_{\gamma g}(x)$. ``gamma`` is a scalar or (since 1.1) one step per
+    r"""$\operatorname{prox}_{\gamma g}(x)$. ``gamma`` is a scalar or (since 1.0) one step per
     row, image or matrix, broadcasting to the batch shape, as in
     :func:`fastprox.torch.prox`. ``axis`` (row operators), ``tol``, ``ztol``
     and ``max_iter`` (iterative operators) are passed on when given."""

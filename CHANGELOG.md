@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0rc2] — 2026-10-23
+
+The second release candidate for 1.0, from master, on PyPI as a pre-release (`pip install --pre fastprox`). It adds the spectral operators, one step per row (`fp_prox_steps`), the device API (no CUDA kernels yet: device arrays return `FP_EINVAL`), the fixes of the audit of 2026-10-22, and the first items of the user feedback of 2026-10-23 (`ztol=`, `IterInfo.zerr`, `ConvergenceWarning`, `fp.inner_accuracy`). The new C functions join the 1.0 ABI, which the `abi` job still checks against 0.5.0. The remaining feedback items change the Python API and follow in an rc3 before 1.0.0.
+
 ### Added
 
 - Unconverged and too-loose iterative calls warn (feedback U2):
@@ -32,6 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The spectral operators, `fp_prox_steps` and the device API, documented as "since 1.1", ship in 1.0, and are marked "since 1.0" (audit A11). `test_header` checks `fp_version_string()` against the version CMake builds.
 - `IterInfo` has a sixth field, `zerr` (feedback U1). Unpacking it into five names now fails; use the attributes.
 - An image operator's `prox` without `keep` or `ctx` no longer copies out the dual and builds an `IterInfo` that it then discards.
 - Non-NumPy array-likes keep float32: PyTorch and JAX arrays, memoryviews and `array('f')` are converted with `numpy.asarray`, without a copy where they export a buffer, instead of being cast to float64 (audit P5). Lists and other real types still become float64. Complex inputs raise `TypeError`; before, they lost their imaginary part with a `ComplexWarning`. The PyProximal adapter does the same, and converts float16 to float64.

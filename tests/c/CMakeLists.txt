@@ -1,6 +1,7 @@
 # The header check: fastprox.h must compile as strict C99 with -Werror.
 add_executable(test_header test_header.c)
 target_link_libraries(test_header PRIVATE fastprox::fastprox)
+target_compile_definitions(test_header PRIVATE FP_EXPECTED_VERSION="${FASTPROX_VERSION_FULL}")
 if(NOT MSVC)
   target_compile_options(test_header PRIVATE -std=c99 -Wall -Wextra -Werror -pedantic)
   target_link_libraries(test_header PRIVATE m)

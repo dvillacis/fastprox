@@ -871,7 +871,7 @@ fp_workspace_free(ws);
 - A workspace is used by one call at a time, derivative calls included; use
   one per thread (see "Threads and determinism").
 
-### One step per row (*since 1.1*)
+### One step per row (*since 1.0*)
 
 ```c
 /* gamma: the batch shape, x's shape without opt.axis (without the image axes
@@ -939,7 +939,7 @@ With the step $\gamma$, $z = \operatorname{prox}_{\gamma g}(x)$ minimises
 $g(y) + \lVert y - x \rVert_2^2 / (2\gamma)$. `tests/python/test_value.py`
 checks every operator's value against its prox this way.
 
-### Spectral operators (*since 1.1*)
+### Spectral operators (*since 1.0*)
 
 An operator on the singular values or eigenvalues of each matrix of a batch:
 $g(X) = h(s)$ for $X = U \operatorname{diag}(s) V^\top$ (thin SVD,
@@ -981,7 +981,7 @@ other count as tied (docs/spec.md, "Spectral operators").
   first call on a workspace sizes about $8k$ doubles of scratch per thread,
   and later calls allocate nothing.
 
-### Devices (*since 1.1*)
+### Devices (*since 1.0*)
 
 The GPU backend (docs/spec.md, "GPU backend") comes in stages. Its CUDA kernels
 will live in a separate library, the plugin `libfastprox_cuda`
@@ -1046,7 +1046,7 @@ Since 1.0 the computation depends on the operator (audit A1).
 | `FP_ENOMEM` | out of memory, or a requested size too large to allocate |
 | `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), a step beyond the operator's range ($\gamma$ times its largest parameter above $2^{960}$, since 1.0), a $\sigma$ too small for the conjugate's formula, or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
 | `FP_EINTERNAL` | any other internal error |
-| `FP_EDEVICE` | (*since 1.1*) a device error, from the call or from earlier work on its stream |
+| `FP_EDEVICE` | (*since 1.0*) a device error, from the call or from earlier work on its stream |
 
 No function prints, aborts or keeps global error state. NaN in the input
 gives NaN in the affected output: the entry for elementwise operators, the
@@ -1245,7 +1245,7 @@ g = jax.jit(jax.grad(loss))(jnp.full(999, 0.8))
   parameters are then constants, or an operator class with its constructor
   arguments as keywords. `axis` (row operators), `tol` and `max_iter`
   (iterative operators) are passed on when given.
-- **One step per row** (*since 1.1*). `gamma` may be a tensor or array that
+- **One step per row** (*since 1.0*). `gamma` may be a tensor or array that
   broadcasts to the batch shape: `x`'s shape without `axis`, the image axes
   or the matrix axes. Its gradient is each row's
   $\langle g, \partial z / \partial \gamma \rangle$, from one more JVP in $\gamma$, summed back
@@ -1316,7 +1316,7 @@ x = pyproximal.optimization.primal.ProximalGradient(f, g, x0, tau=0.9, epsg=0.02
   PyProximal's `L1` and with its `moreau` test, and runs a lasso through
   `ProximalGradient`. `examples/pyproximal_tv.py` deblurs an image.
 
-### Spectral operators in Python (*since 1.1*)
+### Spectral operators in Python (*since 1.0*)
 
 `fp.Spectral(op, kind="svd")` applies an operator to the singular values of
 each matrix in the last two axes; `kind="eigh"` applies it to the

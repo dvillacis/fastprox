@@ -1,4 +1,4 @@
-"""Spectral operators (since 1.1): prox maps on singular values and
+"""Spectral operators (since 1.0): prox maps on singular values and
 eigenvalues, with derivatives from fp_spectral_jvp."""
 
 import numpy as np
