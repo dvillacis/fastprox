@@ -52,6 +52,9 @@ The 1.0 release candidate, whose C ABI holds for every 1.x:
 Wheels are abi3 for CPython 3.12 and later on Linux (x86_64, aarch64), macOS
 (arm64 from 11.0, x86_64 from 10.15) and Windows (amd64). The PyTorch and JAX
 wrappers use PyTorch and JAX when they are installed, and never require them.
+Free-threaded CPython builds (3.13t, 3.14t) are not supported yet: they cannot
+load abi3 wheels, and built from source the extension re-enables the GIL at
+import, with a RuntimeWarning.
 
 ## Quick start
 

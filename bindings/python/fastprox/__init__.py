@@ -1013,8 +1013,12 @@ class GraphTV(_ImageOperator):
     default) asks for the solution to rounding. ``info.gap`` is the duality
     gap with the flow as the dual, ``info.iters`` the number of max-flow
     solves; ``info.dual`` (shape (1, *x.shape)) is $q$ with $z = x - q$. Warm
-    starts have no effect. ``jvp`` and ``vjp`` are exact (averages over the
-    regions where $z$ is constant). Parameters: weights.
+    starts have no effect. With ``tol=0`` ``jvp`` and ``vjp`` are exact:
+    averages over the regions where $z$ is constant. With ``tol > 0`` the
+    solver may stop a part at its mean before it is split, and the
+    derivatives are those of the regions it stopped at, accurate only as far
+    as those regions are the solution's; use ``tol=0`` when derivatives
+    matter. Parameters: weights.
 
     Kinks (since 0.4) are edges: ``ctx.kinks`` and ``branch`` have the
     shape of x with the last axis over the edges, in the order of

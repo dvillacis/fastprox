@@ -426,12 +426,15 @@ batch.
   are accepted and have no effect. A signal containing a NaN is NaN, with a
   NaN dual; it reports a NaN gap and 0 iterations and does not count as
   unconverged (*since 1.0*).
-- **Derivatives** are exact: $z$ is constant on the regions joined by edges
+- **Derivatives** are exact with `tol` = 0: $z$ is constant on the regions joined by edges
   with $\gamma w_e > 0$ and equal values (to rounding), and each region's
   value is its mean of $x$ minus $\gamma \sum_e w_e s_e / \lvert R \rvert$ over
   its boundary edges, $s_e$ the sign of the jump. The Jacobian averages over
   the regions, and the $\gamma$ and weight derivatives come from the boundary
-  signs, in $O(n + m)$.
+  signs, in $O(n + m)$. With `tol` > 0 the solver may stop a part at its
+  mean before it is split, and the derivatives are those of the regions it
+  stopped at, accurate only as far as those regions are the solution's; use
+  `tol` = 0 when derivatives matter.
 - **Special values** as for the image operators: a NaN makes that signal NaN,
   ±Inf is rejected with `FP_EINVAL`. Graphs are limited to 2³¹ − 1 nodes and
   2³⁰ − 1 edges.
@@ -704,7 +707,8 @@ Constructors copy their parameter arrays (any dtype, one-dimensional, any
 stride), validate them (`FP_EPARAM` for negative weights, a negative radius,
 and so on) and write the handle through the last argument; on failure the
 handle is set to NULL. Operators are immutable and can be shared between
-threads.
+threads. An operator must stay alive until every workspace created for it has
+been freed: workspaces refer to their operator.
 
 ### Workspaces and derivatives
 
@@ -727,14 +731,21 @@ fp_workspace_free(ws);
   `fp_vjp` computes $J_x^\top g$, $\langle g, \partial z/\partial\gamma \rangle$
   and $(\partial z/\partial\theta)^\top g$, summed over the batch. `dtheta` and
   `gtheta` are vectors of length `fp_op_nparams(op)`.
-- Derivatives use the structure saved by the last prox call that had
-  `keep_structure` set; without it they return `FP_EINVAL`. An empty batch
+- Derivatives use the point saved by the last prox call on the workspace
+  (`fp_prox`, `fp_prox_steps` or `fp_prox_conj`), which must have had
+  `keep_structure` set. A later prox call on the workspace replaces that
+  point, or discards it when the call has no `keep_structure` or fails during
+  its work; derivatives then return `FP_EINVAL` until the next kept call. A
+  call rejected for its arguments (a negative step, a wrong shape, ...) leaves
+  the point as it was. To keep a point while computing other proxes, use a
+  second workspace. An empty batch
   with `keep_structure` saves an empty point: derivatives return `FP_OK` and
   write nothing, gradients 0 (since 1.0). Steps are checked on an empty
   batch too.
 - After `fp_prox_conj`, derivatives are those of the conjugate prox and $\gamma$
   reads as $\sigma$.
-- A workspace is used by one call at a time; use one per thread.
+- A workspace is used by one call at a time, derivative calls included; use
+  one per thread (see "Threads and determinism").
 
 ### One step per row (*since 1.1*)
 
@@ -935,6 +946,12 @@ and the others run serially, which avoids oversubscription; a child process
 after `fork()` builds its own pool. Builds with `FASTPROX_THREADS=OFF` are
 serial and `fp_default_threads()` returns 1.
 
+No two calls on one workspace may run at the same time, whatever its
+constness: `fp_jvp`, `fp_vjp`, `fp_vjp_device` and `fp_spectral_jvp` take it
+`const` because they keep its saved point, but they use its scratch and write
+their results' bookkeeping into it. Give each thread its own workspace; an
+`fp_op` can be shared by any number of threads.
+
 ### Building and linking
 
 ```sh
@@ -973,6 +990,10 @@ It fails on any change but an addition, judged on the types of
 `fastprox.h`.
 
 ## Python
+
+The wheels are abi3 for CPython 3.12 and later. Free-threaded CPython builds
+(3.13t, 3.14t) are not supported yet: they cannot load abi3 wheels, and built
+from source the extension re-enables the GIL at import, with a RuntimeWarning.
 
 ```python
 import numpy as np

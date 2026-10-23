@@ -86,7 +86,7 @@ typedef enum {
 } fp_tv1d_method;
 
 typedef struct fp_op fp_op;               /* opaque, immutable, shareable */
-typedef struct fp_workspace fp_workspace; /* opaque, one per concurrent caller */
+typedef struct fp_workspace fp_workspace; /* opaque; calls on one workspace must not overlap */
 
 typedef struct {
     int    axis;           /* operator axis; negative counts from the end */
@@ -327,8 +327,11 @@ FP_API fp_status fp_op_tv_iso_weighted(int ndim, const fp_array *axis_weights, c
  * the duality gap with the flow as the dual, iters the number of max-flow
  * solves (FP_ENOTCONV after max_iter, every unfinished part at its mean).
  * The workspace dual (shape (1, *x.shape)) is q = D^T f, with z = x - q at
- * the solution; warm starts have no effect. jvp and vjp are exact: averages
- * over the regions where z is constant. A signal containing a NaN is not
+ * the solution; warm starts have no effect. With tol = 0 jvp and vjp are
+ * exact: averages over the regions where z is constant. With tol > 0 the
+ * solver may stop a part at its mean before it is split, and the derivatives
+ * are those of the regions it stopped at, accurate only as far as those
+ * regions are the solution's; use tol = 0 when derivatives matter. A signal containing a NaN is not
  * solved: its output and dual are NaN, it adds NaN to fp_info.gap and no
  * iterations, and it does not by itself make the call FP_ENOTCONV (since
  * 1.0). */
@@ -346,6 +349,9 @@ FP_API fp_status fp_op_graph_tv(int64_t n, int64_t m, const int64_t *edges,
 FP_API fp_status fp_op_tree_tv(int64_t n, int64_t m, const int64_t *edges,
                                const fp_array *edge_weights, fp_op **out);
 
+/* Free an operator only after every workspace created for it: workspaces
+ * refer to their operator, and fp_workspace_kinks, fp_workspace_set_branch and
+ * the other workspace functions read it. */
 FP_API void        fp_op_free(fp_op *op);
 FP_API int64_t     fp_op_nparams(const fp_op *op);
 FP_API const char *fp_op_name(const fp_op *op);
@@ -353,6 +359,17 @@ FP_API const char *fp_op_name(const fp_op *op);
 /* ------------------------------------------------------------------------
  * Workspaces: scratch memory and saved structure for one array shape, dtype
  * and axis. With a workspace, fp_prox, fp_jvp and fp_vjp do not allocate.
+ * op must outlive the workspace. No two calls on one workspace may run at
+ * the same time, whatever its constness: fp_jvp, fp_vjp, fp_vjp_device and
+ * fp_spectral_jvp take it const because they keep its saved point, but they
+ * use its scratch and write their results' bookkeeping into it. Give each
+ * thread its own workspace; an fp_op can be shared by any number of threads.
+ *
+ * The saved point is that of the last prox call on ws (fp_prox,
+ * fp_prox_steps or fp_prox_conj), if it had keep_structure. A later call
+ * without keep_structure, or one that fails during its work, discards it, and
+ * the derivatives return FP_EINVAL until the next kept call; a call rejected
+ * for its arguments, before any work, leaves it as it was (since 1.0).
  * ---------------------------------------------------------------------- */
 FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like,
                                      const fp_options *opt, fp_workspace **out);
@@ -384,8 +401,8 @@ FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int ma
 FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residual, int *iters);
 
 /* Kinks of the elementwise maps soft thresholding, l1 over a box, SCAD and
- * MCP (since 0.2), at the point saved by the last fp_prox or fp_prox_conj
- * call with keep_structure (FP_EINVAL before one, and for other operators).
+ * MCP (since 0.2), at the point saved by the last prox call on ws, if it had
+ * keep_structure (FP_EINVAL otherwise, and for other operators).
  * An entry is at a kink when it lies within tol (absolute, in the units of
  * the input x or y) of a breakpoint of its scalar map; the code says which,
  * the nearest one:
@@ -507,8 +524,10 @@ FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_workspace *ws, fp_info *info);
 
 /* dout = J_x dx + (dz/dgamma) dgamma + (dz/dtheta) dparams at the point saved
- * by the last fp_prox or fp_prox_conj call with keep_structure (gamma reads
- * as sigma after fp_prox_conj). dx and dparams may be NULL (zero). */
+ * by the last prox call on ws (fp_prox, fp_prox_steps or fp_prox_conj), which
+ * must have had keep_structure; a later call without it, or one that fails
+ * during its work, discards the point (FP_EINVAL). gamma reads as sigma after
+ * fp_prox_conj. dx and dparams may be NULL (zero). */
 FP_API fp_status fp_jvp(const fp_op *op, const fp_workspace *ws,
                         const fp_array *dx, double dgamma,
                         const fp_array *dparams, fp_array *dout);

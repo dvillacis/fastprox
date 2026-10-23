@@ -2714,6 +2714,65 @@ static void test_nan_images() {
     }
 }
 
+// The saved point belongs to the last prox call on the workspace that got
+// past its argument checks (audit A4): a call rejected for its arguments
+// leaves it, a call without keep_structure discards it, and a kept call
+// replaces it. A soft(1) on [0.5, 2, -3] and an anisotropic TV image.
+static void test_kept_point_lifetime() {
+    struct Case {
+        std::vector<int64_t> shape;
+        std::function<fp_status(fp_op **)> make;
+    };
+    std::vector<Case> cases = {
+        {{3}, [](fp_op **o) { return fp_op_soft(1.0, nullptr, o); }},
+        {{2, 3}, [](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }},
+    };
+    for (auto &c : cases) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        const bool image = c.shape.size() == 2;
+        Arr x(c.shape, image ? Vec{0.5, 2.0, -3.0, 1.0, 0.0, 4.0} : Vec{0.5, 2.0, -3.0}), z(c.shape);
+        const int64_t n = static_cast<int64_t>(x.data.size());
+        Arr dx(c.shape, randn(n)), dz(c.shape), y(c.shape, randn(n)), small({1});
+        fp_options keep = opts(-1, 1, 1), plain = opts(-1, 1, 0);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &keep, &ws));
+        CHECK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a) == FP_EINVAL);
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &keep, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a));
+        const Vec D = dz.data;
+        auto same_point = [&] {
+            dz.data.assign(dz.data.size(), 0.0);
+            CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a));
+            CHECK(dz.data == D);
+        };
+        // Rejected for their arguments: the point stays.
+        CHECK(fp_prox(op, -1.0, &y.a, &z.a, &keep, ws, nullptr) == FP_EPARAM);
+        same_point();
+        CHECK(fp_prox(op, 1e300, &y.a, &z.a, &keep, ws, nullptr) == FP_EPARAM);  // the step range
+        same_point();
+        CHECK(fp_prox(op, 1.0, &y.a, &small.a, &keep, ws, nullptr) == FP_ESHAPE);
+        same_point();
+        if (image) {
+            fp_options bad = keep;
+            bad.tol = -1.0;
+            CHECK(fp_prox(op, 1.0, &y.a, &z.a, &bad, ws, nullptr) == FP_EPARAM);
+            same_point();
+        }
+        // A call without keep_structure discards it, at any step.
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &z.a, &plain, ws, nullptr));
+        CHECK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a) == FP_EINVAL);
+        CHECK(fp_vjp(op, ws, &dx.a, &dz.a, nullptr, nullptr) == FP_EINVAL);
+        CHECK_OK(fp_prox_conj(op, 0.0, &y.a, &z.a, &plain, ws, nullptr));
+        CHECK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &dz.a) == FP_EINVAL);
+        // A kept call saves a new point.
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &keep, ws, nullptr));
+        same_point();
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3407,6 +3466,7 @@ int main() {
     test_image_axis_ignored();
     test_huge_counts();
     test_failed_branch_keeps_override();
+    test_kept_point_lifetime();
     test_nan_images();
     test_aliasing();
     test_descriptor_bounds();
