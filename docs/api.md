@@ -781,6 +781,35 @@ for k in range(1, iters + 1):
     ...                                   # ctx.info.zerr: the error certified for this z
 ```
 
+**Derivatives at a loose tolerance** (*since 1.0*). The derivatives read the
+structure saved at the returned point, which is exact only when that point
+has the solution's regions: anisotropic TV once its polish certified them
+(from about 1e-8 to 1e-10 on 128² images), graph TV when no part was stopped
+by `tol`, tree TV always. Isotropic TV caps its curvature at a smoothing that
+vanishes with the gap, so its derivative carries an error of the order of the
+certified error of $z$: on 2 × 128² images 3% after a 1e-6 solve, 1e-4 after
+a 1e-10 one.
+
+- **`ctx.deriv`** is a `DerivInfo(residual, iters, exact, smoothing)` after
+  every derivative; `fp_workspace_deriv_exact(ws, &exact, &smoothing)` in C.
+- **A warning.** A derivative that is not exact, at a certified error of $z$
+  above 1e-4 (inside `inner_accuracy`, above its ztol), raises
+  `AccuracyWarning` once per point.
+- **`ctx.refine(ztol)`** solves the kept call again, from its saved input and
+  its dual as a warm start, to `ztol`, and returns the refined $z$; the
+  derivatives then read the refined point. `jvp(..., refine=ztol)` and
+  `vjp(..., refine=ztol)` refine first. In C,
+  `fp_workspace_refine(op, ws, tol, max_iter, out, info)`, bit for bit a
+  fresh solve seeded with the kept dual. Graph TV refines to `tol=0`.
+- **Cost.** A refine costs about what solving to the tighter tolerance from
+  the start would have: the warm start saves the iterations the loose solve
+  already made. On 2 × 128² images, from a 1e-6 solve, anisotropic TV refined
+  to 1e-12 in 34 iterations (a fresh solve took 66) and its derivative became
+  exact; isotropic TV, whose FISTA converges like $1/k^2$, took 31 036
+  iterations to 1e-10 (a fresh solve 32 432). So refine when the point the
+  derivatives read must be tighter than the one already solved, and otherwise
+  solve to the tolerance the derivative needs in the first place.
+
 ## C API
 
 ### Arrays
@@ -1174,7 +1203,7 @@ z, info = fp.tv_aniso(img, gamma=0.25, warm_start=info.dual)
 iso = fp.TVIso(ndim=2)
 v, ctx = iso.prox(img, 0.2, keep=True, tol=1e-8, max_iter=100000)
 gx, grads = iso.vjp(ctx, np.ones_like(img), tol=1e-10)   # conjugate gradients
-residual, cg_iters = ctx.deriv
+residual, cg_iters = ctx.deriv.residual, ctx.deriv.iters
 tv = fp.TVAniso(ndim=3, weights=[1.0, 1.0, 0.5])
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True)   # ctx.info is an IterInfo
 v, ctx = tv.prox(np.zeros((32, 32, 16)), 0.3, keep=True, ctx=ctx, warm=True)

@@ -356,6 +356,7 @@ struct TVIso final : ImageOp<TVIso> {
             c.scale_exp = e;
             c.scaled_gap = c.gap;
             c.gap = std::ldexp(c.gap, 2 * e);
+            c.smoothing = std::ldexp(c.smoothing, e);  // mu scales with z
             c.gamma = gamma0;
             if (c.save) *view(c.save, N).ex = e;
         }
@@ -515,6 +516,8 @@ struct TVIso final : ImageOp<TVIso> {
         const double *al = pixel_weights();
         *s.rel = dd > 0.0 ? std::sqrt(2.0 * std::max(c.gap, 0.0) / dd) : 0.0;
         *s.mu = from_dual ? kCurvRms * wmax * std::sqrt(2.0 * std::max(c.gap, 0.0) / static_cast<double>(N)) : 0.0;
+        c.smoothing = *s.mu;  // at the solved scale; scaled back with z
+        c.exact = !(*s.mu > 0.0);
         // Union-find over the edges of flat entries, roots at the smallest index.
         int32_t *parent = s.label;  // relabelled below, after a copy of the roots
         for (int64_t i = 0; i < N; ++i) parent[i] = static_cast<int32_t>(i);

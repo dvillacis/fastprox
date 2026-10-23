@@ -198,11 +198,16 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         return kRowOk;
     }
 
-    // Level of part P for its next cut, or false when P is done (set to its mean).
-    static bool choose_level(Part &P, double eps) noexcept {
+    // Level of part P for its next cut, or false when P is done (set to its
+    // mean). loose: P stopped by tol, wider than the rounding floor, so that
+    // its regions are not the solution's (feedback U4).
+    static bool choose_level(Part &P, double eps, double floor, bool &loose) noexcept {
         P.mean = P.sum / P.cnt;
         const double width = P.hi - P.lo;
-        if (P.cnt == 1 || !(width > eps)) return false;
+        if (P.cnt == 1 || !(width > eps)) {
+            if (P.cnt > 1 && width > floor) loose = true;
+            return false;
+        }
         const double a = P.lo + 0.25 * width, b = P.hi - 0.25 * width;
         P.t = std::min(std::max(P.mean, a), b);
         P.clamped = P.t != P.mean;
@@ -232,7 +237,9 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
             xmax = std::max(xmax, d[i]);
         }
         const double scale = std::max(std::fabs(xmin), std::fabs(xmax));
-        const double eps = std::max(c.tol * (xmax - xmin), 32.0 * kEps * scale);
+        const double floor = 32.0 * kEps * scale;
+        const double eps = std::max(c.tol * (xmax - xmin), floor);
+        bool loose = false;
 
         MF mf(g, wk.engine);
         // The engine's net flows (audit T6) only where cap - residual loses
@@ -271,7 +278,7 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
         }
         int32_t na = 0;
         for (int32_t k = 0; k < nn; ++k) {
-            const bool on = choose_level(pb[k], eps);
+            const bool on = choose_level(pb[k], eps, floor, loose);
             map[k] = on ? na : -1;
             if (on) pa[na++] = pb[k];
         }
@@ -382,7 +389,7 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
             // level; the others take their mean.
             na = 0;
             for (int32_t k = 0; k < nn; ++k) {
-                const bool on = choose_level(pb[k], eps);
+                const bool on = choose_level(pb[k], eps, floor, loose);
                 map[k] = on ? na : -1;
                 if (on) pa[na++] = pb[k];
             }
@@ -405,6 +412,7 @@ struct GraphTV final : edge_tv::Base<GraphTV> {
             np = na;
         }
         c.iters = rounds;
+        c.exact = !loose && c.converged;  // every part ended at a trivial cut or at rounding
         double *fsave = c.save ? reinterpret_cast<double *>(c.save + base_bytes()) : nullptr;
         certificate(d, zv, [&](int64_t e) {
             const double cap = gamma * we(e);

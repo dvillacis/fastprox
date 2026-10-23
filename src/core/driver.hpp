@@ -598,6 +598,26 @@ double certified_error(double gap, const ImagePlan &p, X x) noexcept {
     return e / m / std::sqrt(t);
 }
 
+// An image's results in the workspace: its gap (of the conjugate's output
+// after one), iterations, certified error, and the derivative's exactness.
+inline void record_image(fp_workspace &ws, int64_t r, const ImageCall &c, bool conj, double sigma,
+                         double zerr) noexcept {
+    ws.image_gaps.data()[r] = conj ? c.gap * sigma * sigma : c.gap;
+    reinterpret_cast<int *>(ws.image_iters.data())[r] = c.iters;
+    ws.image_zerr.data()[r] = zerr;
+    ws.image_exact.data()[r] = c.exact ? 1.0 : 0.0;
+    ws.image_smooth.data()[r] = c.smoothing;
+}
+
+// The certified error of an image from the kernel's input in(i), entry i in
+// C order, at the scale the image was solved at (c.scale_exp).
+template <class In>
+double image_zerr(const ImageCall &c, const ImagePlan &p, In in) noexcept {
+    const int se = c.scale_exp;
+    if (!se) return certified_error(c.gap, p, in);
+    return certified_error(c.scaled_gap, p, [&](int64_t i, int64_t o) { return std::ldexp(in(i, o), -se); });
+}
+
 template <class T>
 fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, double gamma, bool conj,
                             double sigma, fp_workspace &ws, int nt, bool keep, double tol,
@@ -614,7 +634,6 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
     if (outer) nt = std::min<int>(nt, ws.image_sets);
     double *gaps = ws.image_gaps.data();
     int *iters = reinterpret_cast<int *>(ws.image_iters.data());
-    double *zerr = ws.image_zerr.data();
     std::atomic<int> err{0}, notconv{0};
 
     auto solve = [&](int64_t r, char *set, char *threads, int inner) {
@@ -660,21 +679,12 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         c.save = keep ? ws.image_struct(r) : nullptr;
         if (int e = op.prox_image(in, res, c)) err.fetch_or(e, std::memory_order_relaxed);
         if (!c.converged) notconv.store(1, std::memory_order_relaxed);
-        gaps[r] = conj ? c.gap * sigma * sigma : c.gap;
-        iters[r] = c.iters;
-        // From the kernel's input: out may be x itself, and holds z by now.
-        // After a conjugate, c.gap and y / sigma give the error relative to y.
-        // At the solve's scale, where the gap is finite and normal.
-        const int se = c.scale_exp;
-        const double sg = se ? c.scaled_gap : c.gap;
-        if (in == xr && !se)
-            zerr[r] = certified_error(sg, p, [&](int64_t, int64_t o) { return static_cast<double>(xr[o]); });
-        else if (in == xr)
-            zerr[r] = certified_error(sg, p, [&](int64_t, int64_t o) { return std::ldexp(static_cast<double>(xr[o]), -se); });
-        else if (!se)
-            zerr[r] = certified_error(sg, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); });
-        else
-            zerr[r] = certified_error(sg, p, [&](int64_t i, int64_t) { return std::ldexp(static_cast<double>(in[i]), -se); });
+        // The certified error from the kernel's input: out may be x itself,
+        // and holds z by now. After a conjugate, c.gap and y / sigma give the
+        // error relative to y.
+        const double ze = in == xr ? image_zerr(c, p, [&](int64_t, int64_t o) { return static_cast<double>(xr[o]); })
+                                   : image_zerr(c, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); });
+        record_image(ws, r, c, conj, sigma, ze);
         if (conj) {
             // out = x - sigma z, reading x through its own strides.
             int64_t pos = 0;
@@ -706,6 +716,86 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         int it = 0;
         for (int64_t r = 0; r < B; ++r) {
             g += gaps[r];
+            it = std::max(it, iters[r]);
+        }
+        info->gap = g;
+        info->iters = it;
+    }
+    return notconv.load() ? FP_ENOTCONV : FP_OK;
+}
+
+// fp_workspace_refine (feedback U4): the kept call solved again from its
+// saved input and its dual, as a warm start, to a new tolerance. The saved
+// z, structure, dual and per-image results are rewritten; out, when given,
+// receives the result as the prox call wrote it (y - sigma z after a
+// conjugate). The workspace's scratch only, as for a prox call.
+template <class T>
+fp_status image_refine_driver(const fp_op &op, fp_workspace &ws, int nt, double tol, int max_iter,
+                              const Arr *out, fp_info *info) {
+    int64_t cst[FP_MAX_NDIM];  // the saved arrays: contiguous, in C order
+    for (int64_t d = ws.ndim - 1, m = 1; d >= 0; --d) {
+        cst[d] = m;
+        m *= ws.shape[d];
+    }
+    const int64_t *st[2] = {cst, out ? out->strides : cst};
+    const ImagePlan p = make_image_plan(ws.ndim, ws.shape, op.image_ndim(), 2, st);
+    const int64_t N = p.numel, B = p.images;
+    const int k = p.k;
+    const int64_t *ishape = ws.shape + p.nlead;
+    T *od = out ? reinterpret_cast<T *>(out->data) : nullptr;
+    const bool conj = ws.conj;
+    const double sigma = ws.sigma;
+    const bool outer = B >= 2 && B >= nt;
+    if (outer) nt = std::min<int>(nt, ws.image_sets);
+    std::atomic<int> err{0}, notconv{0};
+
+    auto solve = [&](int64_t r, char *set, char *threads, int inner) {
+        const T *in = ws.xs<T>() + r * N;
+        T *res = ws.zs<T>() + r * N;
+        ImageCall c;
+        c.shape = ishape;
+        c.numel = N;
+        c.gamma = ws.step(r);
+        c.tol = tol;
+        c.max_iter = max_iter;
+        c.nt = inner;
+        c.work = set + image_staging_bytes(N);
+        c.thread_base = threads;
+        c.thread_bytes = ws.image_thread_bytes;
+        c.dual = ws.dual.data() + static_cast<size_t>(r) * static_cast<size_t>(k) * static_cast<size_t>(N);
+        c.warm = true;
+        c.save = ws.image_struct(r);
+        if (int e = op.prox_image(in, res, c)) err.fetch_or(e, std::memory_order_relaxed);
+        if (!c.converged) notconv.store(1, std::memory_order_relaxed);
+        record_image(ws, r, c, conj, sigma,
+                     image_zerr(c, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); }));
+        if (od) {
+            int64_t off[2];
+            p.offsets(r, off);
+            T *orow = od + off[1];
+            if (conj)  // y = sigma in, as the prox call staged it
+                p.for_each(1, [&](int64_t i, int64_t o) {
+                    orow[o] = static_cast<T>(sigma * static_cast<double>(in[i]) - sigma * static_cast<double>(res[i]));
+                });
+            else
+                p.for_each(1, [&](int64_t i, int64_t o) { orow[o] = res[i]; });
+        }
+    };
+
+    if (outer) {
+        parallel_for(nt, B, 1, [&](int tid, int64_t r0, int64_t r1) {
+            for (int64_t r = r0; r < r1; ++r) solve(r, ws.image_set(tid), ws.image_threads(tid, 1), 1);
+        });
+    } else {
+        for (int64_t r = 0; r < B; ++r) solve(r, ws.image_set(0), ws.image_threads(0, nt), nt);
+    }
+    if (err.load()) return FP_EINVAL;
+    if (info) {
+        double g = 0.0;
+        int it = 0;
+        const int *iters = reinterpret_cast<const int *>(ws.image_iters.data());
+        for (int64_t r = 0; r < B; ++r) {
+            g += ws.image_gaps.data()[r];
             it = std::max(it, iters[r]);
         }
         info->gap = g;

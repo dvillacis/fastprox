@@ -511,6 +511,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.gap = std::max(gp, 0.0);
         c.iters = it;
         c.converged = gp <= target;
+        c.exact = polished;  // the regions certified; an unpolished z's are approximate
     }
 
     // Three active axes (k == 3). y holds y_0..2 (y_i = -q_i), wv the
@@ -596,6 +597,7 @@ struct TVAniso final : ImageOp<TVAniso> {
         c.gap = std::max(gp, 0.0);
         c.iters = it;
         c.converged = gp <= target;
+        c.exact = polished;
     }
 
     // ---- warm starts -----------------------------------------------------------
