@@ -78,10 +78,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The image's package index usually has valgrind; refresh it only if not.
-      - run: |
-          sudo apt-get install -y --no-install-recommends valgrind ||
-            { sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind; }
+      # valgrind's packages from the Actions cache: the Azure mirror served them
+      # at 36-45 kB/s on some runs (8-9 minutes for 22 MB). On a miss they are
+      # downloaded (the image's package index usually has them; refreshed only
+      # if not) and cached for the next run.
+      - uses: actions/cache@v4
+        with:
+          path: ~/valgrind-debs
+          key: valgrind-debs-${{ runner.os }}-${{ runner.arch }}-noble-v1
+      - name: Install valgrind
+        run: |
+          if ls ~/valgrind-debs/*.deb >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends ~/valgrind-debs/*.deb
+          else
+            sudo apt-get install -y --no-install-recommends valgrind ||
+              { sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind; }
+            mkdir -p ~/valgrind-debs
+            cp /var/cache/apt/archives/valgrind_*.deb /var/cache/apt/archives/libc6-dbg_*.deb ~/valgrind-debs/ || true
+          fi
       # -O1 -g, as valgrind's manual advises: its reports stay accurate, and
       # the run is several times faster than -O0 under memcheck's slowdown.
       - run: >
