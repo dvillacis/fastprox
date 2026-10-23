@@ -324,19 +324,21 @@ void core_elem() {
         fp_op *op;
     };
     std::vector<Case> cases;
-    auto add = [&](const char *name, fp_status s, fp_op *op) {
-        check(s, name);
+    // make writes the operator; it runs before the push (not as an argument
+    // beside it, whose evaluation order C++ leaves unspecified).
+    auto add = [&](const char *name, auto make) {
+        fp_op *op = nullptr;
+        check(make(&op), name);
         cases.push_back({name, op});
     };
-    fp_op *o;
-    add("soft", fp_op_soft(0.3, nullptr, &o), o);
-    add("soft weighted", fp_op_soft(0.3, &wa, &o), o);
-    add("elastic net", fp_op_elastic_net(0.3, 0.2, &o), o);
-    add("huber", fp_op_huber(0.5, 0.5, &o), o);
-    add("box", fp_op_box(-0.5, 0.5, nullptr, nullptr, &o), o);
-    add("nonneg", fp_op_nonneg(&o), o);
-    add("mcp", fp_op_mcp(0.3, 3.0, nullptr, &o), o);
-    add("l0", fp_op_l0(0.3, nullptr, &o), o);
+    add("soft", [](fp_op **o) { return fp_op_soft(0.3, nullptr, o); });
+    add("soft weighted", [&](fp_op **o) { return fp_op_soft(0.3, &wa, o); });
+    add("elastic net", [](fp_op **o) { return fp_op_elastic_net(0.3, 0.2, o); });
+    add("huber", [](fp_op **o) { return fp_op_huber(0.5, 0.5, o); });
+    add("box", [](fp_op **o) { return fp_op_box(-0.5, 0.5, nullptr, nullptr, o); });
+    add("nonneg", [](fp_op **o) { return fp_op_nonneg(o); });
+    add("mcp", [](fp_op **o) { return fp_op_mcp(0.3, 3.0, nullptr, o); });
+    add("l0", [](fp_op **o) { return fp_op_l0(0.3, nullptr, o); });
     fp_options opt = topts(1);
     for (const Case &c : cases) {
         const double out = best_us(3000, [&] { check(fp_prox(c.op, 1.0, &xa, &za, &opt, nullptr, nullptr), c.name); });
