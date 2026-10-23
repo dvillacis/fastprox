@@ -115,7 +115,7 @@ def test_derivatives(shape, k, conj):
     dx, dw, dg = rng.normal(size=shape), rng.normal(size=k), 0.2
     g = rng.normal(size=shape)
     jv = op.jvp(ctx, dx, dg, dw, tol=1e-10)
-    res, its = ctx.deriv
+    res, its = ctx.deriv.residual, ctx.deriv.iters
     assert res <= 1e-10 and its > 0
     gx, grads = op.vjp(ctx, g, tol=1e-10)
     lhs = float((g * jv).sum())
@@ -165,7 +165,7 @@ def test_derivative_tolerance_controls():
     for tol in (1e-4, 1e-6, 1e-8):
         _, ctx = op.prox(x, 0.1, keep=True, tol=tol, max_iter=10 ** 6)
         g, _ = op.vjp(ctx, c)
-        res, its = ctx.deriv
+        res, its = ctx.deriv.residual, ctx.deriv.iters
         assert 1e-10 < res <= np.sqrt(2 * ctx.info.gap) / np.linalg.norm(x)
         g10, _ = op.vjp(ctx, c, tol=1e-10)
         assert ctx.deriv[1] > its

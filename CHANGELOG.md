@@ -7,8 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Derivatives of iterative TV at loose tolerances (feedback U4):
+  - **Report.** `ctx.deriv` is a `DerivInfo(residual, iters, exact, smoothing)`. `exact` says whether the derivative at the saved point is exact: anisotropic TV once its polish certified the regions, graph TV when no part was stopped by `tol`, tree TV and the closed-form operators always. Isotropic TV is exact only without smoothing, and `smoothing` is its curvature cap μ, in the units of x. In C, `fp_workspace_deriv_exact(ws, &exact, &smoothing)`.
+  - **A warning.** A derivative that is not exact, at a certified error of z above 1e-4 (inside `inner_accuracy`, above its ztol), raises `AccuracyWarning` once per point. Before, a loose solve gave a biased hypergradient without a sign: 3% for isotropic TV after a 1e-6 solve on 2 × 128² images.
+  - **Refining.** `ctx.refine(ztol)` and `jvp`/`vjp(..., refine=ztol)` solve the kept call again, from its saved input and its dual, to a tighter tolerance; `ctx.refine` returns the refined z. In C, `fp_workspace_refine(op, ws, tol, max_iter, out, info)`, which matches a fresh solve seeded with the kept dual bit for bit, for any thread count, without allocating.
+  - **Cost.** A refine costs about what solving to the tighter tolerance from the start would have. From a 1e-6 solve on 2 × 128² images, anisotropic TV refines to 1e-12 in 34 iterations (66 fresh), and its derivative becomes exact. Isotropic TV refines to 1e-10 in 31 036 (32 432 fresh): its FISTA converges like 1/k², so the warm start saves little.
 - One set of derivative keywords on every operator (feedback U3): `jvp` and `vjp` take `tol` and `max_iter` everywhere. They control isotropic TV's conjugate gradients, and every other operator, the spectral ones included, accepts and ignores them, since its derivatives are in closed form. Before, only `TVIso` took them, so generic code had to special-case it. `ctx.deriv` is set after every derivative: `(0.0, 0)` in closed form. `fastprox.torch.prox` and `fastprox.jax.prox` take `deriv_tol` and `deriv_max_iter`, as `tv_iso` does, and pass them to every derivative call. A call with the default keywords costs 0.03–0.05 µs more than before.
 - CI builds and tests the aarch64 wheel on every pull request that touches the library, its tests or the build, as the release does. It is the wheel built by GCC for a CPU with FMA, where results depended on the thread count before `-ffp-contract=off`; only the TestPyPI dry run for 1.0.0rc2 had found that (#105).
+
+### Changed
+
+- `ctx.deriv` is a `DerivInfo` of four fields (feedback U4): `residual, iters = ctx.deriv` now fails; use the attributes. `examples/image_denoising.py` and `examples/autodiff_frameworks.py` solve to `tol=1e-8` before differentiating isotropic TV, so that their derivatives are not flagged.
 
 ## [1.0.0rc2] — 2026-10-23
 

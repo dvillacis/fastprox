@@ -73,7 +73,7 @@ def jax_part(rng):
 
     @jax.jit
     def loss_and_grad(t):
-        f = lambda t: 0.5 * jnp.sum((fpj.prox(fp.TVIso(), y, jnp.exp(t), tol=1e-7, max_iter=10 ** 5) - x) ** 2)
+        f = lambda t: 0.5 * jnp.sum((fpj.prox(fp.TVIso(), y, jnp.exp(t), tol=1e-8, max_iter=10 ** 5) - x) ** 2)
         return jax.value_and_grad(f)(t)
 
     t = jnp.log(0.02).astype(jnp.float32)

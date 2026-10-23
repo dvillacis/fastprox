@@ -2880,6 +2880,149 @@ static void test_image_info() {
     fp_op_free(soft);
 }
 
+// fp_workspace_refine and fp_workspace_deriv_exact (feedback U4): a kept
+// call refined to a tighter tolerance equals a fresh solve seeded with its
+// dual, bit for bit, derivatives included, for any thread count and without
+// allocation; the exactness of the derivative is reported per operator.
+static void test_refine() {
+    const int64_t side = 24, B = 2, N = side * side;
+    std::vector<int64_t> edges;
+    for (int64_t i = 0; i < side; ++i)
+        for (int64_t j = 0; j < side; ++j) {
+            if (j + 1 < side) edges.insert(edges.end(), {i * side + j, i * side + j + 1});
+            if (i + 1 < side) edges.insert(edges.end(), {i * side + j, (i + 1) * side + j});
+        }
+    std::vector<int64_t> chain;
+    for (int64_t i = 0; i + 1 < N; ++i) chain.insert(chain.end(), {i, i + 1});
+    fp_op *ops[4];
+    CHECK_OK(fp_op_tv_iso(2, nullptr, &ops[0]));
+    CHECK_OK(fp_op_tv_aniso(2, nullptr, &ops[1]));
+    CHECK_OK(fp_op_graph_tv(N, static_cast<int64_t>(edges.size()) / 2, edges.data(), nullptr, &ops[2]));
+    CHECK_OK(fp_op_tree_tv(N, static_cast<int64_t>(chain.size()) / 2, chain.data(), nullptr, &ops[3]));
+    // Blocks plus noise: a solve with regions to find.
+    Vec xv(static_cast<size_t>(B * N));
+    {
+        Vec noise = randn(B * N, 0.1);
+        for (int64_t b = 0; b < B; ++b)
+            for (int64_t i = 0; i < side; ++i)
+                for (int64_t j = 0; j < side; ++j)
+                    xv[static_cast<size_t>(b * N + i * side + j)] =
+                        ((i / 8 + j / 8 + b) % 3) * 0.5 + noise[static_cast<size_t>(b * N + i * side + j)];
+    }
+    for (int oi = 0; oi < 4; ++oi) {
+        fp_op *op = ops[oi];
+        const bool image = oi < 2;
+        const std::vector<int64_t> shape = image ? std::vector<int64_t>{B, side, side} : std::vector<int64_t>{B, N};
+        const double loose = oi == 2 ? 0.3 : 1e-3, tight = oi >= 2 ? 0.0 : 1e-12;
+        for (bool conj : {false, true}) {
+            Arr x(shape, xv), z(shape), zr(shape), zf(shape), g(shape, randn(B * N));
+            Arr gx1(shape), gx2(shape);
+            fp_options o = opts(-1, 1, 1);
+            o.tol = loose;
+            o.max_iter = 100000;
+            fp_workspace *ws, *wf;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &wf));
+            CHECK(fp_workspace_refine(op, ws, tight, 1000, nullptr, nullptr) == FP_EINVAL);  // nothing kept
+            int exact = -1;
+            double mu = -1.0;
+            CHECK(fp_workspace_deriv_exact(ws, &exact, &mu) == FP_EINVAL);
+            auto prox = [&](fp_workspace *w, const fp_options &oo, Arr &out) {
+                fp_status st = conj ? fp_prox_conj(op, 0.4, &x.a, &out.a, &oo, w, nullptr)
+                                    : fp_prox(op, 0.4, &x.a, &out.a, &oo, w, nullptr);
+                CHECK(st == FP_OK);
+            };
+            prox(ws, o, z);
+            CHECK_OK(fp_workspace_deriv_exact(ws, &exact, &mu));
+            if (oi == 0) CHECK(exact == 0 && mu > 0.0);
+            if (oi == 2) CHECK(exact == 0 && mu == 0.0);
+            if (oi == 3) CHECK(exact == 1 && mu == 0.0);
+            // The fresh solve: the same loose call, then seeded with its dual.
+            prox(wf, o, zf);
+            Arr dual({2, B, side, side});
+            Arr dual1({1, B, N});
+            Arr &dd = image ? dual : dual1;
+            CHECK_OK(fp_workspace_get_dual(ws, &dd.a));
+            CHECK_OK(fp_workspace_set_dual(wf, &dd.a));
+            fp_options ot = o;
+            ot.tol = tight;
+            prox(wf, ot, zf);
+            // The refine, with and without out, with a thread pool.
+            fp_info ri{}, fi{};
+            const long before = g_allocs.load();
+            CHECK_OK(fp_workspace_refine(op, ws, tight, 100000, &zr.a, &ri));
+            CHECK(g_allocs.load() == before);
+            CHECK(zr.data == zf.data);
+            CHECK_OK(fp_workspace_info(wf, &fi));
+            CHECK(ri.gap == fi.gap && ri.iters == fi.iters);
+            fp_info wi{};
+            CHECK_OK(fp_workspace_info(ws, &wi));
+            CHECK(wi.gap == ri.gap && wi.iters == ri.iters);
+            double g1[B], g2[B];
+            CHECK_OK(fp_workspace_image_info(ws, g1, nullptr, nullptr, B));
+            CHECK_OK(fp_workspace_image_info(wf, g2, nullptr, nullptr, B));
+            CHECK(std::memcmp(g1, g2, sizeof g1) == 0);
+            double gg1 = 0.0, gg2 = 0.0;
+            CHECK_OK(fp_vjp(op, ws, &g.a, &gx1.a, &gg1, nullptr));
+            CHECK_OK(fp_vjp(op, wf, &g.a, &gx2.a, &gg2, nullptr));
+            CHECK(gx1.data == gx2.data && gg1 == gg2);
+            int e1 = -1, e2 = -2;
+            double m1 = -1.0, m2 = -2.0;
+            CHECK_OK(fp_workspace_deriv_exact(ws, &e1, &m1));
+            CHECK_OK(fp_workspace_deriv_exact(wf, &e2, &m2));
+            CHECK(e1 == e2 && m1 == m2);
+            // Graph and tree TV are exact by now. Whether anisotropic TV's
+            // polish certified the regions depends on the image, which
+            // std::normal_distribution draws differently with MSVC's library
+            // (its exactness is checked on fixed data in test_refine.py).
+            if (oi >= 2) CHECK(e1 == 1);
+            if (oi == 0) CHECK(m1 < mu);  // less smoothing at a smaller gap
+            // Errors.
+            CHECK(fp_workspace_refine(op, ws, -1.0, 10, nullptr, nullptr) == FP_EPARAM);
+            CHECK(fp_workspace_refine(op, ws, 1e-8, 0, nullptr, nullptr) == FP_EPARAM);
+            CHECK(fp_workspace_refine(ops[(oi + 1) % 4], ws, 1e-8, 10, nullptr, nullptr) == FP_EINVAL);
+            Arr wrong({B, N + 1});
+            CHECK(fp_workspace_refine(op, ws, 1e-8, 10, &wrong.a, nullptr) == FP_ESHAPE);
+            // A refine that stops early reports it, and the derivatives stay
+            // defined. Anisotropic, graph and tree TV are exact by now, and
+            // meet any tolerance at once.
+            if (oi == 0) {
+                CHECK(fp_workspace_refine(op, ws, 1e-30, 1, nullptr, nullptr) == FP_ENOTCONV);
+                CHECK_OK(fp_vjp(op, ws, &g.a, &gx1.a, nullptr, nullptr));
+            }
+            fp_workspace_free(ws);
+            fp_workspace_free(wf);
+        }
+        // Any thread count: the same bits.
+        Arr x(shape, xv), za(shape), zb(shape);
+        fp_options o1 = opts(-1, 1, 1), o4 = opts(-1, 4, 1);
+        o1.tol = o4.tol = loose;
+        fp_workspace *w1, *w4;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o1, &w1));
+        CHECK_OK(fp_workspace_create(op, &x.a, &o4, &w4));
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &za.a, &o1, w1, nullptr));
+        CHECK_OK(fp_prox(op, 0.4, &x.a, &zb.a, &o4, w4, nullptr));
+        CHECK_OK(fp_workspace_refine(op, w1, tight, 100000, &za.a, nullptr));
+        CHECK_OK(fp_workspace_refine(op, w4, tight, 100000, &zb.a, nullptr));
+        CHECK(za.data == zb.data);
+        fp_workspace_free(w1);
+        fp_workspace_free(w4);
+    }
+    // Not an image operator.
+    fp_op *soft;
+    CHECK_OK(fp_op_soft(1.0, nullptr, &soft));
+    Arr y({3}, {0.5, 2.0, -3.0}), zy({3});
+    fp_options o = opts(-1, 1, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(soft, &y.a, &o, &ws));
+    CHECK_OK(fp_prox(soft, 1.0, &y.a, &zy.a, &o, ws, nullptr));
+    CHECK(fp_workspace_refine(soft, ws, 1e-8, 10, nullptr, nullptr) == FP_EINVAL);
+    CHECK(fp_workspace_deriv_exact(ws, nullptr, nullptr) == FP_EINVAL);
+    fp_workspace_free(ws);
+    fp_op_free(soft);
+    for (fp_op *op : ops) fp_op_free(op);
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3575,6 +3718,7 @@ int main() {
     test_failed_branch_keeps_override();
     test_kept_point_lifetime();
     test_image_info();
+    test_refine();
     test_nan_images();
     test_aliasing();
     test_descriptor_bounds();

@@ -230,6 +230,38 @@ the 1.0 ABI before it freezes, and need no "since" note.
 - **The warning** is raised and suppressed as designed.
 - **C:** `fp_workspace_refine` keeps the allocation counter at zero.
 
+**As implemented.** The design, with these changes:
+- **The flags.** Each kernel reports `exact` and the smoothing μ in `ImageCall`. The driver keeps them per image in the workspace (`image_exact`, `image_smooth`, sized in `build_workspace`), as it keeps the gaps. They are not a byte in anisotropic TV's saved structure, which leaves its layout alone and lets graph TV report too.
+  - **Anisotropic TV:** exact when polished.
+  - **Isotropic TV:** exact when μ = 0, at gap 0 or with fewer than two active axes.
+  - **Graph TV:** exact when no part wider than the rounding floor was stopped by `tol`, and the solve converged.
+  - **Tree TV:** always exact.
+- **`fp_workspace_refine(op, ws, tol, max_iter, out, info)`** takes an optional `out`, which receives the refined result as the prox call wrote it, and an `fp_info`. Without `out`, the caller could not get the z that the derivatives now read. `ctx.refine` returns that z. Graph TV refines to `tol=0`, since its ztol mapping needs x, which the context does not hold.
+- **The warning** covers every operator whose derivative is not exact, not isotropic TV alone. The anisotropic and graph TV derivatives are biased too at a loose tolerance (2–5% for anisotropic TV at 1e-8). The warning goes once per point: a new prox call on the context resets it.
+- **Examples.** Two examples differentiated isotropic TV after solves certified to 1e-3 and 3e-4, which now warn. They solve to `tol=1e-8`, with unchanged results.
+- **Acceptance: only half met.** On the CHANGELOG's case (2 × 128², blocks plus noise, γ = 0.2, from a 1e-6 solve):
+
+  | | Fresh solve to the tight tolerance | Refine | Derivative error |
+  | --- | --- | --- | --- |
+  | Isotropic TV, to 1e-10 (ztol 1e-5) | 32 432 iterations, 4.21 s | 31 036 iterations, 4.23 s | 2.9% before, 1.2e-4 after, as the fresh solve's |
+  | Anisotropic TV, to 1e-12 | 66 iterations, 0.031 s | 34 iterations, 0.017 s | exact (error 0) |
+
+  - **Anisotropic TV** meets "under half the cost".
+  - **Isotropic TV** does not. Its FISTA's gap falls like 1/k², so going from 1e-6 to 1e-10 takes about 100 times the iterations whatever the start, and the warm start saves only the loose solve's own iterations. A refine is therefore a convenience (no input needed, the derivative at a tighter point) and not a shortcut. The docs say so: solve to the tolerance the derivative needs in the first place, and refine when the point must be tighter than the one already solved.
+
+**Tests.**
+- **C:** `test_refine` (`tests/c/test_core.cpp`) checks, for isotropic, anisotropic, graph and tree TV, prox and conjugate:
+  - the refine is bitwise equal to a fresh solve seeded with the kept dual: its output, `fp_info`, per-image gaps, the vjp and the exactness;
+  - the same bits for 1 and 4 threads;
+  - no allocation;
+  - the errors, and `FP_ENOTCONV`.
+- **Python:** `tests/python/test_refine.py` checks:
+  - the isotropic derivative within 0.7% of the reference after `refine=1e-5`, bitwise equal to the fresh seeded solve;
+  - the refined z, prox and conjugate, float32 included;
+  - the flags per operator;
+  - the warning: once per point, reset by a new prox call, silent when exact or tight, inside `inner_accuracy`;
+  - the errors.
+
 **Acceptance.** The tests pass. On the CHANGELOG's 2 × 128² case, `vjp(..., refine=1e-5)` from a 1e-6 solve gives the 1e-10 solve's derivative error at under half the cost of solving to 1e-10 from scratch.
 
 ---

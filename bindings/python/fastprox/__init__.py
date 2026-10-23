@@ -35,7 +35,7 @@ from . import _fastprox as _C
 __version__ = _C.version()
 
 __all__ = [
-    "Info", "IterInfo", "Grads", "Context", "Operator",
+    "Info", "IterInfo", "DerivInfo", "Grads", "Context", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
     "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso", "GraphTV", "graph_tv", "TreeTV", "tree_tv",
     "L0", "Lq", "SCAD", "MCP", "LogPenalty", "hard_threshold", "lq", "scad", "mcp", "prox_log",
@@ -100,6 +100,24 @@ class IterInfo(NamedTuple):
     zerr: float = float("nan")
 
 
+class DerivInfo(NamedTuple):
+    r"""Report of the last derivative on a context (``ctx.deriv``; since 1.0
+    with four fields): the residual and iterations of an iterative solve
+    (isotropic TV's conjugate gradients; 0 for derivatives in closed form),
+    whether the derivative is exact at the saved point, and the smoothing
+    used where it is not. Anisotropic TV is exact once its polish certified
+    the regions, graph TV when no part was stopped by ``tol``, tree TV and
+    the operators in closed form always; isotropic TV caps its curvature at
+    $\gamma / \mu$ with $\mu$ = ``smoothing`` (in the units of $x$), which
+    vanishes with the gap. ``ctx.refine`` or ``refine=`` make it exact or
+    nearly so."""
+
+    residual: float
+    iters: int
+    exact: bool = True
+    smoothing: float = 0.0
+
+
 class Grads:
     r"""Parameter gradients returned by :meth:`Operator.vjp`.
 
@@ -127,7 +145,7 @@ class Context:
     use one context per thread."""
 
     __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info", "deriv",
-                 "lock")
+                 "lock", "warned")
     # info is an Info, or an IterInfo for iterative operators
 
     def __init__(self, op, ws, shape, dtype, axis, threads):
@@ -140,10 +158,39 @@ class Context:
         self.conj = False
         self.step = None
         self.info = None
-        self.deriv = None  # (residual, iterations) of the last iterative derivative solve
+        self.deriv = None  # a DerivInfo after a derivative
         # Its workspace's scratch, branch override and derivative tolerance are
-        # shared state; re-entrant, as TVIso's derivatives call the base ones.
+        # shared state; re-entrant, as refine= calls refine under it.
         self.lock = threading.RLock()
+        self.warned = False  # the inexact-derivative warning, once per point
+
+    def refine(self, ztol=None, *, tol=None, max_iter=100000, warn=True):
+        r"""Solves the kept call again, from its saved input and its dual as a
+        warm start, to ``ztol`` (or the gap tolerance ``tol``; inside
+        :func:`inner_accuracy` its ztol by default), and returns the refined
+        $z$ (since 1.0; iterative image operators). The derivatives then read
+        the refined point, which is what makes them exact or nearly so at a
+        loose first solve (``ctx.deriv.exact``), and ``ctx.info`` is the
+        refined call's. The $z$ returned by the first call is not changed: use
+        the one returned here. Graph TV refines to ``tol=0``, the exact
+        solution, for any ``ztol``. A refine that stops at ``max_iter`` raises
+        :class:`ConvergenceWarning` unless ``warn=False``."""
+        op = self.op
+        if not isinstance(op, _ImageOperator):
+            raise TypeError(f"{type(op).__name__} is not iterative: there is nothing to refine")
+        if tol is None and ztol is None:
+            ztol = _ACCURACY.get()
+            if ztol is None:
+                raise ValueError("refine needs ztol or tol (or an inner_accuracy block)")
+        t = op._refine_tol(tol, ztol)
+        z = np.empty(self.shape, self.dtype)
+        with self.lock:
+            gap, iters, conv = _C.refine(op._op, self.ws, t, _deriv_iters(max_iter), z)
+            self.info = op._iter_info(self.ws, self.shape, gap, iters, 0, conv)
+            self.warned = False
+        if warn and not conv:
+            _warn_unconverged(f"{type(op).__name__} refine", self.info.zerr, max_iter, stacklevel=3)
+        return z
 
     def jacobian_diag(self, branch=None, kink_tol=0.0):
         r"""Diagonal of the Jacobian $\partial z / \partial x$ at the saved point, for elementwise
@@ -437,7 +484,14 @@ def _deriv_tol(tol):
 
 
 _MAX_ITER = 10000  # the derivatives' default max_iter, compared by identity below
-_NO_SOLVE = (0.0, 0)  # ctx.deriv of a closed-form derivative
+_NO_SOLVE = DerivInfo(0.0, 0, True, 0.0)  # ctx.deriv of a closed-form derivative
+
+
+def _deriv_iters(max_iter):
+    """An iteration cap: an integer >= 1."""
+    if isinstance(max_iter, bool) or int(max_iter) != max_iter or max_iter < 1:
+        raise ValueError(f"max_iter must be an integer >= 1, got {max_iter!r}")
+    return int(max_iter)
 
 
 def _deriv_ctl(tol, max_iter):
@@ -445,8 +499,7 @@ def _deriv_ctl(tol, max_iter):
     takes them); returns the C tolerance."""
     if tol is None and max_iter is _MAX_ITER:  # the defaults: nothing to check
         return 0.0
-    if isinstance(max_iter, bool) or int(max_iter) != max_iter or max_iter < 1:
-        raise ValueError(f"max_iter must be an integer >= 1, got {max_iter!r}")
+    _deriv_iters(max_iter)
     return _deriv_tol(tol)
 
 
@@ -460,6 +513,7 @@ class Operator:
     _layout: list = []
     _elementwise = False  # the C operator acts entry by entry (diagonal Jacobian)
     _iterative_deriv = False  # derivatives solve a linear system (isotropic TV)
+    _image = False  # an iterative image operator: refine, and the exactness of its derivative
 
     def __init__(self, handle):
         self._op = handle
@@ -552,15 +606,21 @@ class Operator:
 
     # -- derivatives -------------------------------------------------------
     def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
-            max_iter=_MAX_ITER, branch=None, kink_tol=0.0):
+            max_iter=_MAX_ITER, refine=None, branch=None, kink_tol=0.0):
         r"""$J_x \, dx + (\partial z / \partial \gamma) \, d\gamma + (\partial z / \partial \theta) \, d\theta$
         at the saved point.
 
         ``tol`` and ``max_iter`` (on every operator since 1.0) control iterative
         derivative solves (isotropic TV: see :class:`TVIso`) and are accepted
         and ignored by every other operator, whose derivatives are in closed
-        form. ``ctx.deriv`` is then ``(residual, iterations)`` of the solve, or
-        ``(0.0, 0)``.
+        form. ``ctx.deriv`` is then a :class:`DerivInfo`: the solve's residual
+        and iterations, and whether the derivative is exact.
+
+        ``refine=ztol`` (since 1.0; iterative image operators, ignored by the
+        others) first calls ``ctx.refine(ztol)``: the derivative is then that
+        at the refined point. A derivative that is not exact, at a certified
+        error of $z$ above 1e-4 (inside :func:`inner_accuracy`, above its
+        ztol), raises :class:`AccuracyWarning` once per point.
 
         ``branch`` (soft thresholding, l1 over a box, SCAD and MCP; since 0.2):
         -1, 0 or +1 per entry. At the entries within ``kink_tol`` of a
@@ -575,10 +635,12 @@ class Operator:
         dout = _output(None, out, ctx.shape, ctx.dtype)
         if dparams is not None:
             dparams = self._flatten(dparams)
+        dtol = _deriv_ctl(tol, max_iter)
+        if refine is not None and self._image:
+            ctx.refine(refine)
         side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
         if kink_tol and branch is None:
             _kink_tol(kink_tol)  # still checked without a branch
-        dtol = _deriv_ctl(tol, max_iter)
         it = self._iterative_deriv
         with ctx.lock, side:
             if it:  # the tolerance, the solve and its report as one
@@ -588,13 +650,13 @@ class Operator:
             except (TypeError, ValueError):
                 dx, = _restage(out, dx)
                 _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
-            ctx.deriv = _C.deriv_info(ctx.ws) if it else _NO_SOLVE
+            ctx.deriv = self._deriv_info(ctx) if self._image else _NO_SOLVE
         return dout
 
-    def vjp(self, ctx: Context, g, *, out=None, tol=None, max_iter=_MAX_ITER, branch=None,
-            kink_tol=0.0):
-        r"""($J_x^\top g$, Grads) at the saved point; ``tol``, ``max_iter`` and
-        ``branch`` as in :meth:`jvp`."""
+    def vjp(self, ctx: Context, g, *, out=None, tol=None, max_iter=_MAX_ITER, refine=None,
+            branch=None, kink_tol=0.0):
+        r"""($J_x^\top g$, Grads) at the saved point; ``tol``, ``max_iter``,
+        ``refine`` and ``branch`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = _output(None, out, ctx.shape, ctx.dtype)
@@ -603,6 +665,8 @@ class Operator:
         if kink_tol and branch is None:
             _kink_tol(kink_tol)  # still checked without a branch
         dtol = _deriv_ctl(tol, max_iter)
+        if refine is not None and self._image:
+            ctx.refine(refine)
         it = self._iterative_deriv
         with ctx.lock, side:
             if it:
@@ -612,8 +676,26 @@ class Operator:
             except (TypeError, ValueError):
                 g, = _restage(out, g)
                 gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
-            ctx.deriv = _C.deriv_info(ctx.ws) if it else _NO_SOLVE
+            ctx.deriv = self._deriv_info(ctx) if self._image else _NO_SOLVE
         return gx, Grads(gg, gp, self._fields(gp))
+
+    def _deriv_info(self, ctx):
+        """ctx.deriv of an image operator, under ctx.lock, and the warning
+        for an inexact derivative at a loose point (feedback U4)."""
+        res, its = _C.deriv_info(ctx.ws) if self._iterative_deriv else (0.0, 0)
+        exact, mu = _C.deriv_exact(ctx.ws)
+        if not exact and not ctx.warned:
+            need = _ACCURACY.get()
+            limit = 1e-4 if need is None else need
+            zerr = getattr(ctx.info, "zerr", float("nan"))
+            if zerr > limit:
+                ctx.warned = True
+                warnings.warn(f"{type(self).__name__}: the derivative at this point is not exact "
+                              f"(certified error of z {zerr:.2g} > {limit:g}"
+                              + (f", smoothing {mu:.2g}" if mu > 0 else "") +
+                              "); pass refine=ztol to jvp or vjp, or solve to a tighter ztol",
+                              AccuracyWarning, stacklevel=3)  # _deriv_info, jvp/vjp, the caller
+        return DerivInfo(res, its, exact, mu)
 
     def _check_ctx(self, ctx):
         if not isinstance(ctx, Context) or ctx.op is not self:
@@ -1046,6 +1128,8 @@ class TV1DL2(Operator):
 class _ImageOperator(Operator):
     """Iterative operator on the last ``ndim`` axes (see :class:`TVAniso`)."""
 
+    _image = True
+
     def __init__(self, handle, ndim):
         super().__init__(handle)
         self.ndim = int(ndim)
@@ -1092,6 +1176,18 @@ class _ImageOperator(Operator):
         """The C tolerance that certifies ztol: ztol^2."""
         return _gap_tol(None, ztol, 0.0)
 
+    def _refine_tol(self, tol, ztol):
+        """The C tolerance of a refine, from tol or ztol (the input is not at hand)."""
+        return _gap_tol(tol, ztol, self._default_tol)
+
+    def _iter_info(self, ws, shape, gap, iters, ties, conv):
+        """The IterInfo of the last call on ws: the dual and the certified error."""
+        dual = np.empty((self.ndim, *shape), np.float64)
+        _C.get_dual(ws, dual)
+        zerrs = np.empty(math.prod(shape[:len(shape) - self.ndim]), np.float64)
+        _C.image_info(ws, None, None, zerrs, zerrs.size)
+        return IterInfo(gap, iters, ties, conv, dual, float(zerrs.max()) if zerrs.size else 0.0)
+
     def _tol(self, x, tol, ztol, warn=True):
         """The C tolerance for tol=, ztol= or inner_accuracy."""
         return _call_tol(tol, ztol, self._default_tol, lambda z: self._from_ztol(x, z), warn,
@@ -1121,24 +1217,23 @@ class _ImageOperator(Operator):
                 res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol),
                               int(max_iter), steps=steps)
             gap, iters, ties, conv = res
-            zerr = None
-            if want_info or (warn and not conv):
-                zerrs = np.empty(math.prod(x.shape[:x.ndim - self.ndim]), np.float64)
-                _C.image_info(ws, None, None, zerrs, zerrs.size)
-                zerr = float(zerrs.max()) if zerrs.size else 0.0
+            info = self._iter_info(ws, x.shape, gap, iters, ties, conv) if want_info else None
             if warn and not conv:
+                if info is None:
+                    zerrs = np.empty(math.prod(x.shape[:x.ndim - self.ndim]), np.float64)
+                    _C.image_info(ws, None, None, zerrs, zerrs.size)
+                    zerr = float(zerrs.max()) if zerrs.size else 0.0
+                else:
+                    zerr = info.zerr
                 _warn_unconverged(type(self).__name__, zerr, max_iter, stacklevel=5)
-            if not want_info:
-                return None
-            dual = np.empty((self.ndim, *x.shape), np.float64)
-            _C.get_dual(ws, dual)
-            return IterInfo(gap, iters, ties, conv, dual, zerr)
+            return info
 
         if keep or ctx is not None:
             ctx = self._context(x, -1, threads, ctx)
             with ctx.lock:  # warm state, the dual and the info belong to one call
                 info = call(ctx.ws)
                 ctx.info = info
+                ctx.warned = False  # a new point
                 ctx.conj = conj
                 ctx.step = step if steps is None else steps
             return z, ctx, info
@@ -1243,6 +1338,12 @@ class GraphTV(_ImageOperator):
         self._layout = [("weights", self._w.size, w is None)]
 
     _default_tol = 0.0
+
+    def _refine_tol(self, tol, ztol):
+        """A refine without the input at hand: the exact solve, tol = 0, which
+        meets every ztol (or the tol given)."""
+        _gap_tol(tol, ztol, 0.0)  # validates
+        return 0.0 if tol is None else float(tol)
 
     def _from_ztol(self, x, ztol):
         """``tol`` bounds each node's error by tol (max x - min x), so

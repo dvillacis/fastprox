@@ -230,6 +230,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.image_gaps.resize(static_cast<size_t>(B));
         w.image_iters.resize(static_cast<size_t>(B));
         w.image_zerr.resize(static_cast<size_t>(B));
+        w.image_exact.resize(static_cast<size_t>(B));
+        w.image_smooth.resize(static_cast<size_t>(B));
         if (keep) {
             const size_t bytes = static_cast<size_t>(w.numel) * item;
             w.xsave.resize(bytes / sizeof(double) + 1);
@@ -943,6 +945,59 @@ void dual_copy(fp_workspace &ws, const Arr &a, bool to_ws) noexcept {
     }
 }
 
+// fp_workspace_refine (feedback U4): the kept call of an iterative image
+// operator solved again, warm from its dual, to tol. The point the
+// derivatives read, its dual and fp_workspace_info become the refined call's.
+fp_status refine_impl(const fp_op *op, fp_workspace *ws, double tol, int max_iter, fp_array *oa,
+                      fp_info *info) {
+    if (!op || !ws || ws->op != op || !ws->valid || !ws->image_ndim) return FP_EINVAL;
+    if (!(tol >= 0.0) || !finite(tol) || max_iter < 1) return FP_EPARAM;
+    Arr out;
+    if (oa) {
+        if (fp_status s = to_arr(oa, out)) return s;
+        if (fp_status s = check_like_ws(*ws, out)) return s;
+        if (fp_status s = check_output(nullptr, out)) return s;
+    }
+    if (ws->identity) return oa ? FP_EINVAL : FP_OK;  // sigma = 0 saved no input to refine
+    fp_info local = {0.0, 0, 0};
+    fp_info *inf = info ? info : &local;
+    *inf = local;
+    ws->info_valid = false;
+    fp_status s = FP_OK;
+    if (ws->numel != 0) {
+        // A branch override belongs to the point it was set for.
+        ws->branch_on = false;
+        ws->override_on = false;
+        const Arr *po = oa ? &out : nullptr;
+        s = ws->dtype == FP_F32 ? image_refine_driver<float>(*op, *ws, ws->nthreads, tol, max_iter, po, inf)
+                                : image_refine_driver<double>(*op, *ws, ws->nthreads, tol, max_iter, po, inf);
+        if (s != FP_OK && s != FP_ENOTCONV) {
+            ws->valid = false;  // partly rewritten
+            return s;
+        }
+    }
+    ws->info = *inf;
+    ws->info_status = s;
+    ws->info_valid = true;
+    return s;
+}
+
+// Whether every image's derivative at the kept point is exact, and the
+// largest smoothing used where it is not (feedback U4).
+fp_status deriv_exact_impl(const fp_workspace *ws, int *exact, double *smoothing) {
+    if (!ws || !ws->valid || !ws->image_ndim) return FP_EINVAL;
+    int all = 1;
+    double mu = 0.0;
+    if (!ws->identity && ws->numel != 0)
+        for (int64_t r = 0; r < ws->rows; ++r) {
+            all = all && ws->image_exact.data()[r] != 0.0;
+            mu = std::max(mu, ws->image_smooth.data()[r]);
+        }
+    if (exact) *exact = all;
+    if (smoothing) *smoothing = mu;
+    return FP_OK;
+}
+
 fp_status dual_impl(fp_workspace *ws, const fp_array *aa, bool to_ws) {
     if (!ws || !aa || !ws->op || !ws->image_ndim) return FP_EINVAL;
     Arr a;
@@ -1536,6 +1591,15 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info) {
     if (!ws || !info || !ws->info_valid) return FP_EINVAL;
     *info = ws->info;
     return ws->info_status;
+}
+
+FP_API fp_status fp_workspace_refine(const fp_op *op, fp_workspace *ws, double tol, int max_iter,
+                                     fp_array *out, fp_info *info) {
+    return guard([&] { return fp::refine_impl(op, ws, tol, max_iter, out, info); });
+}
+
+FP_API fp_status fp_workspace_deriv_exact(const fp_workspace *ws, int *exact, double *smoothing) {
+    return guard([&] { return fp::deriv_exact_impl(ws, exact, smoothing); });
 }
 
 FP_API fp_status fp_workspace_image_info(const fp_workspace *ws, double *gaps, int *iters,

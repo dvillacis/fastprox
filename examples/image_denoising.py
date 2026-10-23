@@ -91,11 +91,11 @@ def main(plot=True):
     op = fp.TVIso(ndim=2)
     s, ctx = np.log(0.05), None
     for _ in range(10):
-        z, ctx = op.prox(ytrain, np.exp(s), keep=True, ctx=ctx, tol=1e-6, max_iter=10 ** 5, warm=True)
+        z, ctx = op.prox(ytrain, np.exp(s), keep=True, ctx=ctx, tol=1e-8, max_iter=10 ** 5, warm=True)
         _, grads = op.vjp(ctx, g=(z - train) / z.size)
         s -= 100.0 * grads.gamma * np.exp(s)        # dL/dlog(gamma) = gamma dL/dgamma
     learned = float(np.exp(s))
-    residual, cg_iters = ctx.deriv
+    residual, cg_iters = ctx.deriv.residual, ctx.deriv.iters
     grid = learned * np.geomspace(0.5, 2.0, 15)
     losses = [loss(fp.tv_iso(ytrain, gamma=g, tol=1e-6, max_iter=10 ** 5)[0], train) for g in grid]
     best = grid[np.argmin(losses)]

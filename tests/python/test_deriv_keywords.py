@@ -24,11 +24,11 @@ def _same_with_keywords(op, ctx, x, rng):
     kw = dict(tol=1e-8, max_iter=50)
     ctx.deriv = None
     assert np.array_equal(op.jvp(ctx, dx, 0.3, dth), op.jvp(ctx, dx, 0.3, dth, **kw))
-    assert ctx.deriv == (0.0, 0)
+    assert ctx.deriv == fp.DerivInfo(0.0, 0, True, 0.0)
     ctx.deriv = None
     (a, ga), (b, gb) = op.vjp(ctx, g), op.vjp(ctx, g, **kw)
     assert np.array_equal(a, b) and ga.gamma == gb.gamma and np.array_equal(ga.params, gb.params)
-    assert ctx.deriv == (0.0, 0)
+    assert ctx.deriv == fp.DerivInfo(0.0, 0, True, 0.0)
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -58,7 +58,7 @@ def test_spectral_accepts():
     assert ctx.deriv is None
     assert np.array_equal(op.jvp(ctx, h), op.jvp(ctx, h, tol=1e-8, max_iter=50))
     a, b = op.vjp(ctx, h)[0], op.vjp(ctx, h, tol=1e-8, max_iter=50)[0]
-    assert np.array_equal(a, b) and ctx.deriv == (0.0, 0)
+    assert np.array_equal(a, b) and ctx.deriv == (0.0, 0, True, 0.0)
 
 
 def test_tviso_uses_them():
@@ -67,7 +67,7 @@ def test_tviso_uses_them():
     _, ctx = op.prox(x, 0.4, keep=True, tol=1e-10, max_iter=100000)
     g = np.random.default_rng(5).normal(size=x.shape)
     loose = op.vjp(ctx, g, tol=1e-2)[0]
-    res, its = ctx.deriv
+    res, its = ctx.deriv.residual, ctx.deriv.iters
     assert 0.0 < res <= 1e-2 and its > 0
     tight = op.vjp(ctx, g, tol=1e-12)[0]
     assert ctx.deriv[0] <= 1e-12 and not np.array_equal(loose, tight)

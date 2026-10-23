@@ -630,6 +630,29 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
  * batch's C order, count the number of images (the product of x's shape
  * without the image axes: FP_ESHAPE otherwise); any of them may be NULL.
  * FP_EINVAL before a call, after one that failed, and for other operators. */
+/* Derivatives of iterative image operators at a loose tolerance (feedback
+ * U4). fp_workspace_deriv_exact says whether the derivative at the kept point
+ * is exact for every image: anisotropic TV once its polish certified the
+ * regions, graph TV when no part was stopped by tol, tree TV always, and
+ * isotropic TV only without smoothing; smoothing is then the largest
+ * curvature cap mu of isotropic TV's derivative, in the units of x (0 for the
+ * others). Either may be NULL. FP_EINVAL without a kept point, and for other
+ * operators.
+ *
+ * fp_workspace_refine solves the kept call again from its saved input and its
+ * dual, as a warm start, to the gap tolerance tol (as fp_options.tol) within
+ * max_iter iterations, on the workspace's threads and scratch (no
+ * allocation). The derivatives then read the refined point, and
+ * fp_workspace_info, fp_workspace_image_info and the dual report the refined
+ * call; the z of the first call is not changed. out, when not NULL (x's shape
+ * and dtype), receives the refined result as the prox call wrote it; info as
+ * for fp_prox. Returns FP_ENOTCONV as fp_prox does, and FP_EPARAM for a bad
+ * tol or max_iter. After fp_prox_conj at sigma = 0 there is nothing to refine:
+ * FP_OK, or FP_EINVAL with an out. */
+FP_API fp_status fp_workspace_deriv_exact(const fp_workspace *ws, int *exact, double *smoothing);
+FP_API fp_status fp_workspace_refine(const fp_op *op, fp_workspace *ws, double tol, int max_iter,
+                                     fp_array *out, fp_info *info);
+
 FP_API fp_status fp_workspace_image_info(const fp_workspace *ws, double *gaps, int *iters,
                                          double *zerrs, int64_t count);
 

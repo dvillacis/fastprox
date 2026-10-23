@@ -142,6 +142,12 @@ struct ImageCall {
     // underflow, the certified relative error sqrt(2 gap) / |x| does not.
     int scale_exp = 0;
     double scaled_gap = 0.0;
+    // Whether the saved structure gives the exact derivative at the returned
+    // z (feedback U4): the regions certified (anisotropic TV's polish, graph
+    // TV with no part stopped by tol), or no smoothing (isotropic TV), whose
+    // curvature cap is `smoothing`, in the input's units.
+    bool exact = true;
+    double smoothing = 0.0;
 
     char *thread_scratch(int t) const noexcept { return thread_base + static_cast<size_t>(t) * thread_bytes; }
 };

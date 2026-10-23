@@ -381,6 +381,26 @@ NB_MODULE(_fastprox, m) {
     m.def("set_deriv_tol", [](Workspace &ws, double tol, int max_iter) {
         check(fp_workspace_set_deriv_tol(ws.p, tol, max_iter), "fp_workspace_set_deriv_tol");
     }, "ws"_a, "tol"_a, "max_iter"_a);
+    // (exact, smoothing) of the kept point's derivative (feedback U4).
+    m.def("deriv_exact", [](const Workspace &ws) {
+        int exact = 0;
+        double mu = 0.0;
+        check(fp_workspace_deriv_exact(ws.p, &exact, &mu), "fp_workspace_deriv_exact");
+        return std::make_tuple(exact != 0, mu);
+    }, "ws"_a);
+    // The kept call refined to tol: (gap, iters, converged), as prox.
+    m.def("refine", [](const Op &op, Workspace &ws, double tol, int max_iter, std::optional<OutArr> out) {
+        fp_array oa{};
+        if (out) oa = view(*out);
+        fp_info info{0.0, 0, 0};
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_refine(op.p, ws.p, tol, max_iter, out ? &oa : nullptr, &info);
+        }
+        if (s != FP_ENOTCONV) check(s, "fp_workspace_refine");
+        return std::make_tuple(info.gap, info.iters, s == FP_OK);
+    }, "op"_a, "ws"_a, "tol"_a, "max_iter"_a, "out"_a.none());
     m.def("deriv_info", [](const Workspace &ws) {
         double r = 0.0;
         int it = 0;
