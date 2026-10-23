@@ -436,6 +436,20 @@ def _deriv_tol(tol):
     return float(tol)
 
 
+_MAX_ITER = 10000  # the derivatives' default max_iter, compared by identity below
+_NO_SOLVE = (0.0, 0)  # ctx.deriv of a closed-form derivative
+
+
+def _deriv_ctl(tol, max_iter):
+    """Checks a derivative's tol and max_iter (feedback U3: every operator
+    takes them); returns the C tolerance."""
+    if tol is None and max_iter is _MAX_ITER:  # the defaults: nothing to check
+        return 0.0
+    if isinstance(max_iter, bool) or int(max_iter) != max_iter or max_iter < 1:
+        raise ValueError(f"max_iter must be an integer >= 1, got {max_iter!r}")
+    return _deriv_tol(tol)
+
+
 class Operator:
     """Base class: a compiled operator with fixed parameters.
 
@@ -445,6 +459,7 @@ class Operator:
 
     _layout: list = []
     _elementwise = False  # the C operator acts entry by entry (diagonal Jacobian)
+    _iterative_deriv = False  # derivatives solve a linear system (isotropic TV)
 
     def __init__(self, handle):
         self._op = handle
@@ -536,10 +551,16 @@ class Operator:
         return ctx
 
     # -- derivatives -------------------------------------------------------
-    def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None, branch=None,
-            kink_tol=0.0):
+    def jvp(self, ctx: Context, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
+            max_iter=_MAX_ITER, branch=None, kink_tol=0.0):
         r"""$J_x \, dx + (\partial z / \partial \gamma) \, d\gamma + (\partial z / \partial \theta) \, d\theta$
         at the saved point.
+
+        ``tol`` and ``max_iter`` (on every operator since 1.0) control iterative
+        derivative solves (isotropic TV: see :class:`TVIso`) and are accepted
+        and ignored by every other operator, whose derivatives are in closed
+        form. ``ctx.deriv`` is then ``(residual, iterations)`` of the solve, or
+        ``(0.0, 0)``.
 
         ``branch`` (soft thresholding, l1 over a box, SCAD and MCP; since 0.2):
         -1, 0 or +1 per entry. At the entries within ``kink_tol`` of a
@@ -557,16 +578,23 @@ class Operator:
         side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
         if kink_tol and branch is None:
             _kink_tol(kink_tol)  # still checked without a branch
+        dtol = _deriv_ctl(tol, max_iter)
+        it = self._iterative_deriv
         with ctx.lock, side:
+            if it:  # the tolerance, the solve and its report as one
+                _C.set_deriv_tol(ctx.ws, dtol, int(max_iter))
             try:
                 _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
             except (TypeError, ValueError):
                 dx, = _restage(out, dx)
                 _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
+            ctx.deriv = _C.deriv_info(ctx.ws) if it else _NO_SOLVE
         return dout
 
-    def vjp(self, ctx: Context, g, *, out=None, branch=None, kink_tol=0.0):
-        r"""($J_x^\top g$, Grads) at the saved point; ``branch`` as in :meth:`jvp`."""
+    def vjp(self, ctx: Context, g, *, out=None, tol=None, max_iter=_MAX_ITER, branch=None,
+            kink_tol=0.0):
+        r"""($J_x^\top g$, Grads) at the saved point; ``tol``, ``max_iter`` and
+        ``branch`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = _output(None, out, ctx.shape, ctx.dtype)
@@ -574,12 +602,17 @@ class Operator:
         side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
         if kink_tol and branch is None:
             _kink_tol(kink_tol)  # still checked without a branch
+        dtol = _deriv_ctl(tol, max_iter)
+        it = self._iterative_deriv
         with ctx.lock, side:
+            if it:
+                _C.set_deriv_tol(ctx.ws, dtol, int(max_iter))
             try:
                 gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
             except (TypeError, ValueError):
                 g, = _restage(out, g)
                 gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
+            ctx.deriv = _C.deriv_info(ctx.ws) if it else _NO_SOLVE
         return gx, Grads(gg, gp, self._fields(gp))
 
     def _check_ctx(self, ctx):
@@ -1268,6 +1301,8 @@ class TVIso(_ImageOperator):
     Parameters: weights, and pixel_weights when given (a gradient of their
     shape)."""
 
+    _iterative_deriv = True
+
     def __init__(self, ndim=2, weights=None, pixel_weights=None):
         if ndim not in (2, 3):
             raise ValueError("ndim must be 2 or 3")
@@ -1287,22 +1322,6 @@ class TVIso(_ImageOperator):
             f["pixel_weights"] = f["pixel_weights"].reshape(self.image_shape)
         return f
 
-    def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
-            max_iter=10000, branch=None, kink_tol=0.0):
-        self._check_ctx(ctx)
-        with ctx.lock:  # the tolerance, the solve and its report as one
-            _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-            dz = super().jvp(ctx, dx, dgamma, dparams, out=out, branch=branch, kink_tol=kink_tol)
-            ctx.deriv = _C.deriv_info(ctx.ws)
-        return dz
-
-    def vjp(self, ctx, g, *, out=None, tol=None, max_iter=10000, branch=None, kink_tol=0.0):
-        self._check_ctx(ctx)
-        with ctx.lock:
-            _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-            res = super().vjp(ctx, g, out=out, branch=branch, kink_tol=kink_tol)
-            ctx.deriv = _C.deriv_info(ctx.ws)
-        return res
 
 
 class _Pointwise(Operator):
@@ -1434,10 +1453,11 @@ class SpectralContext:
     """Structure saved by ``Spectral.prox(..., keep=True)``: the decomposition,
     the prox of the spectrum, and the inner operator's context."""
 
-    __slots__ = ("op", "u", "s", "vt", "z", "inner", "shape")
+    __slots__ = ("op", "u", "s", "vt", "z", "inner", "shape", "deriv")
 
     def __init__(self, op, u, s, vt, z, inner, shape):
         self.op, self.u, self.s, self.vt, self.z, self.inner, self.shape = op, u, s, vt, z, inner, shape
+        self.deriv = None  # (0.0, 0) after a derivative, as for the closed-form operators
 
     @property
     def info(self) -> Info:
@@ -1596,25 +1616,32 @@ class Spectral:
                 out += (u * r[..., None, :]) @ (np.swapaxes(u, -1, -2) @ h - a @ vt)
         return out, a
 
-    def jvp(self, ctx: SpectralContext, dx, dgamma=0.0, dparams=None):
+    def jvp(self, ctx: SpectralContext, dx, dgamma=0.0, dparams=None, *, tol=None,
+            max_iter=_MAX_ITER):
         r"""The derivative of $X \mapsto \operatorname{prox}_{\gamma g}(X)$ in the
         direction ``dx``, plus $d\gamma$ and $d\theta$ (the inner operator's
-        parameters) terms."""
+        parameters) terms. ``tol`` and ``max_iter`` are accepted and ignored,
+        as by every closed-form operator (:meth:`Operator.jvp`)."""
         self._check_ctx(ctx)
+        _deriv_ctl(tol, max_iter)
         dx = _input(dx, True).astype(ctx.s.dtype, copy=False)
         if dx.shape != ctx.shape:
             raise ValueError(f"dx must have shape {ctx.shape}")
         with ctx.inner.lock:  # the core's scratch is the inner workspace's
+            ctx.deriv = _NO_SOLVE
             return self._core(ctx, dx, dgamma, dparams)[0]
 
-    def vjp(self, ctx: SpectralContext, g):
+    def vjp(self, ctx: SpectralContext, g, *, tol=None, max_iter=_MAX_ITER):
         r"""($J^\top g$, Grads): the map is self-adjoint, and the gradients in
-        $\gamma$ and the inner operator's parameters are those of the spectrum."""
+        $\gamma$ and the inner operator's parameters are those of the spectrum.
+        ``tol`` and ``max_iter`` as in :meth:`jvp`."""
         self._check_ctx(ctx)
+        _deriv_ctl(tol, max_iter)
         g = _input(g, True).astype(ctx.s.dtype, copy=False)
         if g.shape != ctx.shape:
             raise ValueError(f"g must have shape {ctx.shape}")
         with ctx.inner.lock:
+            ctx.deriv = _NO_SOLVE
             gx, a = self._core(ctx, g, 0.0, None)
             return gx, self._grads(ctx.inner, a)
 
