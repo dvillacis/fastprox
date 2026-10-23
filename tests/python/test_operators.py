@@ -585,3 +585,34 @@ def test_degenerate_box_bounds():
     op = fp.L1Box(0.1, [0.0, 0.5], [1.0, 0.5])
     _, ctx = op.prox(np.array([0.3, 0.6]), keep=True)
     np.testing.assert_array_equal(op.jvp(ctx, np.ones(2)), [1.0, 0.0])
+
+
+def test_dparams_names_and_sizes():
+    """Unknown names and wrong sizes in dparams raise; a typo returned a zero
+    tangent before (audit P6). Derived names (lam) map onto the parameters."""
+    x = np.random.default_rng(1).normal(size=(6, 50))
+    op = fp.TV1D(0.6)
+    _, c = op.prox(x, 0.8, keep=True)
+    with pytest.raises(ValueError, match="has no parameter"):
+        op.jvp(c, None, 0.0, {"bogus": 1.0})
+    w = np.abs(np.random.default_rng(2).normal(size=49)) + 0.1
+    opw = fp.TV1D(w)
+    _, cw = opw.prox(x, 0.8, keep=True)
+    with pytest.raises(ValueError, match="entries"):
+        opw.jvp(cw, None, 0.0, {"weights": np.ones(7)})
+    with pytest.raises(ValueError, match="nparams"):
+        opw.jvp(cw, None, 0.0, np.ones(7))
+    ws = np.abs(np.random.default_rng(3).normal(size=50)) + 0.2
+    soft = fp.Soft(0.7, ws)
+    _, cs = soft.prox(x, 0.8, keep=True)
+    t = 0.3
+    np.testing.assert_allclose(soft.jvp(cs, None, 0.0, {"lam": t}),
+                               soft.jvp(cs, None, 0.0, {"weights": ws * t / 0.7}), rtol=1e-15, atol=1e-15)
+    ball = fp.SpectralNormBall(1.5)
+    xm = np.random.default_rng(4).normal(size=(5, 4))
+    _, cb = ball.prox(xm, keep=True)
+    np.testing.assert_allclose(ball.jvp(cb, np.zeros_like(xm), 0.0, {"radius": 1.0}),
+                               ball.jvp(cb, np.zeros_like(xm), 0.0, {"lower": -1.0, "upper": 1.0}),
+                               rtol=1e-15, atol=1e-15)
+    with pytest.raises(ValueError, match="has no parameter"):
+        ball.jvp(cb, np.zeros_like(xm), 0.0, {"radiuss": 1.0})

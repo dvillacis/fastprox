@@ -15,6 +15,7 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -29,9 +30,12 @@ using Params = nb::ndarray<nb::ro, const double, nb::ndim<1>, nb::device::cpu>;
 using NdParams = nb::ndarray<nb::ro, const double, nb::device::cpu>;  // e.g. pixel weights
 using IdArr = nb::ndarray<nb::ro, const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
-void check(fp_status s) {
+// Raises for an error status; what names the C entry point (audit P7), as
+// in "fp_prox: invalid argument".
+void check(fp_status s, const char *what = nullptr) {
     if (s == FP_OK) return;
-    const char *msg = fp_strerror(s);
+    const std::string text = what ? std::string(what) + ": " + fp_strerror(s) : std::string(fp_strerror(s));
+    const char *msg = text.c_str();
     switch (s) {
         case FP_ENOMEM: throw std::bad_alloc();
         case FP_EDTYPE: throw nb::type_error(msg);
@@ -105,7 +109,12 @@ struct ParamView {
 template <class F>
 Op *make(F &&f) {
     auto op = std::make_unique<Op>();
-    check(f(&op->p));
+    fp_status s;
+    {  // constructors are data-sized (graph TV builds its graph): without the GIL (audit P4)
+        nb::gil_scoped_release release;
+        s = f(&op->p);
+    }
+    check(s, "operator constructor");
     return op.release();
 }
 
@@ -145,7 +154,7 @@ std::tuple<double, int, int64_t, bool> prox(const Op &op, double step, const InA
         s = conj ? fp_prox_conj(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info)
                  : fp_prox(op.p, step, &xa, &oa, &o, ws ? ws->p : nullptr, &info);
     }
-    if (s != FP_ENOTCONV) check(s);
+    if (s != FP_ENOTCONV) check(s, steps ? "fp_prox_steps" : conj ? "fp_prox_conj" : "fp_prox");
     return {info.gap, info.iters, info.ties, s == FP_OK};
 }
 
@@ -154,7 +163,12 @@ Workspace *workspace(const Op &op, const InArr &like, int axis, int threads, boo
     auto ws = std::make_unique<Workspace>();
     const fp_array la = view(like);
     const fp_options o = options(axis, threads, keep);
-    check(fp_workspace_create(op.p, &la, &o, &ws->p));
+    fp_status s;
+    {
+        nb::gil_scoped_release release;
+        s = fp_workspace_create(op.p, &la, &o, &ws->p);
+    }
+    check(s, "fp_workspace_create");
     return ws.release();
 }
 
@@ -169,7 +183,7 @@ void jvp(const Op &op, const Workspace &ws, const std::optional<InArr> &dx, doub
         nb::gil_scoped_release release;
         s = fp_jvp(op.p, ws.p, dx ? &da : nullptr, dgamma, dp.get(), &oa);
     }
-    check(s);
+    check(s, "fp_jvp");
 }
 
 double vjp(const Op &op, const Workspace &ws, const InArr &g, OutArr &gx,
@@ -184,7 +198,7 @@ double vjp(const Op &op, const Workspace &ws, const InArr &g, OutArr &gx,
         nb::gil_scoped_release release;
         s = fp_vjp(op.p, ws.p, &ga, &xa, &gg, gparams ? &pa : nullptr);
     }
-    check(s);
+    check(s, "fp_vjp");
     return gg;
 }
 
@@ -202,7 +216,7 @@ void spectral_jvp(const Op &op, const Workspace &ws, int kind, const InArr &s, c
         st = fp_spectral_jvp(op.p, ws.p, static_cast<fp_spectral_kind>(kind), &sa, &za, &aa, dgamma, dp.get(),
                              &ba, r ? &ra : nullptr);
     }
-    check(st);
+    check(st, "fp_spectral_jvp");
 }
 
 }  // namespace
@@ -363,45 +377,61 @@ NB_MODULE(_fastprox, m) {
         return make([&](fp_op **o) { return fp_op_tree_tv(n, m, edges.data(), pw.get(), o); });
     }, "n"_a, "edges"_a, "weights"_a.none());
     m.def("set_deriv_tol", [](Workspace &ws, double tol, int max_iter) {
-        check(fp_workspace_set_deriv_tol(ws.p, tol, max_iter));
+        check(fp_workspace_set_deriv_tol(ws.p, tol, max_iter), "fp_workspace_set_deriv_tol");
     }, "ws"_a, "tol"_a, "max_iter"_a);
     m.def("deriv_info", [](const Workspace &ws) {
         double r = 0.0;
         int it = 0;
-        check(fp_workspace_deriv_info(ws.p, &r, &it));
+        check(fp_workspace_deriv_info(ws.p, &r, &it), "fp_workspace_deriv_info");
         return std::make_tuple(r, it);
     }, "ws"_a);
 
     m.def("prox", &prox, "op"_a, "step"_a, "x"_a, "out"_a, "axis"_a, "threads"_a, "keep"_a,
           "ws"_a.none(), "conj"_a, "tol"_a = 1e-6, "max_iter"_a = 1000, "tie"_a = 0,
           "steps"_a.none() = nb::none());
+    // The copies and the kink scans are data-sized: without the GIL (audit P4).
     m.def("get_dual", [](const Workspace &ws, OutArr &out) {
         fp_array oa = view(out);
-        check(fp_workspace_get_dual(ws.p, &oa));
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_get_dual(ws.p, &oa);
+        }
+        check(s, "fp_workspace_get_dual");
     }, "ws"_a, "out"_a);
     m.def("set_dual", [](Workspace &ws, const InArr &dual) {
         const fp_array da = view(dual);
-        check(fp_workspace_set_dual(ws.p, &da));
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_set_dual(ws.p, &da);
+        }
+        check(s, "fp_workspace_set_dual");
     }, "ws"_a, "dual"_a);
-    m.def("set_warm", [](Workspace &ws, bool on) { check(fp_workspace_set_warm(ws.p, on ? 1 : 0)); },
-          "ws"_a, "on"_a);
+    m.def("set_warm", [](Workspace &ws, bool on) {
+        check(fp_workspace_set_warm(ws.p, on ? 1 : 0), "fp_workspace_set_warm");
+    }, "ws"_a, "on"_a);
     m.def("kinks", [](const Workspace &ws, double tol, std::optional<I8Out> mask) {
         int64_t count = 0;
-        if (mask) {
-            fp_array ma = view_i8(*mask);
-            check(fp_workspace_kinks(ws.p, tol, &ma, &count));
-        } else {
-            check(fp_workspace_kinks(ws.p, tol, nullptr, &count));
+        fp_array ma{};
+        if (mask) ma = view_i8(*mask);
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_kinks(ws.p, tol, mask ? &ma : nullptr, &count);
         }
+        check(s, "fp_workspace_kinks");
         return count;
     }, "ws"_a, "tol"_a, "mask"_a.none());
     m.def("set_branch", [](Workspace &ws, std::optional<I8In> side, double tol) {
-        if (side) {
-            const fp_array sa = view_i8(*side);
-            check(fp_workspace_set_branch(ws.p, &sa, tol));
-        } else {
-            check(fp_workspace_set_branch(ws.p, nullptr, tol));
+        fp_array sa{};
+        if (side) sa = view_i8(*side);
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_set_branch(ws.p, side ? &sa : nullptr, tol);
         }
+        check(s, "fp_workspace_set_branch");
     }, "ws"_a, "side"_a.none(), "tol"_a);
     m.def("value", [](const Op &op, const InArr &x, OutArr &out, int axis, double tol) {
         const fp_array xa = view(x);
@@ -412,7 +442,7 @@ NB_MODULE(_fastprox, m) {
             nb::gil_scoped_release release;
             s = fp_value(op.p, &xa, &o, &oa);
         }
-        check(s);
+        check(s, "fp_value");
     }, "op"_a, "x"_a, "out"_a, "axis"_a, "tol"_a);
     m.def("workspace", &workspace, "op"_a, "like"_a, "axis"_a, "threads"_a, "keep"_a,
           nb::keep_alive<0, 1>());

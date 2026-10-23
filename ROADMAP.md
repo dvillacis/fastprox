@@ -185,11 +185,11 @@ its row to the decisions table when it lands.
 - [x] T9: Graph and tree TV: overflow of the value range — [spec](docs/audit-2026-10.md#t9)
 - [x] P1, first step: the PyTorch backwards raise under `create_graph=True` instead of returning a wrong Hessian — [spec](docs/audit-2026-10.md#p1)
 - [x] P2: Python side of overlapping `out`/`dx`/`g` buffers — [spec](docs/audit-2026-10.md#p2)
-- [ ] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
-- [ ] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)
-- [ ] P5: Keep float32 for non-ndarray array-likes — [spec](docs/audit-2026-10.md#p5)
-- [ ] P6: Reject unknown names and wrong sizes in `dparams` — [spec](docs/audit-2026-10.md#p6)
-- [ ] P7: Clear error messages at the Python boundary (target: 1.0.0 (a), (b), (d); 1.1 (c-parity)) — [spec](docs/audit-2026-10.md#p7)
+- [x] P3: Serialise calls on one Context — [spec](docs/audit-2026-10.md#p3)
+- [x] P4: Release the GIL in operator constructors and other data-sized C calls — [spec](docs/audit-2026-10.md#p4)
+- [x] P5: Keep float32 for non-ndarray array-likes — [spec](docs/audit-2026-10.md#p5)
+- [x] P6: Reject unknown names and wrong sizes in `dparams` — [spec](docs/audit-2026-10.md#p6)
+- [x] P7: Clear error messages at the Python boundary (target: 1.0.0 (a), (b), (d); 1.1 (c-parity)) — [spec](docs/audit-2026-10.md#p7)
 - [ ] P8: Empty batches and NaN or Inf images: one contract across the C, PyTorch and JAX paths — [spec](docs/audit-2026-10.md#p8)
 
 **Documentation (1.0.0)**
@@ -324,3 +324,4 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20.
 | 2026-10-23 | After fp_prox_conj with σ = 0 and keep_structure, derivatives are those of the identity and the σ-derivative is NaN; kept empty batches give empty derivatives (spec: derivatives need a saved structure) | `src/api/api.cpp`, `fastprox.h`, `docs/api.md` |
 | 2026-10-23 | std::length_error is reported as FP_ENOMEM (spec: any exception other than bad_alloc is FP_EINTERNAL); integer counts of the group constructors and of tree l2 above 2^60 − 1 are FP_EPARAM | `src/api/api.cpp`, `fastprox.h`, `docs/spec.md` |
 | 2026-10-23 | fp_options.threads and the thread environment variables are capped at min(4096, 4 × the available CPUs) | `src/core/parallel.cpp`, `src/api/api.cpp`, `fastprox.h`, `docs/api.md` |
+| 2026-10-23 | The Python bindings release the GIL in every C call whose cost grows with its data (prox, derivatives, value, operator constructors, workspace creation, dual and kink copies); constant-time getters keep it, since releasing costs as much as the call (spec: every call into the C API) | `bindings/python/src/module.cpp`, `docs/spec.md` |

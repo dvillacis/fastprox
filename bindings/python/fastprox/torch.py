@@ -41,7 +41,7 @@ import numpy as np
 import torch
 
 from . import _tv_torch as _tvt
-from ._interop import Spec, check_dtype, check_step, spectral_step_grad, steps
+from ._interop import Spec, check_step, spectral_step_grad, steps
 
 __all__ = ["prox", "prox_conj", "tv_iso", "tv_aniso"]
 
@@ -66,7 +66,7 @@ def prox_conj(op, y, sigma=1.0, *, axis=None, threads=0, tol=None, max_iter=None
 def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
     if not isinstance(x, torch.Tensor):
         raise TypeError("x must be a torch.Tensor")
-    check_dtype(_np_dtype(x.dtype))
+    _check_tensor_dtype(x)
     check_step(step, conj)
     names, values, static = [], [], {}
     for k, v in params.items():
@@ -81,6 +81,13 @@ def _apply(op, x, step, conj, axis, threads, tol, max_iter, params):
     if spec.spectral:
         return _SpectralProx.apply(spec, x, step, *values)
     return _Prox.apply(spec, x, step, *values)
+
+
+def _check_tensor_dtype(x):
+    """float32 or float64, else a clear TypeError (audit P7): numpy cannot
+    name torch.float16 or the complex dtypes."""
+    if x.dtype not in (torch.float32, torch.float64):
+        raise TypeError(f"fastprox operates on float32 and float64 tensors, got {x.dtype}")
 
 
 def _np_dtype(dt):
@@ -305,7 +312,7 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
                deriv_max_iter, spatial=None):
     if not isinstance(x, torch.Tensor):
         raise TypeError("x must be a torch.Tensor")
-    check_dtype(_np_dtype(x.dtype))
+    _check_tensor_dtype(x)
     if ndim not in (2, 3):
         raise ValueError("ndim must be 2 or 3")
     if x.dim() < ndim:

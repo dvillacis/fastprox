@@ -538,7 +538,7 @@ from fastprox.torch import tv_iso as tv_iso_torch  # image TV on the tensor's de
 ```
 
 - **nanobind module.** The Python extension is written with nanobind and calls only the C API, never the C++ internals, so Python sees exactly what other languages see. `nb::ndarray` accepts C-contiguous and strided NumPy arrays without copying. Other dtypes are converted only when the caller sets `copy=True`; otherwise a `TypeError` is raised.
-- **GIL.** Released (`nb::gil_scoped_release`) for every call into the C API, so Python threads can run operators concurrently on separate workspaces.
+- **GIL.** Released (`nb::gil_scoped_release`) for every call that does work proportional to its data (prox, derivatives, values, operator constructors, workspace creation, dual and kink copies), so Python threads can run operators concurrently on separate workspaces; constant-time getters keep it, since releasing costs as much as the call.
 - **Errors.** A non-OK `fp_status` becomes a Python exception (`ValueError` for parameter errors, `MemoryError` for FP\_ENOMEM, `RuntimeError` otherwise) with the text of `fp_strerror`.
 
 **Other languages (deferred).** Julia (ccall through a JLL package), MATLAB (C mex gateways) and Rust (`fastprox-sys` plus a thin safe crate) are not built for now. Because Python calls only the public C API, those bindings can be added later without changing the core or the ABI.

@@ -20,7 +20,9 @@ differentiation::
 
 from __future__ import annotations
 
+import contextlib
 import operator
+import threading
 from typing import NamedTuple
 
 import numpy as np
@@ -111,9 +113,12 @@ class Grads:
 
 class Context:
     """Structure saved by ``prox(..., keep=True)``: the input to ``jvp`` and
-    ``vjp``. Pass it back as ``ctx=`` to reuse its memory in the next call."""
+    ``vjp``. Pass it back as ``ctx=`` to reuse its memory in the next call.
+    Calls on one context are serialised (since 1.0): for parallel derivatives
+    use one context per thread."""
 
-    __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info", "deriv")
+    __slots__ = ("op", "ws", "shape", "dtype", "axis", "threads", "conj", "step", "info", "deriv",
+                 "lock")
     # info is an Info, or an IterInfo for iterative operators
 
     def __init__(self, op, ws, shape, dtype, axis, threads):
@@ -127,6 +132,9 @@ class Context:
         self.step = None
         self.info = None
         self.deriv = None  # (residual, iterations) of the last iterative derivative solve
+        # Its workspace's scratch, branch override and derivative tolerance are
+        # shared state; re-entrant, as TVIso's derivatives call the base ones.
+        self.lock = threading.RLock()
 
     def jacobian_diag(self, branch=None, kink_tol=0.0):
         r"""Diagonal of the Jacobian $\partial z / \partial x$ at the saved point, for elementwise
@@ -161,7 +169,8 @@ class Context:
         ``len(edges)`` (1 at an edge with no jump whose flow is on its
         bound)."""
         mask = np.empty(_kink_shape(self), np.int8)
-        _C.kinks(self.ws, float(tol), mask)
+        with self.lock:
+            _C.kinks(self.ws, float(tol), mask)
         return mask
 
 
@@ -173,6 +182,8 @@ class _branch:
         self.side = None
         if branch is not None:
             side = np.asarray(branch)
+            if not np.isin(side, (-1, 0, 1)).all():
+                raise ValueError("branch entries must be -1, 0 or 1")
             shape = _kink_shape(ctx)
             if side.shape != shape:
                 side = np.broadcast_to(side, shape)
@@ -189,6 +200,11 @@ class _branch:
         if self.side is not None:
             _C.set_branch(self.ws, None, 0.0)
         return False
+
+
+# Without a branch: a no-op context, cheaper than _branch's, which kept the
+# lock of audit P3 within its 0.1 us budget on tiny calls.
+_no_branch = contextlib.nullcontext()
 
 
 def _kink_shape(ctx):
@@ -215,7 +231,14 @@ def _input(x, copy: bool) -> np.ndarray:
             f"fastprox operates on float32 and float64 arrays, got {x.dtype}; "
             "pass copy=True to convert"
         )
-    return np.asarray(x, dtype=np.float64)
+    # Other array-likes (torch and JAX arrays, memoryviews, array.array):
+    # zero-copy where they export a buffer, float32 kept (audit P5).
+    x = np.asarray(x)
+    if x.dtype == np.float64 or x.dtype == np.float32:
+        return x
+    if np.iscomplexobj(x):
+        raise TypeError("fastprox operates on real float32 and float64 arrays, got complex input")
+    return x.astype(np.float64)
 
 
 def _output(x: np.ndarray, out, shape=None, dtype=None) -> np.ndarray:
@@ -223,9 +246,22 @@ def _output(x: np.ndarray, out, shape=None, dtype=None) -> np.ndarray:
     dtype = x.dtype if dtype is None else dtype
     if out is None:
         return np.empty(shape, dtype=dtype)
-    if not isinstance(out, np.ndarray) or out.shape != shape or out.dtype != dtype:
+    if not isinstance(out, np.ndarray) or out.shape != shape or out.dtype != dtype \
+            or not out.flags.writeable:
         raise ValueError("out must be a writeable ndarray with the shape and dtype of the input")
     return out
+
+
+def _axis_threads(axis, threads):
+    """axis and threads as ints (audit P7): a float or a negative thread
+    count is an error here, not a signature dump from the binding."""
+    try:
+        axis, threads = operator.index(axis), operator.index(threads)
+    except TypeError:
+        raise TypeError("axis and threads must be integers") from None
+    if threads < 0:
+        raise ValueError("threads must be >= 0 (0: the default)")
+    return axis, threads
 
 
 def _restage(out, *inputs):
@@ -343,6 +379,7 @@ class Operator:
         return self._run(y, sigma, axis, out, threads, keep, ctx, copy, conj=True)
 
     def _run(self, x, step, axis, out, threads, keep, ctx, copy, conj):
+        axis, threads = _axis_threads(axis, threads)
         x = _input(x, copy)
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
@@ -354,14 +391,15 @@ class Operator:
                 _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        try:
-            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
-        except (TypeError, ValueError):
-            x, steps = _restage(out, x, steps)
-            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
-        ctx.info = Info(*res[:3])
-        ctx.conj = conj
-        ctx.step = step if steps is None else steps
+        with ctx.lock:
+            try:
+                res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
+            except (TypeError, ValueError):
+                x, steps = _restage(out, x, steps)
+                res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, steps=steps)
+            ctx.info = Info(*res[:3])
+            ctx.conj = conj
+            ctx.step = step if steps is None else steps
         return z, ctx
 
     def _context(self, x, axis, threads, ctx):
@@ -390,7 +428,10 @@ class Operator:
         dout = _output(None, out, ctx.shape, ctx.dtype)
         if dparams is not None:
             dparams = self._flatten(dparams)
-        with _branch(ctx, branch, kink_tol):
+        side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
+        if kink_tol and branch is None:
+            _kink_tol(kink_tol)  # still checked without a branch
+        with ctx.lock, side:
             try:
                 _C.jvp(self._op, ctx.ws, dx, float(dgamma), dparams, dout)
             except (TypeError, ValueError):
@@ -404,7 +445,10 @@ class Operator:
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = _output(None, out, ctx.shape, ctx.dtype)
         gp = np.zeros(self.nparams, np.float64)
-        with _branch(ctx, branch, kink_tol):
+        side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
+        if kink_tol and branch is None:
+            _kink_tol(kink_tol)  # still checked without a branch
+        with ctx.lock, side:
             try:
                 gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
             except (TypeError, ValueError):
@@ -424,15 +468,40 @@ class Operator:
             k += length
         return fields
 
+    def _derived_dparams(self, name, value):
+        """Tangents of a derived parameter (``lam``, ``radius``) as tangents
+        of the operator's own parameters, a dict; None when name is not one."""
+        return None
+
     def _flatten(self, dparams) -> np.ndarray:
         if isinstance(dparams, dict):
-            parts = []
-            for name, length, _ in self._layout:
-                v = np.asarray(dparams.get(name, 0.0), np.float64)
-                v = v.reshape(-1) if v.size == length else np.broadcast_to(v, (length,))
-                parts.append(v)
+            names = [name for name, _, _ in self._layout]
+            lengths = {name: length for name, length, _ in self._layout}
+            own = {}
+            for name, v in dparams.items():
+                if name in lengths:
+                    v = np.asarray(v, np.float64)
+                    if v.size not in (1, lengths[name]):
+                        raise ValueError(f"dparams[{name!r}] has {v.size} entries, {name} has "
+                                         f"{lengths[name]}")
+                    v = v.reshape(-1) if v.size == lengths[name] else np.broadcast_to(v.reshape(-1), (lengths[name],))
+                    own[name] = own.get(name, 0.0) + v
+                    continue
+                d = self._derived_dparams(name, v)
+                if d is None:
+                    raise ValueError(f"{type(self).__name__} has no parameter {name!r}; its "
+                                     f"parameters are {names}")
+                for k, dv in d.items():
+                    own[k] = own.get(k, 0.0) + np.broadcast_to(np.asarray(dv, np.float64).reshape(-1),
+                                                               (lengths[k],))
+            parts = [np.broadcast_to(np.asarray(own.get(name, 0.0), np.float64), (length,))
+                     for name, length, _ in self._layout]
             return np.concatenate(parts) if parts else np.zeros(0)
-        return _vec(dparams)
+        v = _vec(dparams)
+        if v.size != self.nparams:
+            raise ValueError(f"dparams has {v.size} entries, {type(self).__name__} has "
+                             f"nparams={self.nparams}")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +526,13 @@ class Soft(Operator):
         f = super()._fields(gp)
         f["lam"] = float(self._w @ gp) / self.lam if self.lam > 0 else float("nan")
         return f
+
+    def _derived_dparams(self, name, value):
+        if name != "lam":
+            return None
+        if not self.lam > 0:
+            raise ValueError("dparams['lam'] needs lam > 0")
+        return {"weights": self._w * (float(value) / self.lam)}
 
 
 class ElasticNet(Operator):
@@ -593,6 +669,13 @@ class L1Box(Operator):
         gw = gp[:self._w.size]
         f["lam"] = float(self._w @ gw) / self.lam if self.lam > 0 else float("nan")
         return f
+
+    def _derived_dparams(self, name, value):
+        if name != "lam":
+            return None
+        if not self.lam > 0:
+            raise ValueError("dparams['lam'] needs lam > 0")
+        return {"weights": self._w * (float(value) / self.lam)}
 
 
 class SOC(Operator):
@@ -840,36 +923,40 @@ class _ImageOperator(Operator):
 
     def _iter(self, x, step, out, threads, keep, ctx, copy, conj, tol, max_iter, warm_start,
               warm):
+        _, threads = _axis_threads(-1, threads)
         x = _input(x, copy)
         if x.ndim < self.ndim:
             raise ValueError(f"{type(self).__name__}(ndim={self.ndim}) needs arrays with at "
                              f"least {self.ndim} dimensions")
         z = _output(x, out)
+        step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
+
+        def call(ws):
+            nonlocal x, steps
+            _C.set_warm(ws, bool(warm))
+            if warm_start is not None:
+                _C.set_dual(ws, np.asarray(warm_start, np.float64))
+            try:
+                res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol),
+                              int(max_iter), steps=steps)
+            except (TypeError, ValueError):
+                x, steps = _restage(out, x, steps)
+                res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol),
+                              int(max_iter), steps=steps)
+            gap, iters, ties, conv = res
+            dual = np.empty((self.ndim, *x.shape), np.float64)
+            _C.get_dual(ws, dual)
+            return IterInfo(gap, iters, ties, conv, dual)
+
         if keep or ctx is not None:
             ctx = self._context(x, -1, threads, ctx)
-            ws = ctx.ws
-        else:
-            ws = _C.workspace(self._op, x, -1, threads, False)
-        _C.set_warm(ws, bool(warm))
-        if warm_start is not None:
-            _C.set_dual(ws, np.asarray(warm_start, np.float64))
-        step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
-        try:
-            res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol), int(max_iter),
-                          steps=steps)
-        except (TypeError, ValueError):
-            x, steps = _restage(out, x, steps)
-            res = _C.prox(self._op, step, x, z, -1, threads, keep, ws, conj, float(tol), int(max_iter),
-                          steps=steps)
-        gap, iters, ties, conv = res
-        dual = np.empty((self.ndim, *x.shape), np.float64)
-        _C.get_dual(ws, dual)
-        info = IterInfo(gap, iters, ties, conv, dual)
-        if ctx is not None:
-            ctx.info = info
-            ctx.conj = conj
-            ctx.step = step if steps is None else steps
-        return z, ctx, info
+            with ctx.lock:  # warm state, the dual and the info belong to one call
+                info = call(ctx.ws)
+                ctx.info = info
+                ctx.conj = conj
+                ctx.step = step if steps is None else steps
+            return z, ctx, info
+        return z, None, call(_C.workspace(self._op, x, -1, threads, False))
 
 
 class TVAniso(_ImageOperator):
@@ -1030,16 +1117,18 @@ class TVIso(_ImageOperator):
     def jvp(self, ctx, dx=None, dgamma=0.0, dparams=None, *, out=None, tol=None,
             max_iter=10000, branch=None, kink_tol=0.0):
         self._check_ctx(ctx)
-        _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-        dz = super().jvp(ctx, dx, dgamma, dparams, out=out, branch=branch, kink_tol=kink_tol)
-        ctx.deriv = _C.deriv_info(ctx.ws)
+        with ctx.lock:  # the tolerance, the solve and its report as one
+            _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
+            dz = super().jvp(ctx, dx, dgamma, dparams, out=out, branch=branch, kink_tol=kink_tol)
+            ctx.deriv = _C.deriv_info(ctx.ws)
         return dz
 
     def vjp(self, ctx, g, *, out=None, tol=None, max_iter=10000, branch=None, kink_tol=0.0):
         self._check_ctx(ctx)
-        _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
-        res = super().vjp(ctx, g, out=out, branch=branch, kink_tol=kink_tol)
-        ctx.deriv = _C.deriv_info(ctx.ws)
+        with ctx.lock:
+            _C.set_deriv_tol(ctx.ws, _deriv_tol(tol), int(max_iter))
+            res = super().vjp(ctx, g, out=out, branch=branch, kink_tol=kink_tol)
+            ctx.deriv = _C.deriv_info(ctx.ws)
         return res
 
 
@@ -1062,6 +1151,7 @@ class _Pointwise(Operator):
 
     def _run_tie(self, x, step, axis, out, threads, keep, ctx, copy, conj, tie):
         t = _tie(tie)
+        axis, threads = _axis_threads(axis, threads)
         x = _input(x, copy)
         z = _output(x, out)
         step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
@@ -1073,14 +1163,15 @@ class _Pointwise(Operator):
                 _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
             return z
         ctx = self._context(x, axis, threads, ctx)
-        try:
-            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
-        except (TypeError, ValueError):
-            x, steps = _restage(out, x, steps)
-            res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
-        ctx.info = Info(*res[:3])
-        ctx.conj = conj
-        ctx.step = step if steps is None else steps
+        with ctx.lock:
+            try:
+                res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
+            except (TypeError, ValueError):
+                x, steps = _restage(out, x, steps)
+                res = _C.prox(self._op, step, x, z, axis, threads, True, ctx.ws, conj, tie=t, steps=steps)
+            ctx.info = Info(*res[:3])
+            ctx.conj = conj
+            ctx.step = step if steps is None else steps
         return z, ctx
 
 
@@ -1110,6 +1201,13 @@ class Lq(_Pointwise):
         f = super()._fields(gp)
         f["lam"] = float(self._w @ gp) / self.lam if self.lam > 0 else float("nan")
         return f
+
+    def _derived_dparams(self, name, value):
+        if name != "lam":
+            return None
+        if not self.lam > 0:
+            raise ValueError("dparams['lam'] needs lam > 0")
+        return {"weights": self._w * (float(value) / self.lam)}
 
 
 class SCAD(_Pointwise):
@@ -1224,7 +1322,18 @@ class Spectral:
         return self.op._fields(gp)
 
     def _flatten(self, dparams):
+        if isinstance(dparams, dict):
+            dparams = dict(dparams)
+            for name in [k for k in dparams if not any(k == f for f, _, _ in self.op._layout)]:
+                d = self._derived_dparams(name, dparams[name])
+                if d is not None:
+                    del dparams[name]
+                    for k, v in d.items():
+                        dparams[k] = np.asarray(dparams.get(k, 0.0), np.float64) + v
         return self.op._flatten(dparams)
+
+    def _derived_dparams(self, name, value):
+        return None
 
     def _matrices(self, x, copy):
         x = _input(x, copy)
@@ -1292,7 +1401,7 @@ class Spectral:
         b = np.empty_like(a)
         r = np.empty_like(s) if rect else None
         if dparams is not None:
-            dparams = self.op._flatten(dparams)
+            dparams = self._flatten(dparams)  # the derived names (radius) too
         _C.spectral_jvp(self.op._op, inner.ws, _SPECTRAL_KINDS[self.kind], s, z, a, float(dgamma),
                         dparams, b, r)
         return b, r
@@ -1322,7 +1431,8 @@ class Spectral:
         dx = _input(dx, True).astype(ctx.s.dtype, copy=False)
         if dx.shape != ctx.shape:
             raise ValueError(f"dx must have shape {ctx.shape}")
-        return self._core(ctx, dx, dgamma, dparams)[0]
+        with ctx.inner.lock:  # the core's scratch is the inner workspace's
+            return self._core(ctx, dx, dgamma, dparams)[0]
 
     def vjp(self, ctx: SpectralContext, g):
         r"""($J^\top g$, Grads): the map is self-adjoint, and the gradients in
@@ -1331,8 +1441,9 @@ class Spectral:
         g = _input(g, True).astype(ctx.s.dtype, copy=False)
         if g.shape != ctx.shape:
             raise ValueError(f"g must have shape {ctx.shape}")
-        gx, a = self._core(ctx, g, 0.0, None)
-        return gx, self._grads(ctx.inner, a)
+        with ctx.inner.lock:
+            gx, a = self._core(ctx, g, 0.0, None)
+            return gx, self._grads(ctx.inner, a)
 
     def _grads(self, inner, a):
         """Grads of gamma and the parameters: the inner operator's VJP on diag(A)."""
@@ -1360,6 +1471,12 @@ class SpectralNormBall(Spectral):
         f["radius"] = f["upper"] - f["lower"]
         return f
 
+    def _derived_dparams(self, name, value):
+        if name != "radius":
+            return None
+        v = float(value)
+        return {"lower": -v, "upper": v}
+
 
 class PSD(Spectral):
     r"""The indicator of the positive semidefinite cone: negative eigenvalues
@@ -1377,7 +1494,13 @@ class PSD(Spectral):
 
 
 def _once(handle, x, step, axis, out, threads, copy):
+    axis, threads = _axis_threads(axis, threads)
+    if np.ndim(step) != 0:
+        raise TypeError("the one-shot functions take a scalar gamma; use the operator class "
+                        "(e.g. TV1D().prox) for one step per row")
     x = _input(x, copy)
+    if x.ndim and not -x.ndim <= axis < x.ndim:
+        raise ValueError(f"axis {axis} out of range for {x.ndim} dimensions")
     z = _output(x, out)
     try:
         _C.prox(handle, float(step), x, z, axis, threads, False, None, False)

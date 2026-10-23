@@ -71,7 +71,9 @@ class ProxOp(ProxOperator):
 
     def _shaped(self, x):
         x = np.asarray(x)
-        if not np.issubdtype(x.dtype, np.floating):
+        if np.iscomplexobj(x):  # dropped the imaginary part with a ComplexWarning (audit P5)
+            raise TypeError("fastprox operates on real float32 and float64 arrays, got complex input")
+        if x.dtype != np.float32 and x.dtype != np.float64:  # float16 and the integers
             x = x.astype(np.float64)
         return x.reshape(self.dims) if self.dims is not None else x
 
