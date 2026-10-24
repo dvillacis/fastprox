@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0rc3] — 2026-10-24
+
+The third release candidate for 1.0, from master, on PyPI as a pre-release (`pip install --pre fastprox`). It completes the user feedback of 2026-10-23 that changes the Python API (U3–U5: derivative keywords on every operator, `DerivInfo` and refined derivatives at loose tolerances, the sorted ℓ1 norm and the weighted nuclear norm) and carries the speed items of the audit of 2026-10-22: the kernels, the thread pool, the Python and framework wrappers, and image TV's derivatives and saved structure, which now use every thread on a single image. The new C functions join the 1.0 ABI, which the `abi` job checks against 0.5.0. 1.0.0 follows after some use of this candidate.
+
 ### Added
 
 - `FASTPROX_SPIN_US`: the pool's spin time after a call, in microseconds (default 50, 0 to sleep at once), read once (audit C9). 1000 empty 15-thread jobs a millisecond apart burn 0.15–0.19 s of process CPU at 0, against about 0.9 s at the default.
