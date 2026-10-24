@@ -31,17 +31,24 @@
 
 static std::atomic<long> g_allocs{0};
 #ifndef FP_TSAN
-void *operator new(std::size_t n) {
+// Not inlined: valgrind replaces these operators by name, and an inlined
+// delete (a bare free()) against its own new is a "mismatched free" there.
+#if defined(__GNUC__)
+#define FP_TEST_NOINLINE __attribute__((noinline))
+#else
+#define FP_TEST_NOINLINE
+#endif
+FP_TEST_NOINLINE void *operator new(std::size_t n) {
     ++g_allocs;
     if (void *p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
-void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
+FP_TEST_NOINLINE void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
     ++g_allocs;
     return std::malloc(n ? n : 1);
 }
-void operator delete(void *p) noexcept { std::free(p); }
-void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+FP_TEST_NOINLINE void operator delete(void *p) noexcept { std::free(p); }
+FP_TEST_NOINLINE void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 #endif
 
 static int g_fail = 0, g_checks = 0;

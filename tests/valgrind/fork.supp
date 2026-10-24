@@ -10,6 +10,15 @@
    ...
    fun:*Pool4grow*
 }
+# The same at -O1 (the valgrind job's build), where Pool::grow is inlined
+# into parallel_run, which allocates nothing else.
+{
+   pool-thread-state-after-fork-inlined
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*parallel_run*
+}
 
 # The same for the threads test_concurrent_callers runs itself while it
 # forks under load (audit C6): a child has none of them, so their std::thread
