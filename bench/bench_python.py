@@ -150,6 +150,8 @@ def jax_wrappers():
     }
     for name, g in lines.items():
         print(f"  {name:38s} {best(g) * 1e6:9.1f}")
+
+
 def _test_image(n, seed):
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:n, 0:n] / n
@@ -230,12 +232,6 @@ def kernel_throughput():
     setups["isotonic random walk"] = lambda: fp.isotonic(walk, threads=1)
     for name, f in setups.items():
         print(f"  {name:22s} {best(f, repeat=3) / n * 1e9:8.2f}")
-
-
-def _test_image(n, seed):
-    rng = np.random.default_rng(seed)
-    yy, xx = np.mgrid[0:n, 0:n] / n
-    return ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7) + 0.1 * rng.standard_normal((n, n))
 
 
 def aniso_keep():
