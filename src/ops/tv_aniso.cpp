@@ -112,6 +112,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(beta.size()); }
     int image_ndim() const noexcept override { return k; }
+    bool splits_image() const noexcept override { return true; }
     bool splits_rows() const noexcept override { return true; }  // fibres in parallel
     // Component labels are 32-bit.
     fp_status check_image(const int64_t *shape) const noexcept override {

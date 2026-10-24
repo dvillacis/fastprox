@@ -131,8 +131,7 @@ class Grads:
         self.gamma = gamma
         self.params = params
         self._fields = fields
-        for k, v in fields.items():
-            setattr(self, k, v)
+        self.__dict__.update(fields)
 
     def __repr__(self) -> str:
         items = ", ".join(f"{k}={v!r}" for k, v in {"gamma": self.gamma, **self._fields}.items())
@@ -337,14 +336,19 @@ def _restage(out, *inputs):
     raise  # noqa: PLE0704 - the error being handled
 
 
-def _steps(step, batch_shape, conj):
+def _steps(step, conj, op, shape, axis):
     """A scalar step as (step, None), or one step per row or image (since 1.0)
-    as (1.0, an array broadcast to the batch shape)."""
+    as (1.0, an array broadcast to op's batch shape for x's shape and axis).
+    The batch shape is computed for an array step only: on the scalar path the
+    library checks the axis (audit P11)."""
+    if type(step) is float or type(step) is int:  # before np.ndim, which costs 0.25 us
+        return float(step), None
     if np.ndim(step) == 0:
         return float(step), None
     if conj:
         raise ValueError("prox_conj takes a scalar sigma")
     s = np.asarray(step, dtype=np.float64)
+    batch_shape = op._batch_shape(shape, axis)
     try:
         return 1.0, np.broadcast_to(s, batch_shape)
     except ValueError:
@@ -578,7 +582,7 @@ class Operator:
         axis, threads = _axis_threads(axis, threads)
         x = _input(x, copy)
         z = _output(x, out)
-        step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
+        step, steps = _steps(step, conj, self, x.shape, axis)
         if not keep:
             try:
                 _C.prox(self._op, step, x, z, axis, threads, False, None, conj, steps=steps)
@@ -658,10 +662,18 @@ class Operator:
             branch=None, kink_tol=0.0):
         r"""($J_x^\top g$, Grads) at the saved point; ``tol``, ``max_iter``,
         ``refine`` and ``branch`` as in :meth:`jvp`."""
+        return self._vjp(ctx, g, out, tol, max_iter, refine, branch, kink_tol, True, True, level=4)
+
+    def _vjp(self, ctx, g, out, tol, max_iter, refine, branch, kink_tol, want_gamma, want_params, level=3):
+        """vjp; the PyTorch and JAX backwards ask the library for the step's
+        and the parameters' sums only when they need them (audit P11), which
+        for an elementwise map leaves the gx-only loop. Grads then holds 0.0
+        for the step and zeros for the parameters, without their fields."""
         self._check_ctx(ctx)
         g = _input(g, True).astype(ctx.dtype, copy=False)
         gx = _output(None, out, ctx.shape, ctx.dtype)
         gp = np.zeros(self.nparams, np.float64)
+        pbuf = gp if want_params and self.nparams else None
         side = _branch(ctx, branch, kink_tol) if branch is not None else _no_branch
         if kink_tol and branch is None:
             _kink_tol(kink_tol)  # still checked without a branch
@@ -673,16 +685,17 @@ class Operator:
             if it:
                 _C.set_deriv_tol(ctx.ws, dtol, int(max_iter))
             try:
-                gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
+                gg = _C.vjp(self._op, ctx.ws, g, gx, pbuf, want_gamma)
             except (TypeError, ValueError):
                 g, = _restage(out, g)
-                gg = _C.vjp(self._op, ctx.ws, g, gx, gp if self.nparams else None)
-            ctx.deriv = self._deriv_info(ctx) if self._image else _NO_SOLVE
-        return gx, Grads(gg, gp, self._fields(gp))
+                gg = _C.vjp(self._op, ctx.ws, g, gx, pbuf, want_gamma)
+            ctx.deriv = self._deriv_info(ctx, level) if self._image else _NO_SOLVE
+        return gx, Grads(gg, gp, self._fields(gp) if want_params else {})
 
-    def _deriv_info(self, ctx):
+    def _deriv_info(self, ctx, level=3):
         """ctx.deriv of an image operator, under ctx.lock, and the warning
-        for an inexact derivative at a loose point (feedback U4)."""
+        for an inexact derivative at a loose point (feedback U4); level is the
+        caller's frame for the warning (3: under jvp or _vjp)."""
         res, its = _C.deriv_info(ctx.ws) if self._iterative_deriv else (0.0, 0)
         exact, mu = _C.deriv_exact(ctx.ws)
         if not exact and not ctx.warned:
@@ -695,7 +708,7 @@ class Operator:
                               f"(certified error of z {zerr:.2g} > {limit:g}"
                               + (f", smoothing {mu:.2g}" if mu > 0 else "") +
                               "); pass refine=ztol to jvp or vjp, or solve to a tighter ztol",
-                              AccuracyWarning, stacklevel=3)  # _deriv_info, jvp/vjp, the caller
+                              AccuracyWarning, stacklevel=level)
         return DerivInfo(res, its, exact, mu)
 
     def _check_ctx(self, ctx):
@@ -705,8 +718,7 @@ class Operator:
     def _fields(self, gp: np.ndarray) -> dict:
         fields, k = {}, 0
         for name, length, scalar in self._layout:
-            part = gp[k:k + length]
-            fields[name] = float(part[0]) if scalar else part
+            fields[name] = float(gp[k]) if scalar else gp[k:k + length]  # no slice for a scalar
             k += length
         return fields
 
@@ -762,11 +774,15 @@ class Soft(Operator):
         super().__init__(_C.soft(float(lam), w))
         self.lam = float(lam)
         self._w = np.ones(1) if w is None else w
+        self._w0 = float(self._w[0]) if self._w.size == 1 else None  # _fields without a matmul
         self._layout = [("weights", self._w.size, w is None)]
 
     def _fields(self, gp):
         f = super()._fields(gp)
-        f["lam"] = float(self._w @ gp) / self.lam if self.lam > 0 else float("nan")
+        if not self.lam > 0:
+            f["lam"] = float("nan")
+        else:  # w0 g0 is the one-entry product exactly
+            f["lam"] = (self._w0 * float(gp[0]) if self._w0 is not None else float(self._w @ gp)) / self.lam
         return f
 
     def _derived_dparams(self, name, value):
@@ -902,14 +918,18 @@ class L1Box(Operator):
         super().__init__(_C.l1_box(float(lam), w, _vec(lo), _vec(hi)))
         self.lam = float(lam)
         self._w = np.ones(1) if w is None else w
+        self._w0 = float(self._w[0]) if self._w.size == 1 else None  # _fields without a matmul
         self._layout = [("weights", self._w.size, w is None),
                         ("lower", lo.size, np.ndim(lower) == 0),
                         ("upper", hi.size, np.ndim(upper) == 0)]
 
     def _fields(self, gp):
         f = super()._fields(gp)
-        gw = gp[:self._w.size]
-        f["lam"] = float(self._w @ gw) / self.lam if self.lam > 0 else float("nan")
+        if not self.lam > 0:
+            f["lam"] = float("nan")
+        else:
+            f["lam"] = (self._w0 * float(gp[0]) if self._w0 is not None
+                        else float(self._w @ gp[:self._w.size])) / self.lam
         return f
 
     def _derived_dparams(self, name, value):
@@ -1222,7 +1242,7 @@ class _ImageOperator(Operator):
             raise ValueError(f"{type(self).__name__}(ndim={self.ndim}) needs arrays with at "
                              f"least {self.ndim} dimensions")
         z = _output(x, out)
-        step, steps = _steps(step, self._batch_shape(x.shape, -1), conj)
+        step, steps = _steps(step, conj, self, x.shape, -1)
         tol = self._tol(x, tol, ztol, warn)
 
         def call(ws):
@@ -1468,7 +1488,7 @@ class _Pointwise(Operator):
         axis, threads = _axis_threads(axis, threads)
         x = _input(x, copy)
         z = _output(x, out)
-        step, steps = _steps(step, self._batch_shape(x.shape, axis), conj)
+        step, steps = _steps(step, conj, self, x.shape, axis)
         if not keep:
             try:
                 _C.prox(self._op, step, x, z, axis, threads, False, None, conj, tie=t, steps=steps)
@@ -1509,11 +1529,15 @@ class Lq(_Pointwise):
         super().__init__(_C.lq(float(lam), float(q), w))
         self.lam = float(lam)
         self._w = np.ones(1) if w is None else w
+        self._w0 = float(self._w[0]) if self._w.size == 1 else None  # _fields without a matmul
         self._layout = [("weights", self._w.size, w is None or w.size == 1)]
 
     def _fields(self, gp):
         f = super()._fields(gp)
-        f["lam"] = float(self._w @ gp) / self.lam if self.lam > 0 else float("nan")
+        if not self.lam > 0:
+            f["lam"] = float("nan")
+        else:
+            f["lam"] = (self._w0 * float(gp[0]) if self._w0 is not None else float(self._w @ gp)) / self.lam
         return f
 
     def _derived_dparams(self, name, value):

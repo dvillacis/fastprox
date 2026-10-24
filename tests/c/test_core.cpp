@@ -2298,6 +2298,42 @@ static void test_tree_tv() {
         CHECK(fp_op_nparams(t) == 1 && std::string(fp_op_name(t)) == "tree_tv");
         fp_op_free(t);
     }
+    // A batch smaller than the thread count runs its images in parallel
+    // (audit T4), graph and tree TV alike, with the results, gaps, iteration
+    // counts and duals of one thread.
+    {
+        fp_op *g, *tr;
+        const std::vector<int64_t> ge = graph_edges(40, 70, 11), te = tree_edges(40, 0, 0, 5);
+        CHECK_OK(fp_op_graph_tv(40, static_cast<int64_t>(ge.size()) / 2, ge.data(), nullptr, &g));
+        CHECK_OK(fp_op_tree_tv(40, static_cast<int64_t>(te.size()) / 2, te.data(), nullptr, &tr));
+        Arr x3({3, 40}, randn(120, 2.0));
+        for (fp_op *op : {g, tr}) {
+            std::vector<Vec> zs, duals;
+            std::vector<double> gaps;
+            std::vector<int> iters;
+            for (int t : {1, 2, 8}) {
+                Arr z({3, 40}), d({1, 3, 40});
+                fp_options o = opts(-1, t);
+                o.tol = 1e-9;
+                fp_workspace *ws;
+                CHECK_OK(fp_workspace_create(op, &x3.a, &o, &ws));
+                fp_info inf;
+                CHECK_OK(fp_prox(op, 0.8, &x3.a, &z.a, &o, ws, &inf));
+                CHECK_OK(fp_workspace_get_dual(ws, &d.a));
+                zs.push_back(z.data);
+                duals.push_back(d.data);
+                gaps.push_back(inf.gap);
+                iters.push_back(inf.iters);
+                fp_workspace_free(ws);
+            }
+            CHECK(zs[0] == zs[1] && zs[0] == zs[2]);
+            CHECK(duals[0] == duals[1] && duals[0] == duals[2]);
+            CHECK(gaps[0] == gaps[1] && gaps[0] == gaps[2]);
+            CHECK(iters[0] == iters[1] && iters[0] == iters[2]);
+        }
+        fp_op_free(g);
+        fp_op_free(tr);
+    }
 }
 
 static void test_no_allocation() {
