@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The conda recipe's `libfastprox` exports a pin on the major version (`upper_bound='x'`), instead of the minor, as the ABI now holds for every 1.x.
 
+### Fixed
+
+- The 1D TV ball (`fp_op_tv1d_ball`, `TV1DBall`) returned NaN on rows with entries beyond about 5e305, from any finite input (found by the nightly fuzz run, 2026-10-24: the conjugate at sigma = 1.8e-306 projects y / sigma). The piece sums in the projection overflowed. A row with max |x| outside [2^-960, 2^960] is now projected at x 2^-k onto the ball of radius alpha 2^-k, and the result scaled back by 2^k. The projection is homogeneous, so this is exact up to rounding, and the derivatives are unchanged. Rows inside the ball still come back exactly. Tested in `tests/python/test_tree_ball.py`, at the fuzz case and at 2^±1000.
+
 ## [1.0.0] — 2026-10-24
 
 The first stable release, on PyPI (`pip install fastprox`). The C ABI (`FP_ABI_VERSION` 1, `libfastprox.so.1`) now holds for every 1.x: later releases may add functions, but nothing changes or goes (docs/api.md, "ABI stability"). The `abi` job checks every change against 0.5.0 now, and against 1.0.0 from here on. This release changes no code since 1.0.0rc3. It closes the last feedback item (U6) and moves the PyPI classifier to Production/Stable. For what changed since 0.5, see the three release candidates below.
