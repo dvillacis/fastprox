@@ -23,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Isotropic TV's jvp and vjp are 1.5–1.6× faster (audit T3): on a 512² image, 395 → 262 ms at γ = 0.1 and 1503 → 919 ms at γ = 1, one thread. The gradient, its adjoint, the preconditioner and the saved structure tested each entry's neighbours with an integer division and a remainder per axis; they now test once per row. The results are bit-identical. `bench/bench_python.py` has the audit's `image_tv_derivatives()` section.
 - `Lq` with q other than 1/2 and 2/3 is 8–11× faster just above its threshold (audit K6): 543 → 48 ns per entry at q = 0.9 and 672 → 80 at q = 0.999, one thread. Newton stops when a step no longer decreases y, the rounding floor of h, which the relative test missed near the threshold; there the iterates oscillated up to the cap of 100. It starts from the tangent bound β + (x − τ)/(1 − q/2) below 2τ instead of from x. The jvp and vjp, which recompute the root, gain the same. Far from the threshold q = 0.9 is 2.5% slower (51.5 → 52.8 ns). Results change at rounding level.
 - `L2Ball`'s jvp and vjp make one pass for the norm and the dot, in eight lanes, and multiply by 1/m (audit K12): 1.16 → 0.36 and 1.14 → 0.38 ns per entry on one row of 10⁶. The prox shares the lane sum of squares: 0.82 → 0.42. Results change at rounding level.
 - `bench/bench_python.py` has the `kernel_throughput()` section of the audit: row and elementwise kernels, one thread, ns per entry.

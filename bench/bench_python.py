@@ -77,6 +77,27 @@ def simplex_throughput():
         print(f"  n = {n:>8d}  {t / n * 1e9:6.2f}")
 
 
+def _test_image(n, seed):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:n, 0:n] / n
+    return ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7) + 0.1 * rng.standard_normal((n, n))
+
+
+def image_tv_derivatives():
+    print("Isotropic TV derivatives, one image (ms; CG iterations)")
+    op = fp.TVIso(2)
+    for n, seed, gamma, tol in ((512, 0, 0.1, 1e-6), (512, 0, 1.0, 1e-6), (2048, 11, 0.1, 1e-4)):
+        x = _test_image(n, seed)
+        dx = np.random.default_rng(1).standard_normal(x.shape)
+        for threads in (1, 0):
+            tp = best(lambda: op.prox(x, gamma, keep=True, tol=tol, max_iter=100000, threads=threads),
+                      repeat=3, number=1)
+            _, ctx = op.prox(x, gamma, keep=True, tol=tol, max_iter=100000, threads=threads)
+            tj = best(lambda: op.jvp(ctx, dx), repeat=3, number=1)
+            it = ctx.deriv.iters
+            tv = best(lambda: op.vjp(ctx, dx), repeat=3, number=1)
+            print(f"  D({n}, {seed}) gamma {gamma:g} tol {tol:g} threads {threads}:"
+                  f" prox {tp * 1e3:7.1f}  jvp {tj * 1e3:7.1f}  vjp {tv * 1e3:7.1f}  ({it})")
 def kernel_throughput():
     print("Row and elementwise kernels, one thread, ns per entry")
     rng = np.random.default_rng(4)
@@ -133,3 +154,4 @@ if __name__ == "__main__":
     simplex_throughput()
     kernel_throughput()
     scaling()
+    image_tv_derivatives()
