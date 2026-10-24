@@ -115,6 +115,33 @@ constexpr double kCurvRms = 0.1;
 constexpr double kDerivFloor = 1e-10;
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
+// The derivative loops run over rows b = r n, ..., b + n - 1 (n the last
+// extent): along an axis a < k - 1 a row has its neighbours p +- e_a for all
+// of its entries or for none, so they test (b / S_a) % L_a once per row
+// rather than per entry and axis. The arithmetic per entry is unchanged.
+//
+// x[p] += c (h[p] - h[p - e_a]), with h taken as 0 before the first entry
+// along a.
+void add_diff(const Geom &g, int a, double c, const double *h, double *x) noexcept {
+    const int64_t N = g.N, n = g.L[g.k - 1], Sa = g.S[a];
+    for (int64_t b = 0; b < N; b += n) {
+        if (a == g.k - 1) {
+            x[b] += c * h[b];
+            for (int64_t j = 1; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - 1]);
+        } else if (g.coord(b, a) > 0) {
+            for (int64_t j = 0; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - Sa]);
+        } else {
+            for (int64_t j = 0; j < n; ++j) x[b + j] += c * h[b + j];
+        }
+    }
+}
+
+// nxt[a]: whether the entries of the row at b have a forward neighbour along
+// a < k - 1 with a nonzero weight; along k - 1 all but the last do.
+inline void row_next(const Geom &g, const double *wa, int64_t b, bool *nxt) noexcept {
+    for (int a = 0; a < g.k; ++a) nxt[a] = wa[a] != 0.0 && (a == g.k - 1 || g.has_next(b, a));
+}
+
 struct TVIso final : ImageOp<TVIso> {
     int k;
     double w[3];
@@ -135,6 +162,7 @@ struct TVIso final : ImageOp<TVIso> {
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }
+    bool splits_image() const noexcept override { return true; }  // rows in parallel (row_for)
     fp_status check_image(const int64_t *shape) const noexcept override {
         double n = 1.0;
         for (int a = 0; a < k; ++a) n *= static_cast<double>(shape[a]);
@@ -529,11 +557,15 @@ struct TVIso final : ImageOp<TVIso> {
             }
             return i;
         };
-        for (int64_t p = 0; p < N; ++p) {
+        const int64_t n = g.L[k - 1];
+        bool nxt[3];
+        for (int64_t p = 0, j = 0; p < N; ++p, j = j + 1 == n ? 0 : j + 1) {  // j: p's column (add_diff)
+            if (j == 0) row_next(g, wa, p, nxt);
+            const auto has = [&](int a) { return nxt[a] && (a + 1 < k || j + 1 < n); };
             double nn = 0.0;
             bool any = false;
             for (int a = 0; a < k; ++a) {
-                if (wa[a] == 0.0 || !g.has_next(p, a)) continue;
+                if (!has(a)) continue;
                 const double t = wa[a] * (z[p + g.S[a]] - z[p]);
                 nn += t * t;
                 any = true;
@@ -547,7 +579,7 @@ struct TVIso final : ImageOp<TVIso> {
             s.flat[p] = flat ? 1 : 0;
             if (!flat || !any) continue;
             for (int a = 0; a < k; ++a) {
-                if (wa[a] == 0.0 || !g.has_next(p, a)) continue;
+                if (!has(a)) continue;
                 int64_t ri = find(p), rj = find(p + g.S[a]);
                 if (ri == rj) continue;
                 if (ri < rj) parent[rj] = static_cast<int32_t>(ri);
@@ -614,23 +646,34 @@ struct TVIso final : ImageOp<TVIso> {
 
         // The radius gamma alpha_p of pixel p.
         double r(int64_t p) const noexcept { return radius(gamma, alpha, p, kInf); }
-        // y_p = (G x)_p, the scaled forward differences of the image x.
+        // y_p = (G x)_p, the scaled forward differences of the image x, by rows
+        // (see add_diff).
         void grad(const double *x, double *y) const {
-            const int64_t N = g.N;
+            const int64_t N = g.N, n = g.L[op.k - 1];
             for (int a = 0; a < op.k; ++a) {
                 double *ya = y + a * N;
-                for (int64_t p = 0; p < N; ++p)
-                    ya[p] = (wa[a] != 0.0 && g.has_next(p, a)) ? wa[a] * (x[p + g.S[a]] - x[p]) : 0.0;
+                const double wv = wa[a];
+                if (wv == 0.0) {
+                    std::fill(ya, ya + N, 0.0);
+                    continue;
+                }
+                const int64_t Sa = g.S[a];
+                for (int64_t b = 0; b < N; b += n) {
+                    if (a == op.k - 1) {
+                        for (int64_t j = 0; j + 1 < n; ++j) ya[b + j] = wv * (x[b + j + 1] - x[b + j]);
+                        ya[b + n - 1] = 0.0;
+                    } else if (g.has_next(b, a)) {
+                        for (int64_t j = 0; j < n; ++j) ya[b + j] = wv * (x[b + j + Sa] - x[b + j]);
+                    } else {
+                        std::fill(ya + b, ya + b + n, 0.0);
+                    }
+                }
             }
         }
         // x -= G^T h (h zero past the ends), i.e. x += sum_a w_a (h_a[p] - h_a[p - e_a]).
         void sub_gradT(const double *h, double *x) const {
-            const int64_t N = g.N;
-            for (int a = 0; a < op.k; ++a) {
-                if (wa[a] == 0.0) continue;
-                const double *ha = h + a * N;
-                for (int64_t p = 0; p < N; ++p) x[p] += wa[a] * (ha[p] - (g.coord(p, a) > 0 ? ha[p - g.S[a]] : 0.0));
-            }
+            for (int a = 0; a < op.k; ++a)
+                if (wa[a] != 0.0) add_diff(g, a, wa[a], h + a * g.N, x);
         }
         // H_p y_p on non-flat entries, 0 on flat ones (in place).
         void hess(double *y) const {
@@ -655,9 +698,11 @@ struct TVIso final : ImageOp<TVIso> {
         // h^T H_p h with h = (G 1_C)_p, which is nonzero only for the regions of
         // p and of its forward neighbours.
         void jacobi(double *dinv) const {
-            const int64_t N = g.N;
+            const int64_t N = g.N, n = g.L[op.k - 1];
             for (int64_t C = 0; C < nc; ++C) dinv[C] = 1.0 / s.inv[C];
-            for (int64_t p = 0; p < N; ++p) {
+            bool nxt[3];
+            for (int64_t p = 0, j = 0; p < N; ++p, j = j + 1 == n ? 0 : j + 1) {  // j: p's column
+                if (j == 0) row_next(g, wa, p, nxt);
                 if (s.flat[p]) continue;
                 double nn = 0.0;
                 for (int a = 0; a < op.k; ++a) nn += gz[a * N + p] * gz[a * N + p];
@@ -666,7 +711,7 @@ struct TVIso final : ImageOp<TVIso> {
                 bool has[3];
                 lab[0] = s.label[p];
                 for (int a = 0; a < op.k; ++a) {
-                    has[a] = wa[a] != 0.0 && g.has_next(p, a);
+                    has[a] = nxt[a] && (a + 1 < op.k || j + 1 < n);
                     lab[a + 1] = has[a] ? s.label[p + g.S[a]] : -1;
                 }
                 for (int c = 0; c <= op.k; ++c) {
@@ -781,8 +826,7 @@ struct TVIso final : ImageOp<TVIso> {
             for (int a = 0; a < k; ++a) {
                 if (dparams[a] == 0.0 || g.L[a] == 1) continue;
                 const double *ua = S.s.u + a * N;
-                const double da = sc * dparams[a];
-                for (int64_t p = 0; p < N; ++p) rhs[p] += da * (ua[p] - (g.coord(p, a) > 0 ? ua[p - g.S[a]] : 0.0));
+                add_diff(g, a, sc * dparams[a], ua, rhs);
             }
         }
         double *cA = S.hbuf;
@@ -838,9 +882,15 @@ struct TVIso final : ImageOp<TVIso> {
         for (int a = 0; a < k; ++a) {
             if (g.L[a] == 1) continue;
             const double *ua = S.s.u + a * N;
+            const int64_t n = g.L[k - 1], Sa = g.S[a];
             double t = 0.0;
-            for (int64_t p = 0; p < N; ++p)
-                if (g.has_next(p, a)) t += (vpix[p + g.S[a]] - vpix[p]) * ua[p];
+            for (int64_t b = 0; b < N; b += n) {  // by rows, in the order of the entries
+                if (a == k - 1) {
+                    for (int64_t j = 0; j + 1 < n; ++j) t += (vpix[b + j + 1] - vpix[b + j]) * ua[b + j];
+                } else if (g.has_next(b, a)) {
+                    for (int64_t j = 0; j < n; ++j) t += (vpix[b + j + Sa] - vpix[b + j]) * ua[b + j];
+                }
+            }
             acc[a] -= sc * t;
         }
         double ggam = 0.0;

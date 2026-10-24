@@ -150,6 +150,53 @@ def jax_wrappers():
     }
     for name, g in lines.items():
         print(f"  {name:38s} {best(g) * 1e6:9.1f}")
+def _test_image(n, seed):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:n, 0:n] / n
+    return ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7) + 0.1 * rng.standard_normal((n, n))
+
+
+def _grid_edges(h, w):
+    idx = np.arange(h * w).reshape(h, w)
+    return np.concatenate([np.stack([idx[:, :-1].ravel(), idx[:, 1:].ravel()], 1),
+                           np.stack([idx[:-1].ravel(), idx[1:].ravel()], 1)])
+
+
+def edge_tv_batches():
+    print("Graph and tree TV, small batches (ms)")
+    n = 512
+    op = fp.GraphTV(n * n, _grid_edges(n, n))
+    x = _test_image(n, 4).ravel() + 0.01 * np.random.default_rng(4).standard_normal((4, n * n))
+    for gamma in (0.1, 1.0):
+        row = [f"  GraphTV 512^2 grid, batch 4, gamma {gamma:g}:"]
+        for threads in (1, 0):
+            row.append(f"threads {threads} {best(lambda: op.prox(x, gamma, threads=threads), repeat=3, number=1) * 1e3:8.1f}")
+        print("  ".join(row))
+    m = 200_000
+    rng = np.random.default_rng(6)
+    parent = np.floor(np.arange(1, m) * rng.random(m - 1)).astype(np.int64)
+    tree = fp.TreeTV(m, np.stack([np.arange(1, m), parent], 1))
+    for b in (4, 16):
+        y = 0.1 * np.cumsum(rng.standard_normal((b, m)), axis=1) + rng.standard_normal((b, m))
+        row = [f"  TreeTV n = 2e5, batch {b:2d}, gamma 1:"]
+        for threads in (1, 0):
+            row.append(f"threads {threads} {best(lambda: tree.prox(y, 1.0, threads=threads), repeat=3, number=1) * 1e3:8.1f}")
+        print("  ".join(row))
+def image_tv_derivatives():
+    print("Isotropic TV derivatives, one image (ms; CG iterations)")
+    op = fp.TVIso(2)
+    for n, seed, gamma, tol in ((512, 0, 0.1, 1e-6), (512, 0, 1.0, 1e-6), (2048, 11, 0.1, 1e-4)):
+        x = _test_image(n, seed)
+        dx = np.random.default_rng(1).standard_normal(x.shape)
+        for threads in (1, 0):
+            tp = best(lambda: op.prox(x, gamma, keep=True, tol=tol, max_iter=100000, threads=threads),
+                      repeat=3, number=1)
+            _, ctx = op.prox(x, gamma, keep=True, tol=tol, max_iter=100000, threads=threads)
+            tj = best(lambda: op.jvp(ctx, dx), repeat=3, number=1)
+            it = ctx.deriv.iters
+            tv = best(lambda: op.vjp(ctx, dx), repeat=3, number=1)
+            print(f"  D({n}, {seed}) gamma {gamma:g} tol {tol:g} threads {threads}:"
+                  f" prox {tp * 1e3:7.1f}  jvp {tj * 1e3:7.1f}  vjp {tv * 1e3:7.1f}  ({it})")
 def kernel_throughput():
     print("Row and elementwise kernels, one thread, ns per entry")
     rng = np.random.default_rng(4)
@@ -208,3 +255,5 @@ if __name__ == "__main__":
     scaling()
     torch_wrappers()
     jax_wrappers()
+    edge_tv_batches()
+    image_tv_derivatives()

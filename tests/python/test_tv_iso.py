@@ -3,6 +3,8 @@ recomputed independently, determinism, strides, derivatives by conjugate
 gradients, warm starts and errors. Agreement with CVXPY is in
 test_fixtures.py."""
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -170,6 +172,43 @@ def test_derivative_tolerance_controls():
         g10, _ = op.vjp(ctx, c, tol=1e-10)
         assert ctx.deriv[1] > its
         assert np.linalg.norm(g - g10) <= 3 * np.sqrt(tol) * np.linalg.norm(g10)
+
+
+def _bits(*arrs):
+    h = hashlib.sha256()
+    for a in arrs:
+        h.update(np.ascontiguousarray(np.asarray(a, np.float64)).tobytes())
+    return h.hexdigest()[:24]
+
+
+# Recorded before the derivative loops ran by rows (audit T3); the solve and
+# the derivatives use only IEEE-exact operations (sqrt and division, no
+# contraction), so the bits are the same on every platform.
+DERIVATIVE_BITS = {
+    "plain": ("5f753c866c11012cf8709f03", "a6f34516ead98a535fd3df17"),
+    "weighted": ("4d081384f400a82aa2a80afd", "5af54739eee4d4b2f74f2471"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DERIVATIVE_BITS))
+def test_derivative_bits(name):
+    # The test image D(64, 0) of the audit (docs/audit-2026-10.md, section T).
+    yy, xx = np.mgrid[0:64, 0:64] / 64
+    x = ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7)
+    x = x + 0.1 * np.random.default_rng(0).standard_normal((64, 64))
+    dx = np.random.default_rng(1).standard_normal(x.shape)
+    if name == "plain":
+        op = fp.TVIso(2)
+    else:
+        op = fp.TVIso(2, weights=[1.0, 0.6], pixel_weights=np.random.default_rng(2).uniform(0.5, 1.5, x.shape))
+    _, ctx = op.prox(x, 0.2, keep=True, tol=1e-9, max_iter=10**5)
+    P = 2 + (x.size if name == "weighted" else 0)
+    dz = op.jvp(ctx, dx, 0.3, np.random.default_rng(3).standard_normal(P))
+    dj = ctx.deriv
+    gx, gr = op.vjp(ctx, dx)
+    dv = ctx.deriv
+    got = (_bits(dz, [dj.residual, dj.iters]), _bits(gx, gr.gamma, gr.params, [dv.residual, dv.iters]))
+    assert got == DERIVATIVE_BITS[name]
 
 
 def test_warm_starts():

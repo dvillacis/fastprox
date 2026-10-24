@@ -310,6 +310,11 @@ struct fp_op {
     // Image operators (multi-dimensional TV) act on the last image_ndim() axes
     // and are batched over the others; 0 for every other operator.
     virtual int image_ndim() const noexcept { return 0; }
+    // Whether prox_image splits one image over ImageCall::nt threads (TV on
+    // grids). The drivers give a batch smaller than the thread count all the
+    // threads one image at a time only then; graph and tree TV, which run an
+    // image on one thread, solve their images in parallel (audit T4).
+    virtual bool splits_image() const noexcept { return false; }
     virtual fp_status check_image(const int64_t *) const noexcept { return FP_OK; }
     // Bytes of the working set of one image, of the per-thread scratch used
     // inside one image, and of the structure saved for derivatives.
