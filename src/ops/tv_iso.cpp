@@ -135,6 +135,7 @@ struct TVIso final : ImageOp<TVIso> {
     bool conj_homogeneous() const noexcept override { return true; }
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }
+    bool splits_image() const noexcept override { return true; }  // rows in parallel (row_for)
     fp_status check_image(const int64_t *shape) const noexcept override {
         double n = 1.0;
         for (int a = 0; a < k; ++a) n *= static_cast<double>(shape[a]);
