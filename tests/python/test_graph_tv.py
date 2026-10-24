@@ -147,6 +147,25 @@ def test_batching_threads_strides_float32():
     assert res[0] == res[1] == res[2]
 
 
+@pytest.mark.parametrize("tree", [False, True])
+def test_small_batches_threads(tree):
+    # A batch smaller than the thread count runs its images in parallel
+    # (audit T4); the results are those of one thread.
+    n = 300
+    if tree:
+        parent = (np.arange(1, n) * np.random.default_rng(8).random(n - 1)).astype(np.int64)
+        op = fp.TreeTV(n, np.stack([np.arange(1, n), parent], 1))
+    else:
+        e, w = random_graph(n, 700, 9)
+        op = fp.GraphTV(n, e, w)
+    x = np.random.default_rng(10).normal(size=(3, n)) * 2
+    res = []
+    for t in (1, 2, 8):
+        z, info = op.solve(x, 0.6, tol=1e-6, threads=t)
+        res.append((z.tobytes(), info.gap, info.iters, np.asarray(info.dual).tobytes()))
+    assert res[0] == res[1] == res[2]
+
+
 def test_special_cases():
     e, w = random_graph(20, 30, 8)
     op = fp.GraphTV(20, e, w)

@@ -873,7 +873,7 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
     const int k = p.k;
     const int64_t *ishape = x.shape + p.nlead;
     const bool warm = ws.dual_valid && (ws.warm || ws.seeded);
-    const bool outer = B >= 2 && B >= nt;
+    const bool outer = B >= 2 && (B >= nt || !op.splits_image());
     if (outer) nt = std::min<int>(nt, ws.image_sets);
     double *gaps = ws.image_gaps.data();
     int *iters = reinterpret_cast<int *>(ws.image_iters.data());
@@ -988,7 +988,7 @@ fp_status image_refine_driver(const fp_op &op, fp_workspace &ws, int nt, double 
     T *od = out ? reinterpret_cast<T *>(out->data) : nullptr;
     const bool conj = ws.conj;
     const double sigma = ws.sigma;
-    const bool outer = B >= 2 && B >= nt;
+    const bool outer = B >= 2 && (B >= nt || !op.splits_image());
     if (outer) nt = std::min<int>(nt, ws.image_sets);
     std::atomic<int> err{0}, notconv{0};
 
