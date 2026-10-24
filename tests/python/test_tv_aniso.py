@@ -2,6 +2,8 @@
 gaps recomputed independently, determinism, batching and strides, derivatives,
 warm starts and errors. Agreement with CVXPY is in test_fixtures.py."""
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -319,3 +321,69 @@ def test_derivatives_at_tiny_edge_weights(small):
 
     assert _rel(fd(1e-7), fd(1e-9)) <= 1e-6
     assert _rel(op.jvp(ctx, dx), fd(1e-7)) <= 1e-6
+
+
+def _bits(*arrs):
+    h = hashlib.sha256()
+    for a in arrs:
+        h.update(np.ascontiguousarray(np.asarray(a, np.float64)).tobytes())
+    return h.hexdigest()[:24]
+
+
+def _test_image(n, seed):
+    # The test image D(n, seed) of the audit (docs/audit-2026-10.md, section T).
+    yy, xx = np.mgrid[0:n, 0:n] / n
+    x = ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7)
+    return x + 0.1 * np.random.default_rng(seed).standard_normal((n, n))
+
+
+def _derivatives(op, ctx, rng):
+    """The bits of everything read from the saved structure: jvp in x, gamma
+    and the parameters, vjp, kinks and a branch."""
+    dx, g = rng.standard_normal(ctx.shape), rng.standard_normal(ctx.shape)
+    dz = op.jvp(ctx, dx, 0.3, rng.standard_normal(op.nparams))
+    gx, gr = op.vjp(ctx, g)
+    db = op.jvp(ctx, dx, branch=1, kink_tol=1e-6)
+    return _bits(dz), _bits(gx, gr.gamma, gr.params), _bits(ctx.kinks(1e-6)), _bits(db)
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.AccuracyWarning")  # a loose solve, for speed
+@pytest.mark.parametrize("shape", [(1024, 1024), (64, 64, 64)])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_structure_threads(shape, weighted):
+    """The saved structure is built in parallel (audit T8): fiber chunks for
+    the edges, slabs along axis 0 for the components and the sums, with the
+    components that cross slabs summed in a fixed order. Images large enough
+    for every slab to be a thread's piece: the same bits for any thread
+    count."""
+    k = len(shape)
+    x = _test_image(shape[-1], 3) if k == 2 else np.cumsum(np.random.default_rng(3).standard_normal(shape), 0)
+    beta = np.random.default_rng(4).uniform(0.5, 1.5, (k, *shape)) if weighted else None
+    op = fp.TVAniso(k, edge_weights=beta)
+    got = []
+    for t in (1, 2, 5, 15):
+        _, ctx = op.prox(x, 0.1, keep=True, tol=1e-4, max_iter=10**5, threads=t)
+        got.append(_derivatives(op, ctx, np.random.default_rng(5)))
+    assert got[0] == got[1] == got[2] == got[3]
+
+
+# Recorded with the serial structure() before audit T8; without edge
+# weights the boundary sums are of +-1 and exact, so the parallel one gives
+# the same bits. The solve uses only IEEE-exact operations.
+DERIVATIVE_BITS = {
+    "2d": ("612316e1834ef1c5d231e941", "886c2cb00afc347087d32287", "12aa41bbf2508caebe0faac4",
+           "b652907b8d6998a5fcc1fe93"),
+    "3d": ("f9a5d87307c5049912ed65b3", "4d224816d1d40c32c1154c61", "f6e28ad1753237d42be72be1",
+           "de3d0ee9e45e10d49f808a8c"),
+}
+
+
+@pytest.mark.parametrize("name", ["2d", "3d"])
+def test_derivative_bits(name):
+    if name == "2d":
+        x = _test_image(64, 0)
+    else:
+        x = np.cumsum(np.random.default_rng(6).standard_normal((8, 12, 10)), 1)
+    op = fp.TVAniso(x.ndim)
+    _, ctx = op.prox(x, 0.2, keep=True, tol=1e-9, max_iter=10**5)
+    assert _derivatives(op, ctx, np.random.default_rng(7)) == DERIVATIVE_BITS[name]

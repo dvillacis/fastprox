@@ -112,6 +112,23 @@ def kernel_throughput():
         print(f"  {name:22s} {best(f, repeat=3) / n * 1e9:8.2f}")
 
 
+def _test_image(n, seed):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:n, 0:n] / n
+    return ((xx - 0.5) ** 2 + (yy - 0.5) ** 2 < 0.1) + 0.5 * (xx > 0.7) + 0.1 * rng.standard_normal((n, n))
+
+
+def aniso_keep():
+    print("Anisotropic TV, saved structure (ms, threads 0)")
+    op = fp.TVAniso(2)
+    for n, seed, gamma, tol in ((512, 0, 0.1, 1e-6), (2048, 11, 0.1, 1e-4)):
+        x = _test_image(n, seed)
+        t0, t1 = (best(lambda: op.prox(x, gamma, keep=keep, tol=tol, max_iter=100000), repeat=5, number=1)
+                  for keep in (False, True))
+        print(f"  D({n}, {seed}) gamma {gamma:g} tol {tol:g}: keep=False {t0 * 1e3:7.1f}"
+              f"  keep=True {t1 * 1e3:7.1f}  difference {(t1 - t0) * 1e3:6.1f}")
+
+
 def scaling():
     print("Parallel scaling, tv1d on 64 rows of 1e4 (target >= 0.7 x threads)")
     x = np.random.default_rng(3).normal(size=(64, 10**4))
@@ -132,4 +149,5 @@ if __name__ == "__main__":
     tv1d_throughput()
     simplex_throughput()
     kernel_throughput()
+    aniso_keep()
     scaling()
