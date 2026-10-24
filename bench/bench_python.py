@@ -4,7 +4,9 @@
 
 Measures per-call overhead from Python (target: < 5 us at n = 100), 1D TV
 throughput for both paths, and parallel scaling over rows (target: >= 0.7 x
-threads on batches of >= 4 x threads rows of length >= 1e4). Comparisons
+threads on batches of >= 4 x threads rows of length >= 1e4).
+``uv run --group interop python bench/bench_python.py`` adds the PyTorch and
+JAX wrapper sections. Comparisons
 against proxTV and Condat's C code live in separate scripts that fetch those
 codes; nothing copyleft is vendored here.
 """
@@ -41,11 +43,16 @@ def overhead():
     x = np.random.default_rng(0).normal(size=100)
     out = np.empty_like(x)
     op = fp.TV1D()
+    soft = fp.Soft(0.4)
+    _, sc = soft.prox(x, 0.8, keep=True)
     calls = {
         "fp.soft_threshold(x)": lambda: fp.soft_threshold(x, 0.1),
         "fp.project_simplex(x)": lambda: fp.project_simplex(x),
         "fp.tv1d(x)": lambda: fp.tv1d(x, 0.1),
         "TV1D().prox(x, out=out)": lambda: op.prox(x, 0.1, out=out),
+        "Soft().prox(x, out=out)": lambda: soft.prox(x, 0.8, out=out),
+        "Soft vjp(ctx, x)": lambda: soft.vjp(sc, x),
+        "Soft jvp(ctx, x)": lambda: soft.jvp(sc, x),
     }
     for name, f in calls.items():
         print(f"  {name:28s} {best(f) * 1e6:7.2f} us")
@@ -77,6 +84,74 @@ def simplex_throughput():
         print(f"  n = {n:>8d}  {t / n * 1e9:6.2f}")
 
 
+def torch_wrappers():
+    try:
+        import torch
+
+        import fastprox.torch as fpt
+    except ImportError:
+        print("PyTorch wrappers: torch not installed, skipped")
+        return
+    torch.set_num_threads(1)
+    print("PyTorch wrappers (us)")
+    rng = np.random.default_rng(0)
+    soft = fp.Soft(0.4)
+    xt = torch.from_numpy(rng.normal(size=100))
+    xr = xt.clone().requires_grad_(True)
+    lines = {
+        "fpt.prox(Soft) no grad": lambda: fpt.prox(soft, xt, 0.8),
+        "fpt.prox(Soft) fwd+bwd": lambda: fpt.prox(soft, xr, 0.8).sum().backward(),
+    }
+    X = torch.from_numpy(rng.normal(size=(64, 10000)))
+    Xn = X.numpy()
+    for name, op in (("L1Ball", fp.L1Ball(1.0)), ("Simplex", fp.Simplex(1.0)), ("Huber", fp.Huber(0.4, 0.5)),
+                     ("NonNeg", fp.NonNeg())):
+        def nograd(op=op):
+            with torch.no_grad():
+                fpt.prox(op, X, 0.8, threads=1)
+
+        lines[f"fpt.prox({name}) no_grad 64x1e4"] = nograd
+        lines[f"{name}().prox 64x1e4"] = lambda op=op: op.prox(Xn, 0.8, threads=1)
+    for name, f in lines.items():
+        print(f"  {name:34s} {best(f) * 1e6:9.1f}")
+
+
+def jax_wrappers():
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        import fastprox.jax as fpj
+    except ImportError:
+        print("JAX wrappers: jax not installed, skipped")
+        return
+    jax.config.update("jax_enable_x64", True)
+    print("JAX wrappers (us)")
+    rng = np.random.default_rng(0)
+    x = jnp.asarray(rng.normal(size=100))
+    x2 = jnp.asarray(rng.normal(size=(32, 32)))
+    X = jnp.asarray(rng.normal(size=(64, 10000)))
+    soft, simplex = fp.Soft(0.4), fp.Simplex(1.0)
+    f = jax.jit(lambda x: fpj.prox(soft, x, 0.8))
+    gf = jax.jit(jax.grad(lambda x: fpj.prox(soft, x, 0.8).sum()))
+    fs = jax.jit(lambda x: fpj.prox(simplex, x, 1.0, threads=1))
+    gs = jax.jit(jax.grad(lambda x: (fpj.prox(simplex, x, 1.0, threads=1) * x).sum()))
+    for g, a in ((f, x), (gf, x), (fs, X), (gs, X)):
+        g(a).block_until_ready()  # compiled before timing
+    lines = {
+        "fpj.prox(Soft) eager": lambda: fpj.prox(soft, x, 0.8).block_until_ready(),
+        "jax.grad(fpj.prox(Soft)) eager":
+            lambda: jax.grad(lambda x: fpj.prox(soft, x, 0.8).sum())(x).block_until_ready(),
+        "fpj.prox(Soft) jit": lambda: f(x).block_until_ready(),
+        "jit(grad(fpj.prox(Soft)))": lambda: gf(x).block_until_ready(),
+        "fpj.tv_iso 32x32 eager": lambda: fpj.tv_iso(x2, 0.3).block_until_ready(),
+        "fpj.prox(Simplex) jit 64x1e4": lambda: fs(X).block_until_ready(),
+        "jit(grad(fpj.prox(Simplex))) 64x1e4": lambda: gs(X).block_until_ready(),
+    }
+    for name, g in lines.items():
+        print(f"  {name:38s} {best(g) * 1e6:9.1f}")
+
+
 def scaling():
     print("Parallel scaling, tv1d on 64 rows of 1e4 (target >= 0.7 x threads)")
     x = np.random.default_rng(3).normal(size=(64, 10**4))
@@ -97,3 +172,5 @@ if __name__ == "__main__":
     tv1d_throughput()
     simplex_throughput()
     scaling()
+    torch_wrappers()
+    jax_wrappers()

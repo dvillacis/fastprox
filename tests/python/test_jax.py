@@ -207,3 +207,57 @@ def test_spectral_float32_and_errors():
         fpj.prox(fp.NuclearNorm(), jnp.zeros(4))
     with pytest.raises(ValueError, match="square"):
         fpj.prox(fp.PSD(), jnp.zeros((3, 4)))
+
+
+def test_jit_cache():
+    # A jit of the built function per operator instance, and per class with
+    # equal static arguments (audit P9).
+    x = jnp.asarray(np.random.default_rng(30).normal(size=50))
+    op = fp.Soft(0.4)
+    z1 = fpj.prox(op, x, 0.8)
+    z2 = fpj.prox(op, x, 0.8)
+    assert len(op.__dict__["_fpj_jit"]) == 1
+    ref = op.prox(np.asarray(x), 0.8)
+    assert np.asarray(z1).tobytes() == np.asarray(z2).tobytes() == ref.tobytes()
+    fpj.prox(op, x[:20], 0.8)  # a new shape: JAX's cache, the same entry
+    assert len(op.__dict__["_fpj_jit"]) == 1
+    fpj._CLASS_CACHE.clear()
+    w = np.linspace(0.5, 1.5, 50)
+    a = fpj.prox(fp.Soft, x, 0.8, lam=0.4, weights=w)
+    b = fpj.prox(fp.Soft, x, 0.8, lam=0.4, weights=w.copy())
+    assert len(fpj._CLASS_CACHE) == 1
+    c = fpj.prox(fp.Soft, x, 0.8, lam=0.4, weights=w[::-1].copy())
+    assert len(fpj._CLASS_CACHE) == 2
+    assert np.asarray(a).tobytes() == np.asarray(b).tobytes() == fp.Soft(0.4, w).prox(np.asarray(x), 0.8).tobytes()
+    assert np.asarray(c).tobytes() == fp.Soft(0.4, w[::-1].copy()).prox(np.asarray(x), 0.8).tobytes()
+    # The gradient is the library's vjp, bit for bit.
+    g = jax.grad(lambda x: (fpj.prox(op, x, 0.8) * jnp.arange(50.0)).sum())(x)
+    _, ctx = op.prox(np.asarray(x), 0.8, keep=True)
+    assert np.asarray(g).tobytes() == op.vjp(ctx, np.arange(50.0))[0].tobytes()
+
+
+def test_jit_cache_shapes():
+    # One jit serves every shape: spectral operators and the device TV.
+    rng = np.random.default_rng(31)
+    op = fp.NuclearNorm(0.5)
+    for shape in ((4, 3), (3, 5), (2, 4, 4)):
+        a = rng.normal(size=shape)
+        np.testing.assert_allclose(fpj.prox(op, jnp.asarray(a), 0.7), op.prox(a, 0.7), rtol=1e-12, atol=1e-12)
+    for shape in ((16, 16), (12, 20)):
+        a = rng.normal(size=shape)
+        z = fpj.tv_iso(jnp.asarray(a), 0.3, tol=1e-10, max_iter=100000)
+        ref = fp.TVIso(2).prox(a, 0.3, tol=1e-12, max_iter=100000)
+        np.testing.assert_allclose(z, ref, atol=1e-4 * np.linalg.norm(a))
+
+
+def test_forward_without_structure_and_grads():
+    # The forward callback runs without the derivative structure (audit P10):
+    # the same bits, and the gradient unchanged.
+    rng = np.random.default_rng(32)
+    x = rng.normal(size=(8, 40))
+    for op in (fp.Simplex(1.0), fp.L1Ball(2.0), fp.Huber(0.4, 0.5)):
+        z = fpj.prox(op, jnp.asarray(x), 0.8)
+        assert np.asarray(z).tobytes() == op.prox(x, 0.8).tobytes()
+        g = jax.grad(lambda t: (fpj.prox(op, t, 0.8) * t).sum())(jnp.asarray(x))
+        zz, ctx = op.prox(x, 0.8, keep=True)
+        np.testing.assert_array_equal(g, zz + op.vjp(ctx, x)[0])

@@ -50,6 +50,9 @@ class Spec:
         # inner_accuracy's state when the call is set up: the run may be in a
         # JAX callback on another thread, where the context is not set.
         self.accuracy = _ACCURACY.get()
+        # Whether the forward keeps the derivative structure (audit P10): the
+        # PyTorch wrapper sets it from grad mode and its inputs.
+        self.keep = True
 
     def build(self, values):
         """The operator for the differentiable parameters' values (NumPy)."""
@@ -66,11 +69,14 @@ class Spec:
         """'svd' or 'eigh' for a spectral operator, known before it is built."""
         return self.op.kind
 
-    def run(self, op, x, step):
-        """(z, ctx) with the structure kept for jvp and vjp."""
+    def run(self, op, x, step, keep=True):
+        """(z, ctx) with the structure kept for jvp and vjp, or (z, None)
+        without (audit P10). step is a float or an array of steps (steps())."""
         f = op.prox_conj if self.conj else op.prox
         with _accuracy(self.accuracy):
-            return f(x, steps(step), threads=self.threads, keep=True, **self.call)
+            if keep:
+                return f(x, step, threads=self.threads, keep=True, **self.call)
+            return f(x, step, threads=self.threads, **self.call), None
 
     def row_axes(self, op, ndim):
         """The axes of x that a step does not vary over: the operator's axis,
@@ -115,8 +121,11 @@ class Spec:
 
     def check_names(self, op, names=None):
         """Raise for a parameter (of names, default all) without a gradient."""
+        names = self.names if names is None else names
+        if not names:
+            return
         fields = {n for n, _, _ in op._layout} | _derived(op)
-        for name in self.names if names is None else names:
+        for name in names:
             if name not in fields:
                 raise ValueError(f"{type(op).__name__} has no gradient with respect to {name!r}; "
                                  "pass it as a constant")
@@ -168,9 +177,13 @@ def spectral_step_grad(op, inner, a, grads, shape):
 
 
 def _derived(op):
-    """Gradient fields computed from theta rather than part of it."""
-    probe = op._fields(np.zeros(op.nparams))
-    return set(probe) - {n for n, _, _ in op._layout}
+    """Gradient fields computed from theta rather than part of it, cached on
+    the operator (immutable once built)."""
+    d = op.__dict__.get("_derived_names")
+    if d is None:
+        probe = op._fields(np.zeros(op.nparams))
+        d = op.__dict__["_derived_names"] = frozenset(set(probe) - {n for n, _, _ in op._layout})
+    return d
 
 
 def is_float(v) -> bool:

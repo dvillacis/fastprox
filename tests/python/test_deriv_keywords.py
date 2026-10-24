@@ -92,17 +92,18 @@ def test_errors_everywhere(bad):
 
 
 def _spy(monkeypatch):
-    """Records ctx.deriv after each TVIso.vjp."""
+    """Records ctx.deriv after each TVIso vjp (Operator._vjp, which vjp and
+    the wrappers' backwards call)."""
     seen = []
-    real = fp.Operator.vjp
+    real = fp.Operator._vjp
 
-    def vjp(self, ctx, g, **kw):
-        out = real(self, ctx, g, **kw)
+    def _vjp(self, ctx, g, out, tol, *rest):
+        res = real(self, ctx, g, out, tol, *rest)
         if isinstance(self, fp.TVIso):
-            seen.append((kw.get("tol"), ctx.deriv))
-        return out
+            seen.append((tol, ctx.deriv))
+        return res
 
-    monkeypatch.setattr(fp.Operator, "vjp", vjp)
+    monkeypatch.setattr(fp.Operator, "_vjp", _vjp)
     return seen
 
 
