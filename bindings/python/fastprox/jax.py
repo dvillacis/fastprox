@@ -32,12 +32,13 @@ derivative run in callbacks on the CPU.
 from __future__ import annotations
 
 import functools
+from collections import OrderedDict
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import _ACCURACY, IterInfo, _call_tol, _sq_tol, _warn_unconverged
+from . import _ACCURACY, _MAX_ITER, IterInfo, Operator, Spectral, _call_tol, _sq_tol, _warn_unconverged
 from . import _tv_jax as _tvj
 from ._interop import Spec, check_dtype, check_step, is_float, spectral_step_grad, steps
 
@@ -78,16 +79,77 @@ def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params, deriv)
             static[k] = v
     spec = Spec(op, static, names, conj, threads,
                 {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter}, deriv)
+    # The step's sum only when the step can carry a gradient (audit P11).
+    want_gamma = isinstance(step, jax.core.Tracer)
     if spec.spectral:
-        return _spectral(spec, x)(x, jnp.asarray(step, x.dtype), *values)
-    return _function(spec)(x, jnp.asarray(step, x.dtype), *values)
+        if x.ndim < 2:
+            raise ValueError("spectral operators act on matrices: the last two axes")
+        if spec.kind == "eigh" and x.shape[-1] != x.shape[-2]:
+            raise ValueError("kind='eigh' needs square matrices")
+        return _jitted(spec, _spectral, want_gamma)(x, jnp.asarray(step, x.dtype), *values)
+    return _jitted(spec, _function, want_gamma)(x, jnp.asarray(step, x.dtype), *values)
 
 
-def _function(spec):
+# Eager calls traced the custom_vjp and its callbacks on every call: 2.5 ms
+# for a soft threshold of 100 entries (audit P9). A jit of the built function
+# is kept on the operator instance, or for a class in a small LRU keyed on its
+# static arguments, and JAX's own cache retraces it for new shapes and dtypes.
+# Inside a user's jit the inner jit is inlined. Operators are immutable once
+# built, so a key never goes stale.
+_CLASS_CACHE: OrderedDict = OrderedDict()
+_CLASS_CACHE_SIZE = 128
+_CACHE_ATTR = "_fpj_jit"
+
+
+def _jitted(spec, build, want_gamma):
+    key = (build.__name__, spec.spectral, spec.conj, spec.threads, tuple(sorted(spec.call.items())),
+           spec.names, tuple(sorted(spec.deriv.items())), spec.accuracy, want_gamma)
+    if isinstance(spec.op, (Operator, Spectral)):
+        cache = spec.op.__dict__.setdefault(_CACHE_ATTR, {})
+    else:
+        frozen = _freeze(spec.static)
+        if frozen is None:  # an unhashable constant: no cache
+            return build(spec, want_gamma)
+        key = (spec.op, frozen) + key
+        cache = _CLASS_CACHE
+    f = cache.get(key)
+    if f is None:
+        f = cache[key] = jax.jit(build(spec, want_gamma))
+        if cache is _CLASS_CACHE and len(cache) > _CLASS_CACHE_SIZE:
+            cache.popitem(last=False)
+    elif cache is _CLASS_CACHE:
+        cache.move_to_end(key)
+    return f
+
+
+def _freeze(static):
+    """The static arguments as a hashable key, or None when one cannot be."""
+    try:
+        out = tuple(sorted((k, _fz(v)) for k, v in static.items()))
+    except _Unhashable:
+        return None
+    return out
+
+
+class _Unhashable(Exception):
+    pass
+
+
+def _fz(v):
+    if isinstance(v, np.ndarray):
+        return ("nd", v.dtype.str, v.shape, v.tobytes())
+    if isinstance(v, (list, tuple)):
+        return (type(v).__name__,) + tuple(_fz(a) for a in v)
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return (type(v).__name__, v)
+    raise _Unhashable
+
+
+def _function(spec, want_gamma=True):
     def forward(x, step, values):
         def cb(x, step, *values):
             op = spec.build(values)
-            return spec.run(op, np.asarray(x), step)[0]
+            return spec.run(op, np.asarray(x), steps(step), keep=False)[0]  # audit P10
 
         return jax.pure_callback(cb, jax.ShapeDtypeStruct(x.shape, x.dtype), x, step, *values,
                                  vmap_method="sequential")
@@ -104,10 +166,13 @@ def _function(spec):
 
         def cb(x, step, g, *values):
             op = spec.build(values)
-            _, ctx = spec.run(op, np.asarray(x), step)
+            _, ctx = spec.run(op, np.asarray(x), steps(step))
             g = np.asarray(g, x.dtype)
-            gx, grads = op.vjp(ctx, g, **spec.deriv)
-            out = [gx, spec.step_grad(op, ctx, g, grads, np.shape(step)).astype(x.dtype)]
+            per_row = np.size(step) > 1  # its gradient from a jvp, not grads.gamma
+            gx, grads = op._vjp(ctx, g, None, spec.deriv.get("tol"), spec.deriv.get("max_iter", _MAX_ITER),
+                                None, None, 0.0, want_gamma and not per_row, bool(values))
+            gs = spec.step_grad(op, ctx, g, grads, np.shape(step)) if want_gamma else np.zeros(np.shape(step))
+            out = [gx, gs.astype(x.dtype)]
             out += [v.astype(x.dtype) for v in spec.param_grads(op, grads, [np.shape(v) for v in values])]
             return tuple(out)
 
@@ -128,20 +193,16 @@ def _mT(a):
     return jnp.swapaxes(a, -1, -2)
 
 
-def _spectral(spec, x):
+def _spectral(spec, want_gamma=True):
     """The decomposition and the products in JAX, on x's device; the prox of
     the spectrum and the k x k core of the derivative in callbacks on the
-    CPU. The backward recomputes the prox of the spectrum for its structure."""
+    CPU. The backward recomputes the prox of the spectrum for its structure.
+    The shape checks are in _apply; the traced bodies read x's static shape,
+    so one jit serves every shape."""
     eig = spec.kind == "eigh"
-    if x.ndim < 2:
-        raise ValueError("spectral operators act on matrices: the last two axes")
-    if eig and x.shape[-1] != x.shape[-2]:
-        raise ValueError("kind='eigh' needs square matrices")
-    m, n = x.shape[-2:]
-    rect = not eig and m != n
 
-    def prox_s(op, s, step):
-        return op.op.prox(np.ascontiguousarray(s), steps(step), threads=spec.threads, keep=True)
+    def prox_s(op, s, step, keep=True):
+        return op.op.prox(np.ascontiguousarray(s), steps(step), threads=spec.threads, keep=keep)
 
     def forward(x, step, values):
         if eig:
@@ -151,7 +212,7 @@ def _spectral(spec, x):
             u, s, vt = jnp.linalg.svd(x, full_matrices=False)
 
         def cb(s, step, *values):
-            return prox_s(spec.build(values), s, step)[0]
+            return prox_s(spec.build(values), s, step, keep=False)  # audit P10
 
         z = jax.pure_callback(cb, jax.ShapeDtypeStruct(s.shape, s.dtype), s, step, *values,
                               vmap_method="sequential")
@@ -166,6 +227,8 @@ def _spectral(spec, x):
 
     def bwd(res, g):
         u, s, vt, step, values = res
+        m, n = u.shape[-2], vt.shape[-1]
+        rect = not eig and m != n
         if eig:
             g = (g + _mT(g)) / 2
         a = _mT(u) @ g @ _mT(vt)
@@ -247,6 +310,13 @@ def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None,
                       deriv_tol, deriv_max_iter, edge_weights, warn and "fastprox.jax.tv_aniso")
 
 
+# Compiled once (audit P9): eagerly, the solve's loops were traced on every
+# call (70 ms for one 32 x 32 image). iso and the tolerances are static.
+_tv_jit = jax.jit(_tvj.tv, static_argnums=(5, 6, 7, 8, 9))
+_dual_in_jit = jax.jit(_tvj.dual_in, static_argnums=(2,))
+_dual_out_jit = jax.jit(_tvj.dual_out, static_argnums=(2,))
+
+
 def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info, deriv_tol,
                deriv_max_iter, spatial=None, warn=False):
     """warn: the function's name for a ConvergenceWarning, or False."""
@@ -298,13 +368,13 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
         q = jnp.asarray(warm_start, x.dtype)
         if q.shape != (ndim,) + x.shape:
             raise ValueError(f"warm_start must have shape {(ndim,) + x.shape}")
-        u0 = _tvj.dual_in(q.reshape((ndim,) + xb.shape), w, iso)
+        u0 = _dual_in_jit(q.reshape((ndim,) + xb.shape), w, iso)
     if deriv_tol is not None:
         if not deriv_tol > 0:
             raise ValueError("deriv_tol must be > 0 or None")
         deriv_tol = float(deriv_tol)
     sw = None if spatial is None else _spatial(spatial, x, ndim, iso)
-    z, (u, gap, it, conv) = _tvj.tv(xb, gamma, w, u0, sw, iso, float(tol), int(max_iter), deriv_tol,
+    z, (u, gap, it, conv) = _tv_jit(xb, gamma, w, u0, sw, iso, float(tol), int(max_iter), deriv_tol,
                                     int(deriv_max_iter))
     z = z.reshape(x.shape)
     # A report, not a differentiable output: no gradients through it.
@@ -316,7 +386,7 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
                            conv, zerr)
     if not return_info:
         return z
-    dual = _tvj.dual_out(u, w, iso).reshape((ndim,) + x.shape)
+    dual = _dual_out_jit(u, w, iso).reshape((ndim,) + x.shape)
     return z, IterInfo(gap.sum(), it, 0, jnp.all(conv), dual, zerr)
 
 

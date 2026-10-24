@@ -189,7 +189,7 @@ void jvp(const Op &op, const Workspace &ws, const std::optional<InArr> &dx, doub
 }
 
 double vjp(const Op &op, const Workspace &ws, const InArr &g, OutArr &gx,
-           std::optional<OutArr> gparams) {
+           std::optional<OutArr> gparams, bool want_gamma) {
     const fp_array ga = view(g);
     fp_array xa = view(gx);
     fp_array pa{};
@@ -198,7 +198,7 @@ double vjp(const Op &op, const Workspace &ws, const InArr &g, OutArr &gx,
     fp_status s;
     {
         nb::gil_scoped_release release;
-        s = fp_vjp(op.p, ws.p, &ga, &xa, &gg, gparams ? &pa : nullptr);
+        s = fp_vjp(op.p, ws.p, &ga, &xa, want_gamma ? &gg : nullptr, gparams ? &pa : nullptr);
     }
     check(s, "fp_vjp");
     return gg;
@@ -483,7 +483,7 @@ NB_MODULE(_fastprox, m) {
     m.def("workspace", &workspace, "op"_a, "like"_a, "axis"_a, "threads"_a, "keep"_a,
           nb::keep_alive<0, 1>());
     m.def("jvp", &jvp, "op"_a, "ws"_a, "dx"_a.none(), "dgamma"_a, "dparams"_a.none(), "dout"_a);
-    m.def("vjp", &vjp, "op"_a, "ws"_a, "g"_a, "gx"_a, "gparams"_a.none());
+    m.def("vjp", &vjp, "op"_a, "ws"_a, "g"_a, "gx"_a, "gparams"_a.none(), "want_gamma"_a = true);
     m.def("spectral_check", [](const Op &op, int kind) {
         return fp_op_spectral_check(op.p, static_cast<fp_spectral_kind>(kind)) == FP_OK;
     });

@@ -39,8 +39,9 @@ import math
 
 import numpy as np
 import torch
+import torch.autograd.forward_ad as fwAD
 
-from . import _call_tol, _sq_tol, _warn_unconverged
+from . import _MAX_ITER, _call_tol, _sq_tol, _warn_unconverged
 from . import _tv_torch as _tvt
 from ._interop import Spec, check_step, spectral_step_grad, steps
 
@@ -87,6 +88,12 @@ def _apply(op, x, step, conj, axis, threads, tol, ztol, max_iter, params, deriv)
             static[k] = v
     spec = Spec(op, static, names, conj, threads,
                 {"axis": axis, "tol": tol, "ztol": ztol, "max_iter": max_iter}, deriv)
+    # The structure only when a derivative can follow (audit P10): inside
+    # forward grad mode is always off, and ctx.needs_input_grad stays True
+    # under no_grad for an input that requires grad.
+    ts = (x, step, *values) if isinstance(step, torch.Tensor) else (x, *values)
+    spec.keep = (torch.is_grad_enabled() and any(t.requires_grad for t in ts)) \
+        or any(fwAD.unpack_dual(t).tangent is not None for t in ts)
     if spec.spectral:
         return _SpectralProx.apply(spec, x, step, *values)
     return _Prox.apply(spec, x, step, *values)
@@ -104,7 +111,14 @@ def _np_dtype(dt):
 
 
 def _numpy(t):
-    return t.detach().cpu().resolve_conj().resolve_neg().numpy()
+    # Real float tensors only (the dtype checks), so resolve_conj is never
+    # needed; each step only when it applies (0.59 -> 0.36 us, audit P11).
+    t = t.detach()
+    if t.device.type != "cpu":
+        t = t.cpu()
+    if t.is_neg():
+        t = t.resolve_neg()
+    return t.numpy()
 
 
 def _scalar(v):
@@ -134,7 +148,7 @@ class _Prox(torch.autograd.Function):
     def forward(ctx, spec, x, step, *values):
         op = spec.build([_numpy(v) for v in values])
         spec.check_names(op, [k for k, need in zip(spec.names, ctx.needs_input_grad[3:]) if need])
-        z, fctx = spec.run(op, _numpy(x), _step(step))
+        z, fctx = spec.run(op, _numpy(x), _step(step), spec.keep)
         ctx.spec, ctx.op, ctx.fctx = spec, op, fctx
         ctx.step_like = step if isinstance(step, torch.Tensor) else None
         ctx.shapes = [tuple(v.shape) for v in values]
@@ -147,7 +161,14 @@ class _Prox(torch.autograd.Function):
         _first_order_only()
         spec, op = ctx.spec, ctx.op
         gn = _numpy(g)
-        gx, grads = op.vjp(ctx.fctx, gn, **spec.deriv)
+        # Only the sums an input needs (audit P11): a scalar step's gradient is
+        # grads.gamma, a per-row step's comes from a jvp, the parameters' from
+        # grads.
+        sl = ctx.step_like
+        want_gamma = sl is not None and ctx.needs_input_grad[2] and sl.numel() == 1
+        want_params = any(ctx.needs_input_grad[3:])
+        gx, grads = op._vjp(ctx.fctx, gn, None, spec.deriv.get("tol"), spec.deriv.get("max_iter", _MAX_ITER),
+                            None, None, 0.0, want_gamma, want_params)
         dtype, device = ctx.x_like
         out_x = torch.from_numpy(gx).to(device=device, dtype=dtype) if ctx.needs_input_grad[1] else None
         out_step = None
@@ -203,7 +224,10 @@ class _SpectralProx(torch.autograd.Function):
         else:
             u, s, vh = torch.linalg.svd(xd, full_matrices=False)
         sn = np.ascontiguousarray(_numpy(s))
-        z, inner = op.op.prox(sn, _step(step), threads=spec.threads, keep=True)
+        if spec.keep:
+            z, inner = op.op.prox(sn, _step(step), threads=spec.threads, keep=True)
+        else:
+            z, inner = op.op.prox(sn, _step(step), threads=spec.threads), None
         ctx.spec, ctx.op, ctx.u, ctx.vh, ctx.s, ctx.z, ctx.inner = spec, op, u, vh, sn, z, inner
         ctx.step_like = step if isinstance(step, torch.Tensor) else None
         ctx.shapes = [tuple(v.shape) for v in values]

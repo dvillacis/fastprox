@@ -217,9 +217,9 @@ its row to the decisions table when it lands.
 - [x] T3: Isotropic TV: integer divisions in the derivative loops — [spec](docs/audit-2026-10.md#t3)
 - [x] T4: Graph and tree TV: small batches run serially — [spec](docs/audit-2026-10.md#t4)
 - [ ] T8: Anisotropic TV: serial `structure()` — [spec](docs/audit-2026-10.md#t8)
-- [ ] P9: JAX: compile once per operator instead of dispatching eagerly — [spec](docs/audit-2026-10.md#p9)
-- [ ] P10: Keep the derivative structure only when a derivative can follow (PyTorch and JAX forward) — [spec](docs/audit-2026-10.md#p10)
-- [ ] P11: Trim per-call Python overhead — [spec](docs/audit-2026-10.md#p11)
+- [x] P9: JAX: compile once per operator instead of dispatching eagerly — [spec](docs/audit-2026-10.md#p9)
+- [x] P10: Keep the derivative structure only when a derivative can follow (PyTorch and JAX forward) — [spec](docs/audit-2026-10.md#p10)
+- [x] P11: Trim per-call Python overhead — [spec](docs/audit-2026-10.md#p11)
 
 **Second order in PyTorch (1.0.x)**
 

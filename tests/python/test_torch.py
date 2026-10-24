@@ -301,3 +301,39 @@ def test_second_order_raises(name):
     g1, = torch.autograd.grad(loss(xt), xt)
     loss(xt).backward()
     assert torch.equal(xt.grad, g1) and torch.isfinite(g1).all()
+
+
+def test_structure_only_when_a_derivative_can_follow(monkeypatch):
+    # Under no_grad, or for inputs without grad, the forward keeps no
+    # structure (audit P10); the bits are the same.
+    from fastprox import _interop
+    keeps = []
+    real = _interop.Spec.run
+
+    def run(self, op, x, step, keep=True):
+        keeps.append(keep)
+        return real(self, op, x, step, keep)
+
+    monkeypatch.setattr(_interop.Spec, "run", run)
+    x = np.random.default_rng(33).normal(size=(6, 30))
+    op = fp.L1Ball(1.5)
+    ref = op.prox(x, 0.8)
+    xr = _t(x)
+    with torch.no_grad():
+        z = fpt.prox(op, xr, 0.8)
+    assert keeps[-1] is False and z.numpy().tobytes() == ref.tobytes()
+    z = fpt.prox(op, _t(x, grad=False), 0.8)
+    assert keeps[-1] is False and z.numpy().tobytes() == ref.tobytes()
+    z = fpt.prox(op, xr, 0.8)
+    assert keeps[-1] is True
+    z.sum().backward()
+    _, ctx = op.prox(x, 0.8, keep=True)
+    assert xr.grad.numpy().tobytes() == op.vjp(ctx, np.ones_like(x))[0].tobytes()
+    # Forward mode: a dual input keeps the structure, and the tangent is jvp's.
+    import torch.autograd.forward_ad as fwAD
+    dx = np.random.default_rng(34).normal(size=x.shape)
+    with fwAD.dual_level():
+        zt = fpt.prox(op, fwAD.make_dual(_t(x, grad=False), torch.from_numpy(dx)), 0.8)
+        tangent = fwAD.unpack_dual(zt).tangent
+    assert keeps[-1] is True
+    assert tangent.numpy().tobytes() == op.jvp(ctx, dx).tobytes()
