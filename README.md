@@ -49,7 +49,7 @@ pip install fastprox
 The 1.0 release candidate, with the spectral operators and whose C ABI holds
 for every 1.x: `pip install --pre fastprox`. A tagged release can also be
 installed from GitHub,
-`pip install "fastprox @ git+https://github.com/dvillacis/fastprox@v1.0.0rc2"`,
+`pip install "fastprox @ git+https://github.com/dvillacis/fastprox@v1.0.0rc3"`,
 and unreleased work from a commit of master (`@<commit>`); CI builds and tests
 every push to master. Build from a commit, never from a working tree.
 
