@@ -750,6 +750,16 @@ $x_k$. Without gradient errors:
 their group and spectral forms). The bounds above are for convex penalties.
 For these:
 
+- **A minimiser may not exist.** These penalties are bounded, so with a data
+  term that sees only part of the entries the objective is not coercive. On
+  matrix completion of MovieLens ratings (300 × 300, 30% observed) with
+  spectral MCP, the objective kept falling while the iterates grew without
+  bound, for FISTA and for proximal gradient at $0.99/L$ alike: after 16 000
+  FISTA iterations $\lVert W \rVert_F$ was 12 000 and unobserved entries
+  exceeded 2 000, on centred ratings between −2.7 and 1.3. The nuclear norm settled within
+  250 iterations. `bench/repro_u6_spectral_mcp.py` reproduces it. Such a
+  model needs a coercive term as well, for instance a small nuclear or
+  Frobenius norm.
 - **The outer step.** Proximal gradient reaches critical points with a step
   below $1/L$ for a nonconvex penalty: this is PALM (Bolte, Sabach and Teboulle,
   *Math. Program.* 146, 2014) with one block, as presented by Chambolle and

@@ -346,7 +346,25 @@ the 1.0 ABI before it freezes, and need no "since" note.
 
 **Acceptance.** The reproducer is understood and is covered by a test, and the outcome is recorded here.
 
-**Outcome so far (2026-10-24), without the reproducer.** The library behaves correctly on each plausible cause. Two of them do make an outer method diverge, or make a hypergradient blow up, and the docs now say so. Steps 2 and 4 of the plan are done; step 1 is still open.
+**Outcome (2026-10-24).** The library is not at fault. The model has no minimiser, as the report itself said.
+
+- **The reproducer.** The report's project is `bilevel_ml_fastprox`, experiment 8, `experiments/matrix_completion.py`. Its docstring notes that spectral MCP "leaves the singular values above λb unpenalised, so nothing bounds the completed matrix on the unobserved entries and the lower level has no minimiser: FISTA diverged". The setup:
+  - MovieLens 100k, 300 × 300, 26 805 training ratings, centred;
+  - ½ Σ_train (W_ij − R_ij)² + λ g(W);
+  - FISTA with gradient restart at τ = 1/L.
+
+  `bench/repro_u6_spectral_mcp.py` rewrites it independently. With `Spectral(MCP(1, 30))` and λ = 10, objective and ‖W‖_F:
+
+  | iteration | 250 | 1 000 | 4 000 | 8 000 | 16 000 |
+  |---|---|---|---|---|---|
+  | FISTA + restart, τ = 1 | 5418 / 810 | 5374 / 1 569 | 5349 / 4 702 | 5344 / 8 691 | 5342 / 12 340 |
+  | proximal gradient, τ = 0.99 | 5613 / 399 | 5478 / 497 | 5411 / 612 | 5392 / 680 | — |
+
+  The objective falls at every iteration while the iterates grow. Unobserved entries reached 2 170 after 16 000 iterations, on centred ratings between −2.7 and 1.3. The nuclear norm stays at 10 792 / 132.9 from iteration 250 on, for both methods.
+- **Why.** MCP is constant above bλ and the data term is blind to the unobserved entries, so the objective is not coercive. The lowest values lie at ever larger W, so it is not a step-size problem: the safe proximal gradient drifts too, only more slowly.
+- **Small synthetic cases** (20–60 square, 30–60% observed, with and without noise) converge instead. They have enough degrees of freedom to fit the observed entries exactly at finite W, ending at a whole number of saturated MCP penalties. So the suite's tests check the operator, while the bench script carries the reproducer, which needs the 5 MB MovieLens archive.
+
+The checks below were made before the reproducer turned up. They found the operator correct on every plausible cause, and the docs now cover each of them.
 - **Derivative gain.** On the middle piece the JVP is exactly b/(b − γ): 1.5 at b = 3, 11 at 1.1, 1001 at 1.001, with γ = 1. γ ≥ b is refused (`ValueError`). A hypergradient through it is amplified without bound as b falls to γ.
 - **Outer step.** On 50% completion of a rank-4 30 × 25 matrix (L = 1, λ = 0.5, b = 3, 300 iterations):
 
@@ -368,7 +386,7 @@ the 1.0 ABI before it freezes, and need no "since" note.
 - **Docs** (docs/api.md):
   - "Inexact proxes inside outer solvers" gains the step conditions for nonconvex penalties, the prox's step range and the derivative gains of MCP and SCAD;
   - "Spectral operators" gains the behaviour at kinks.
-- **Left.** Whether the report's divergence was one of these needs its script. If it was something else, a fix item follows here.
+- **The docs** also gain the reproducer's lesson under "Inexact proxes inside outer solvers", "A minimiser may not exist": a bounded penalty needs a coercive term when the data term sees only part of the entries.
 
 ---
 
