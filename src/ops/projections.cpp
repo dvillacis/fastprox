@@ -235,11 +235,60 @@ struct L2Ball final : RowOp<L2Ball> {
     // norm exceeds the largest double or is subnormal. The formulas read it
     // through r t / m, (x_i t) / m and <t x, v> / m, which are those of the
     // plain norm, bit for bit, when t = 1.
+    // The sums run in eight lanes in a fixed order (one running sum is a chain
+    // of dependent additions), shared by the prox and the derivatives so that
+    // they agree on whether x is inside.
+    static constexpr int64_t kLanes = 8;
+    static double fold(double *acc) noexcept {
+        for (int64_t h = kLanes / 2; h > 0; h /= 2)
+            for (int64_t j = 0; j < h; ++j) acc[j] += acc[j + h];
+        return acc[0];
+    }
+    template <class T>
+    static double sumsq(const T *x, int64_t n) noexcept {
+        double acc[kLanes] = {};
+        int64_t i = 0;
+        for (; i + kLanes <= n; i += kLanes)
+            for (int64_t j = 0; j < kLanes; ++j) acc[j] += static_cast<double>(x[i + j]) * static_cast<double>(x[i + j]);
+        for (; i < n; ++i) acc[0] += static_cast<double>(x[i]) * static_cast<double>(x[i]);
+        return fold(acc);
+    }
     template <class T, class F>
     static auto with_norm(const T *x, int64_t n, F f) noexcept {
-        double s = 0.0;
-        for (int64_t i = 0; i < n; ++i) s += static_cast<double>(x[i]) * static_cast<double>(x[i]);
-        return fp::with_norm(s, n, [x](int64_t i) { return x[i]; }, f);
+        return fp::with_norm(sumsq(x, n), n, [x](int64_t i) { return x[i]; }, f);
+    }
+    // f(m, t, <t x, v>) in one pass over x and v for the sums; the sum of
+    // squares has the bits of sumsq. When it is out of range the dot is
+    // redone on t x, out of line.
+    template <class T, class F>
+    static void with_norm_dot(const T *x, const T *v, int64_t n, F f) noexcept {
+        double sq[kLanes] = {}, dt[kLanes] = {};
+        int64_t i = 0;
+        for (; i + kLanes <= n; i += kLanes)
+            for (int64_t j = 0; j < kLanes; ++j) {
+                const double xi = static_cast<double>(x[i + j]);
+                sq[j] += xi * xi;
+                dt[j] += xi * static_cast<double>(v[i + j]);
+            }
+        for (; i < n; ++i) {
+            const double xi = static_cast<double>(x[i]);
+            sq[0] += xi * xi;
+            dt[0] += xi * static_cast<double>(v[i]);
+        }
+        const double S = fold(sq), D = fold(dt);
+        if (sumsq_in_range(S)) return f(std::sqrt(S), 1.0, D);
+        with_norm_dot_slow(x, v, n, S, f);
+    }
+    template <class T, class F>
+    FP_COLD static void with_norm_dot_slow(const T *x, const T *v, int64_t n, double S, F f) noexcept {
+        double t;
+        const double m = safe_norm_slow(S, n, [x](int64_t i) { return x[i]; }, t);
+        double acc[kLanes] = {};
+        int64_t i = 0;
+        for (; i + kLanes <= n; i += kLanes)
+            for (int64_t j = 0; j < kLanes; ++j) acc[j] += static_cast<double>(x[i + j]) * t * static_cast<double>(v[i + j]);
+        for (; i < n; ++i) acc[0] += static_cast<double>(x[i]) * t * static_cast<double>(v[i]);
+        f(m, t, fold(acc));
     }
 
     bool has_value() const noexcept override { return true; }
@@ -264,17 +313,16 @@ struct L2Ball final : RowOp<L2Ball> {
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double, double,
              const double *dp, void *) const noexcept {
-        with_norm(x, n, [=](double m, double t) {
+        with_norm_dot(x, dx, n, [=](double m, double t, double ud) {
             if (m <= r * t) {
-                for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
+                if (dz != dx) std::memcpy(dz, dx, static_cast<size_t>(n) * sizeof(T));
                 return;
             }
-            double ud = 0.0;
-            for (int64_t i = 0; i < n; ++i) ud += static_cast<double>(x[i]) * t * static_cast<double>(dx[i]);
-            ud /= m;
-            const double c = r * t / m, dr = dp ? dp[0] : 0.0;
+            const double inv = 1.0 / m;
+            ud *= inv;
+            const double c = r * t * inv, dr = dp ? dp[0] : 0.0;
             for (int64_t i = 0; i < n; ++i) {
-                const double ui = static_cast<double>(x[i]) * t / m;
+                const double ui = static_cast<double>(x[i]) * t * inv;
                 dz[i] = static_cast<T>(c * (static_cast<double>(dx[i]) - ui * ud) + dr * ui);
             }
         });
@@ -282,17 +330,16 @@ struct L2Ball final : RowOp<L2Ball> {
     template <class T>
     void vjp(const T *x, const T *, const uint8_t *, const T *g, T *gx, int64_t n, double,
              double *acc, void *) const noexcept {
-        with_norm(x, n, [=](double m, double t) {
+        with_norm_dot(x, g, n, [=](double m, double t, double ug) {
             if (m <= r * t) {
-                for (int64_t i = 0; i < n; ++i) gx[i] = g[i];
+                if (gx != g) std::memcpy(gx, g, static_cast<size_t>(n) * sizeof(T));
                 return;
             }
-            double ug = 0.0;
-            for (int64_t i = 0; i < n; ++i) ug += static_cast<double>(x[i]) * t * static_cast<double>(g[i]);
-            ug /= m;
-            const double c = r * t / m;
+            const double inv = 1.0 / m;
+            ug *= inv;
+            const double c = r * t * inv;
             for (int64_t i = 0; i < n; ++i)
-                gx[i] = static_cast<T>(c * (static_cast<double>(g[i]) - static_cast<double>(x[i]) * t / m * ug));
+                gx[i] = static_cast<T>(c * (static_cast<double>(g[i]) - static_cast<double>(x[i]) * t * inv * ug));
             acc[0] += ug;
         });
     }
