@@ -48,8 +48,8 @@ outputs:
         - cmake >=3.20
         - ninja
       run_exports:
-        # The minor version may break the ABI before 1.0 (fastprox.h).
-        - ${{ pin_subpackage('libfastprox', upper_bound='x.x') }}
+        # The ABI holds for every 1.x (docs/api.md, "ABI stability").
+        - ${{ pin_subpackage('libfastprox', upper_bound='x') }}
     tests:
       - package_contents:
           include:

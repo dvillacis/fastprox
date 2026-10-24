@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The conda recipe's `libfastprox` exports a pin on the major version (`upper_bound='x'`), instead of the minor, as the ABI now holds for every 1.x.
+
 ## [1.0.0] — 2026-10-24
 
 The first stable release, on PyPI (`pip install fastprox`). The C ABI (`FP_ABI_VERSION` 1, `libfastprox.so.1`) now holds for every 1.x: later releases may add functions, but nothing changes or goes (docs/api.md, "ABI stability"). The `abi` job checks every change against 0.5.0 now, and against 1.0.0 from here on. This release changes no code since 1.0.0rc3. It closes the last feedback item (U6) and moves the PyPI classifier to Production/Stable. For what changed since 0.5, see the three release candidates below.
