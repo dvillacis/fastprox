@@ -47,17 +47,20 @@ struct Geom {
 // gap by c^2. The squares in the stopping target and the gap overflow beyond
 // |d| ~ 1e154 and underflow below ~1e-154. e is 0, and the image is solved
 // as before bit for bit, when max |d| is in [2^-64, 2^65) and when d == 0.
-// Scaling up, the scaled step 2^-e step stays in the step range (step: gamma
-// times the operator's step_scale(), its largest threshold or capacity): a
-// small image with a large step is scaled up only that far, and not at all
-// when the step is already at the top of the range.
-inline int rescale_exponent(const double *d, int64_t N, double step) noexcept {
+// Scaling up, the scaled step 2^-e step and the scaled gamma 2^-e gamma stay
+// in the step range (step: gamma times the operator's step_scale(), its
+// largest threshold or capacity): a small image with a large step is scaled
+// up only that far, and not at all when the step is already at the top of
+// the range. With every weight below 1 the bound is gamma's own: a capacity
+// of 5e-315 let 2^-e gamma overflow to inf (nightly fuzz, tree TV).
+inline int rescale_exponent(const double *d, int64_t N, double gamma, double step) noexcept {
     double m = 0.0;
     for (int64_t i = 0; i < N; ++i) m = std::max(m, std::fabs(d[i]));
     if (!(m > 0.0)) return 0;
     int e = std::ilogb(m);
     if (e >= -64 && e <= 64) return 0;
-    if (e < 0 && step > 0.0) e = std::min(0, std::max(e, std::ilogb(step) + 1 - std::ilogb(kMaxScaledStep)));
+    const double top = std::max(gamma, step);
+    if (e < 0 && top > 0.0) e = std::min(0, std::max(e, std::ilogb(top) + 1 - std::ilogb(kMaxScaledStep)));
     return e;
 }
 

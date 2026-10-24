@@ -26,6 +26,12 @@
 //
 // Kinks: TV(x) = alpha keeps x (inside: identity), as for the other balls.
 //
+// Scale. The projection is positively homogeneous, P_alpha(c x) = c P_{alpha/c}(x),
+// so a row with max |x_i| outside [2^-960, 2^960] is solved as x 2^-k with radius
+// alpha 2^-k and the result scaled back by 2^k (as in hyperplane.cpp): the piece
+// sums of gamma_max and the TV of z overflowed from max |x_i| ~ 5e305 (nightly
+// fuzz, the conjugate at sigma = 1.8e-306).
+//
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "ops/ops.hpp"
@@ -123,13 +129,19 @@ struct TVBall final : RowOp<TVBall> {
         return indicator(s - alpha, value_atol(x, n, tol));
     }
 
+    // The exponent k of the scale 2^-k for a row of magnitude M = max |x_i|, or
+    // 0 when M is in [2^-960, 2^960], where no sum of n < 2^62 terms over- or
+    // underflows. It is 0 for float, whose range lies inside.
+    static int ball_scale(double M) noexcept {
+        if (!(M > 0.0) || (M >= 0x1p-960 && M <= 0x1p960)) return 0;
+        int k;
+        std::frexp(M, &k);
+        return k;
+    }
+
     template <class T>
     int prox(const T *x, T *z, int64_t n, double, void *scr, uint8_t *code) const noexcept {
-        char *base = static_cast<char *>(scr);
-        void *tscr = base;
-        uint8_t *own = reinterpret_cast<uint8_t *>(base + tv_bytes(n));
-        T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
-        uint8_t *c = code ? code : own;
+        uint8_t *c = code ? code : reinterpret_cast<uint8_t *>(static_cast<char *>(scr) + tv_bytes(n));
         if (!all_finite(x, n)) {
             bool nan;
             if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
@@ -137,6 +149,26 @@ struct TVBall final : RowOp<TVBall> {
             std::memset(c, 0, static_cast<size_t>(n));
             return kRowOk;
         }
+        double M = 0.0;
+        for (int64_t i = 0; i < n; ++i) M = std::max(M, std::fabs(static_cast<double>(x[i])));
+        const int k = ball_scale(M);
+        if (k == 0) return solve(x, z, n, alpha, scr, c);
+        T *xs = buffer<T>(scr, n, 2);  // the vjp's accumulators, unused here
+        for (int64_t i = 0; i < n; ++i) xs[i] = static_cast<T>(std::ldexp(static_cast<double>(x[i]), -k));
+        const int r = solve(xs, z, n, std::ldexp(alpha, -k), scr, c);
+        if (c[0] == kInside)  // x itself, not x 2^-k 2^k, which rounds where x 2^-k is subnormal
+            std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+        else
+            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(std::ldexp(static_cast<double>(z[i]), k));
+        return r;
+    }
+
+    // The projection onto the ball of radius alpha (shadowing the member: the
+    // rescaled radius in prox), on a row of moderate scale.
+    template <class T>
+    int solve(const T *x, T *z, int64_t n, double alpha, void *scr, uint8_t *c) const noexcept {
+        void *tscr = scr;
+        T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         if (tv_value(x, n) <= alpha) {
             std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
             std::memset(c, 0, static_cast<size_t>(n));
