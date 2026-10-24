@@ -52,27 +52,74 @@ inline int64_t elem_piece(int64_t numel, int nt) noexcept {
     return std::min(kChunk, std::max(kElemPieceMin, (want + 63) / 64 * 64));
 }
 
-// Per-thread scratch for row operators: four rows of T, then kernel scratch.
-// SIZE_MAX for rows beyond 2^48 entries, whose byte counts (a few hundred
-// bytes per entry at most) could wrap; only stride-0 views reach them.
+// Rows along a strided axis are gathered and scattered in tiles of up to 16
+// rows (audit C8): rows r and r + 1 start one element apart when the last
+// outer dimension has stride 1, so a tile reads b neighbouring elements per
+// step instead of one element per cache line. kTileBytes bounds a tile.
+constexpr size_t kTileBytes = 32 * 1024;
+
+// Per-thread scratch for row operators: four rows of T, kernel scratch, then
+// an input and an output tile. SIZE_MAX for rows beyond 2^48 entries, whose
+// byte counts (a few hundred bytes per entry at most) could wrap; only
+// stride-0 views reach them.
 inline size_t row_thread_bytes(const fp_op &op, int64_t n, size_t itemsize) noexcept {
     if (n > (int64_t{1} << 48)) return SIZE_MAX;
-    return round64(4 * static_cast<size_t>(n) * itemsize) + round64(op.scratch_bytes(n));
+    return round64(4 * static_cast<size_t>(n) * itemsize) + round64(op.scratch_bytes(n)) + 2 * round64(kTileBytes);
 }
 
 template <class T>
 struct RowBuffers {
     T *a, *b, *c, *d;
     void *kernel;
-    RowBuffers(const fp_workspace &ws, int tid, int64_t n) noexcept {
+    T *tin, *tout;  // tiles of kTileBytes
+    RowBuffers(const fp_workspace &ws, const fp_op &op, int tid, int64_t n) noexcept {
         char *base = static_cast<char *>(ws.thread_scratch(tid));
         a = reinterpret_cast<T *>(base);
         b = a + n;
         c = b + n;
         d = c + n;
-        kernel = base + round64(4 * static_cast<size_t>(n) * sizeof(T));
+        char *k = base + round64(4 * static_cast<size_t>(n) * sizeof(T));
+        kernel = k;
+        tin = reinterpret_cast<T *>(k + round64(op.scratch_bytes(n)));
+        tout = reinterpret_cast<T *>(reinterpret_cast<char *>(tin) + round64(kTileBytes));
     }
 };
+
+// Tiles of rows over the last outer dimension of a row plan, for array a:
+// used when the axis is strided in a and the last outer dimension has stride
+// 1 there, with at least 4 rows per tile. Tile t covers rows r0 .. r0 + b - 1
+// of line t / tpl, all of one line, consecutive in canonical order.
+struct Tiling {
+    bool on = false;
+    int64_t B = 1, L = 1, tpl = 1, count = 0;
+    void tile(int64_t t, int64_t &r0, int64_t &b) const noexcept {
+        const int64_t line = t / tpl, j0 = (t % tpl) * B;
+        r0 = line * L + j0;
+        b = std::min(B, L - j0);
+    }
+};
+inline Tiling make_tiling(const RowPlan &p, int a, size_t itemsize) noexcept {
+    Tiling t;
+    if (p.nouter < 1 || p.astride[a] == 1 || p.ostride[a][p.nouter - 1] != 1 || p.n < 1) return t;
+    t.B = std::min<int64_t>(16, static_cast<int64_t>(kTileBytes / (static_cast<size_t>(p.n) * itemsize)));
+    if (t.B < 4) return t;
+    t.L = p.oshape[p.nouter - 1];
+    t.tpl = ceil_div(t.L, t.B);
+    t.count = p.rows / t.L * t.tpl;
+    t.on = true;
+    return t;
+}
+// Whether rows of array a are written tile by tile (the same layout test).
+inline bool tile_layout(const RowPlan &p, int a) noexcept {
+    return p.nouter >= 1 && p.astride[a] != 1 && p.ostride[a][p.nouter - 1] == 1;
+}
+// b rows from src (row k at src + k, entries s apart) into dst (row k at
+// dst + k n), through f.
+template <class T, class F>
+inline void gather_tile(const T *src, int64_t s, int64_t b, int64_t n, T *dst, F &&f) noexcept {
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t k = 0; k < b; ++k) dst[k * n + i] = f(src[i * s + k]);
+}
 
 template <class T>
 inline void gather(const T *src, int64_t s, T *dst, int64_t n) noexcept {
@@ -185,8 +232,73 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
     const bool distinct = op.needs_distinct();
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
     std::atomic<int> err{0};
+    const Tiling tl = make_tiling(p, 0, sizeof(T));
+    if (tl.on) {
+        // Strided rows in tiles (audit C8): the same kernel on the same
+        // contiguous values, row by row, so the same bits. A whole tile is
+        // read before any of it is written, so in place is safe.
+        const bool tile_out = tile_layout(p, 1);
+        parallel_for(nt, tl.count, std::max<int64_t>(1, row_grain(n, p.rows, nt) / tl.B),
+                     [&](int tid, int64_t t0, int64_t t1) {
+            RowBuffers<T> buf(ws, op, tid, n);
+            for (int64_t t = t0; t < t1; ++t) {
+                int64_t r0, b, off[2];
+                tl.tile(t, r0, b);
+                p.offsets(r0, off);
+                const T *x0 = xd + off[0];
+                T *dst = keep ? ws.xs<T>() + r0 * n : buf.tin;
+                if (conj) {
+                    bool ovf = false;
+                    if (sigma < kStagingCheck<T>)
+                        for (int64_t k = 0; k < b && !ovf; ++k) ovf = staging_overflows<T>(x0 + k, sx, n, sigma);
+                    if (ovf) {
+                        err.fetch_or(kRowStepOverflow, std::memory_order_relaxed);
+                        continue;
+                    }
+                    gather_tile(x0, sx, b, n, dst, [&](T v) { return static_cast<T>(static_cast<double>(v) / sigma); });
+                } else {
+                    gather_tile(x0, sx, b, n, dst, [](T v) { return v; });
+                }
+                for (int64_t k = 0; k < b; ++k) {
+                    const int64_t r = r0 + k;
+                    T *res = keep ? ws.zs<T>() + r * n : buf.tout + k * n;
+                    uint8_t *code = keep ? ws.code.data() + r * n : nullptr;
+                    if (int e = op.prox_row(dst + k * n, res, n, steps ? steps->at(r) : gamma, buf.kernel, code))
+                        err.fetch_or(e, std::memory_order_relaxed);
+                }
+                auto res_of = [&](int64_t k) -> const T * {
+                    return keep ? ws.zs<T>() + (r0 + k) * n : buf.tout + k * n;
+                };
+                if (tile_out) {
+                    T *o0 = od + off[1];
+                    for (int64_t i = 0; i < n; ++i)
+                        for (int64_t k = 0; k < b; ++k) {
+                            const T v = res_of(k)[i];
+                            o0[i * so + k] = conj ? static_cast<T>(static_cast<double>(x0[i * sx + k]) -
+                                                                   sigma * static_cast<double>(v))
+                                                  : v;
+                        }
+                } else {
+                    for (int64_t k = 0; k < b; ++k) {
+                        int64_t ok[2];
+                        p.offsets(r0 + k, ok);
+                        T *orow = od + ok[1];
+                        const T *res = res_of(k);
+                        if (conj)
+                            for (int64_t i = 0; i < n; ++i)
+                                orow[i * so] = static_cast<T>(static_cast<double>(x0[i * sx + k]) -
+                                                              sigma * static_cast<double>(res[i]));
+                        else
+                            scatter(res, orow, so, n);
+                    }
+                }
+            }
+        });
+        const int e = err.load();
+        return (e & kRowStepOverflow) ? FP_EPARAM : (e ? FP_EINVAL : FP_OK);
+    }
     parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
-        RowBuffers<T> buf(ws, tid, n);
+        RowBuffers<T> buf(ws, op, tid, n);
         for (int64_t r = r0; r < r1; ++r) {
             int64_t off[2];
             p.offsets(r, off);
@@ -338,8 +450,56 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
     const int64_t sx = p.astride[0], so = p.astride[1];
     const bool alias = dx && dx->data == dout.data;
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
+    const Tiling tl = dxd ? make_tiling(p, 0, sizeof(T)) : Tiling{};
+    if (tl.on) {
+        // dx's rows gathered in tiles (audit C8); each row then as below.
+        const bool tile_out = tile_layout(p, 1);
+        parallel_for(nt, tl.count, std::max<int64_t>(1, row_grain(n, p.rows, nt) / tl.B),
+                     [&](int tid, int64_t t0, int64_t t1) {
+            RowBuffers<T> buf(ws, op, tid, n);
+            for (int64_t t = t0; t < t1; ++t) {
+                int64_t r0, b, off[2];
+                tl.tile(t, r0, b);
+                p.offsets(r0, off);
+                gather_tile(dxd + off[0], sx, b, n, buf.tin, [](T v) { return v; });
+                for (int64_t k = 0; k < b; ++k) {
+                    const int64_t r = r0 + k;
+                    const T *x = ws.xs<T>() + r * n;
+                    const T *z = ws.zs<T>() + r * n;
+                    const uint8_t *code = ws.code.data() + r * n;
+                    const T *dxr = buf.tin + k * n;
+                    T *res = buf.tout + k * n;
+                    if (!conj) {
+                        op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, dparams, buf.kernel);
+                    } else {
+                        for (int64_t i = 0; i < n; ++i)
+                            buf.c[i] = static_cast<T>(static_cast<double>(dxr[i]) / sigma -
+                                                      static_cast<double>(x[i]) * dgamma / sigma);
+                        op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), dparams,
+                                   buf.kernel);
+                        for (int64_t i = 0; i < n; ++i)
+                            res[i] = static_cast<T>(static_cast<double>(dxr[i]) -
+                                                    dgamma * static_cast<double>(z[i]) -
+                                                    sigma * static_cast<double>(buf.d[i]));
+                    }
+                }
+                if (tile_out) {
+                    T *o0 = dd + off[1];
+                    for (int64_t i = 0; i < n; ++i)
+                        for (int64_t k = 0; k < b; ++k) o0[i * so + k] = buf.tout[k * n + i];
+                } else {
+                    for (int64_t k = 0; k < b; ++k) {
+                        int64_t ok[2];
+                        p.offsets(r0 + k, ok);
+                        scatter(buf.tout + k * n, dd + ok[1], so, n);
+                    }
+                }
+            }
+        });
+        return FP_OK;
+    }
     parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
-        RowBuffers<T> buf(ws, tid, n);
+        RowBuffers<T> buf(ws, op, tid, n);
         for (int64_t r = r0; r < r1; ++r) {
             int64_t off[2];
             p.offsets(r, off);
@@ -434,8 +594,65 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
         const int64_t sg = p.astride[0], so = p.astride[1];
         const bool alias = g.data == gx.data;
         if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
+        const Tiling tl = make_tiling(p, 0, sizeof(T));
+        if (tl.on) {
+            // g's rows gathered in tiles (audit C8), cut at the blocks'
+            // boundaries as well as the lines': every block still sums its
+            // rows in ascending order, so the gradients are the same bits.
+            const bool tile_out = tile_layout(p, 1);
+            parallel_for(nt, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
+                RowBuffers<T> buf(ws, op, tid, n);
+                for (int64_t blk = b0; blk < b1; ++blk) {
+                    double *a = acc + blk * W;
+                    const int64_t rb1 = p.rows * (blk + 1) / nb;
+                    for (int64_t r0 = p.rows * blk / nb; r0 < rb1;) {
+                        const int64_t b = std::min({tl.B, tl.L - r0 % tl.L, rb1 - r0});
+                        int64_t off[2];
+                        p.offsets(r0, off);
+                        gather_tile(gd + off[0], sg, b, n, buf.tin, [](T v) { return v; });
+                        for (int64_t k = 0; k < b; ++k) {
+                            const int64_t r = r0 + k;
+                            const T *x = ws.xs<T>() + r * n;
+                            const T *z = ws.zs<T>() + r * n;
+                            const uint8_t *code = ws.code.data() + r * n;
+                            const T *gr = buf.tin + k * n;
+                            T *res = buf.tout + k * n;
+                            if (!conj) {
+                                op.vjp_row(x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
+                            } else {
+                                op.vjp_row(x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
+                                double e = 0.0;
+                                for (int64_t i = 0; i < n; ++i) {
+                                    const double gi = static_cast<double>(gr[i]);
+                                    const double jg = static_cast<double>(buf.d[i]);
+                                    e += -gi * static_cast<double>(z[i]) + jg * static_cast<double>(x[i]);
+                                    res[i] = static_cast<T>(gi - jg);
+                                }
+                                a[P + 1] += e;
+                            }
+                        }
+                        if (tile_out) {
+                            T *o0 = xd + off[1];
+                            for (int64_t i = 0; i < n; ++i)
+                                for (int64_t k = 0; k < b; ++k) o0[i * so + k] = buf.tout[k * n + i];
+                        } else {
+                            for (int64_t k = 0; k < b; ++k) {
+                                int64_t ok[2];
+                                p.offsets(r0 + k, ok);
+                                scatter(buf.tout + k * n, xd + ok[1], so, n);
+                            }
+                        }
+                        r0 += b;
+                    }
+                }
+            });
+            for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
+            for (int64_t b = 0; b < nb; ++b)
+                for (int64_t k = 0; k < W; ++k) tot[k] += acc[b * W + k];
+            return FP_OK;
+        }
         parallel_for(nt, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
-            RowBuffers<T> buf(ws, tid, n);
+            RowBuffers<T> buf(ws, op, tid, n);
             for (int64_t b = b0; b < b1; ++b) {
                 double *a = acc + b * W;
                 const int64_t r0 = p.rows * b / nb, r1 = p.rows * (b + 1) / nb;
