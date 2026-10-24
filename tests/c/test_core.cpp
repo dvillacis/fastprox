@@ -2427,6 +2427,37 @@ static void test_no_allocation() {
         fp_workspace_free(iws);
         fp_op_free(iop);
     }
+    // Isotropic TV's derivative solves threaded inside an image (audit T2): a
+    // single image and a batch of 2 on 4 threads, large enough that the rows,
+    // the region chunks and the region blocks split.
+    for (int wtd = 0; wtd < 2; ++wtd)
+    for (std::vector<int64_t> shape : light() ? std::vector<std::vector<int64_t>>{{96, 96}}
+                                              : std::vector<std::vector<int64_t>>{{256, 192}, {2, 256, 256}}) {
+        const std::vector<int64_t> img(shape.end() - 2, shape.end());
+        const int64_t Ni = img[0] * img[1];
+        Arr pw(img, Vec(static_cast<size_t>(Ni), 0.8));
+        fp_op *iop;
+        if (wtd) CHECK_OK(fp_op_tv_iso_weighted(2, nullptr, &pw.a, &iop));
+        else CHECK_OK(fp_op_tv_iso(2, nullptr, &iop));
+        int64_t N = 1;
+        for (int64_t s : shape) N *= s;
+        Arr ix(shape, randn(N)), iz(shape), ig(shape, randn(N)), igx(shape), iq({2 + (wtd ? Ni : 0)});
+        fp_options io = opts(-1, 4, 1);
+        io.tol = 1e-6;
+        io.max_iter = 100000;
+        fp_workspace *iws;
+        CHECK_OK(fp_workspace_create(iop, &ix.a, &io, &iws));
+        CHECK_OK(fp_prox(iop, 0.3, &ix.a, &iz.a, &io, iws, nullptr));
+        CHECK_OK(fp_jvp(iop, iws, &ix.a, 0.1, nullptr, &igx.a));
+        const long tb = g_allocs.load();
+        for (int k = 0; k < 2; ++k) {
+            CHECK_OK(fp_jvp(iop, iws, &ix.a, 0.1, nullptr, &igx.a));
+            CHECK_OK(fp_vjp(iop, iws, &ig.a, &igx.a, &gg, &iq.a));
+        }
+        CHECK(g_allocs.load() == tb);
+        fp_workspace_free(iws);
+        fp_op_free(iop);
+    }
 
     // Graph TV: a batch of signals on one graph, with weight gradients.
     {

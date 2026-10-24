@@ -213,7 +213,7 @@ its row to the decisions table when it lands.
 - [x] C11: A core section in `bench/profile_kernels.cpp` — [spec](docs/audit-2026-10.md#c11)
 - [x] K6: Lq: Newton stalls near the threshold (speed) — [spec](docs/audit-2026-10.md#k6)
 - [x] K12: L2Ball jvp and vjp: fuse the passes and hoist the division (speed) — [spec](docs/audit-2026-10.md#k12)
-- [ ] T2: Isotropic TV: threaded derivative solves — [spec](docs/audit-2026-10.md#t2)
+- [x] T2: Isotropic TV: threaded derivative solves — [spec](docs/audit-2026-10.md#t2)
 - [x] T3: Isotropic TV: integer divisions in the derivative loops — [spec](docs/audit-2026-10.md#t3)
 - [x] T4: Graph and tree TV: small batches run serially — [spec](docs/audit-2026-10.md#t4)
 - [x] T8: Anisotropic TV: serial `structure()` — [spec](docs/audit-2026-10.md#t8)

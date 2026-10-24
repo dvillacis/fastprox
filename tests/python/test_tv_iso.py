@@ -211,6 +211,33 @@ def test_derivative_bits(name):
     assert got == DERIVATIVE_BITS[name]
 
 
+@pytest.mark.filterwarnings("ignore::fastprox.AccuracyWarning")  # smoothing at tol 1e-8
+@pytest.mark.parametrize("shape,k,weighted,gamma", [((2, 256, 256), 2, False, 0.03), ((256, 256), 2, False, 0.03),
+                                                    ((256, 256), 2, False, 0.3), ((256, 256), 2, True, 0.03),
+                                                    ((12, 48, 64), 3, False, 0.03)])
+def test_derivative_threads(shape, k, weighted, gamma):
+    """The derivative solves run on all the threads inside an image (audit
+    T2): rows, region chunks and region blocks fixed by the image and its
+    regions, so jvp, vjp, their gradients and the solve's report have the
+    same bits for any thread count. The batch of 2 runs its images in
+    parallel on 2 and 3 threads and one at a time on 7 and 15."""
+    x = image(shape, 11)
+    pw = np.random.default_rng(12).uniform(0.5, 1.5, shape[-k:]) if weighted else None
+    op = fp.TVIso(k, pixel_weights=pw)
+    rng = np.random.default_rng(13)
+    dx, g = rng.standard_normal(shape), rng.standard_normal(shape)
+    dp = rng.standard_normal(op.nparams)
+    got = []
+    for t in (1, 2, 3, 7, 15):
+        _, ctx = op.prox(x, gamma, keep=True, tol=1e-8, max_iter=10**5, threads=t)
+        dz = op.jvp(ctx, dx, 0.2, dp)
+        dj = ctx.deriv
+        gx, gr = op.vjp(ctx, g)
+        dv = ctx.deriv
+        got.append((_bits(dz, [dj.residual, dj.iters]), _bits(gx, gr.gamma, gr.params, [dv.residual, dv.iters])))
+    assert all(got_t == got[0] for got_t in got[1:])
+
+
 def test_warm_starts():
     op = fp.TVIso(2)
     x = image((30, 40), 7)
