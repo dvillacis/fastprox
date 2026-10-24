@@ -186,6 +186,38 @@ def test_tv_ball_gradient_in_alpha():
     assert grads.alpha == pytest.approx(fd, rel=1e-6)
 
 
+def test_tv_ball_extreme_scales():
+    # The nightly fuzzer: the conjugate at sigma = 1.8e-306 projects y / sigma,
+    # with entries up to 4.9e307, and the piece sums overflowed: NaN. At
+    # alpha = 0 the projection is the mean, so the conjugate is y - mean(y).
+    y = np.array([-0.00390625, -22, 0, 0, 0, -90, -89.9882812, -89.3515625, -89.3515625])
+    z = fp.TV1DBall(0.0).prox_conj(y, 1.8198309184996924e-306)
+    np.testing.assert_allclose(z, y - y.mean(), rtol=0, atol=1e-13)
+    # P_{c alpha}(c x) = c P_alpha(x), with the same derivatives (dz/dw scales with c).
+    rng = np.random.default_rng(9)
+    x, w = np.cumsum(rng.normal(size=40)), rng.uniform(0.5, 2.0, 39)
+    a = 0.3 * np.sum(w * np.abs(np.diff(x)))
+    dx, g, dp = rng.normal(size=40), rng.normal(size=40), rng.normal(size=40)
+    op1 = fp.TV1DBall(a, w)
+    z1, c1 = op1.prox(x, keep=True)
+    for c in (2.0**1000, 2.0**-1000):
+        op = fp.TV1DBall(a * c, w)
+        zc, cc = op.prox(x * c, keep=True)
+        np.testing.assert_allclose(zc / c, z1, rtol=0, atol=1e-13 * np.abs(x).max())
+        np.testing.assert_allclose(op.jvp(cc, dx), op1.jvp(c1, dx), rtol=1e-12, atol=1e-12)
+        gx, grads = op.vjp(cc, g)
+        gx1, grads1 = op1.vjp(c1, g)
+        np.testing.assert_allclose(gx, gx1, rtol=1e-12, atol=1e-12)
+        assert grads.alpha == pytest.approx(grads1.alpha, rel=1e-12)
+        np.testing.assert_allclose(grads.params[1:] / c, grads1.params[1:], rtol=1e-12, atol=1e-12)
+        jw = op.jvp(cc, np.zeros(40), dparams=np.r_[0.0, dp[1:]])
+        np.testing.assert_allclose(jw / c, op1.jvp(c1, np.zeros(40), dparams=np.r_[0.0, dp[1:]]), rtol=1e-12, atol=1e-12)
+    # Inside the ball the row comes back exactly, even an entry that the
+    # rescaling by 2^-1017 would take below the smallest subnormal.
+    x = np.array([1e306, -1e306, 3e-310, 0.0])
+    np.testing.assert_array_equal(fp.project_tv1d_ball(x, 1e308), x)
+
+
 def test_tv_ball_errors():
     for bad in (lambda: fp.TV1DBall(-1.0), lambda: fp.TV1DBall(np.nan),
                 lambda: fp.TV1DBall(1.0, [-1.0]), lambda: fp.TV1DBall(1.0, np.ones(3)).prox(np.ones(5))):

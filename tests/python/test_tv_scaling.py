@@ -101,3 +101,38 @@ def test_tiny_image_heavy_weights(name):
     z, info = op.solve(x, 1.0, **KW)
     assert info.converged and np.isfinite(info.gap) and info.gap >= 0.0
     np.testing.assert_allclose(z, np.full(shape, x.mean()), rtol=1e-9, atol=0)
+
+
+@pytest.mark.parametrize("name", sorted(OPS) + ["graph", "tree_path", "tree_star"])
+def test_tiny_image_light_weights(name):
+    """The converse (fuzz, 2026-10-24): with every weight below 1, gamma
+    itself bounds the scale-up. A tree TV edge of weight 2.7e-315 let an
+    image of 5e-312 scale up by 2^1034, where gamma = 1.9 overflowed: inf.
+    Here gamma = 16 with weights 2^-1026 on an image near 2^-1021, so the
+    capacities match the image: the result is c times that of the same
+    problem at unit scale, x / c with weights 16 w / c."""
+    c, w, gamma = 2.0**-1021, 2.0**-1026, 16.0
+
+    def make(weight):
+        if name in OPS:
+            cls, k, shape = OPS[name]
+            return cls(k, weights=[weight] * k), shape
+        return (fp.GraphTV if name == "graph" else fp.TreeTV)(16, _edges(name, 16), weights=weight), (16,)
+
+    op, shape = make(w)
+    unit, _ = make(gamma * w / c)
+    x = np.random.default_rng(5).standard_normal(shape) * c
+    z, info = op.solve(x, gamma, **KW)
+    assert info.converged and np.isfinite(info.gap) and info.gap >= 0.0
+    z1, _ = unit.solve(x / c, 1.0, **KW)
+    np.testing.assert_allclose(z / c, z1, rtol=0, atol=1e-9 * np.abs(x / c).max())
+
+
+def test_tree_tv_fuzz_light_edge():
+    # The fuzz input: one edge of weight 2.7e-315 between two zeros, and a
+    # subnormal off the tree. Untouched entries leave the conjugate at 0.
+    x = np.zeros(31)
+    x[18] = float.fromhex("0x1.0000000021p-1034")
+    op = fp.TreeTV(31, [[1, 0]], [2.7461121994333263e-315])
+    np.testing.assert_array_equal(op.prox_conj(x, 0.53125), np.zeros(31))
+    np.testing.assert_array_equal(op.prox(x, 1.0 / 0.53125), x)
