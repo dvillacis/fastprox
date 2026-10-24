@@ -1059,6 +1059,17 @@ inline void finish_deriv(const fp_workspace &ws, int64_t B) noexcept {
     ws.deriv_iters = static_cast<int>(it);
 }
 
+// Whether the derivatives of B images of N entries, with `width` images at a
+// time in parallel, run one image at a time on all the threads instead (an
+// operator with threads_derivatives(), audit T2): for a single image, or when
+// an image's chunks of about kChunk entries give twice the width. The bits do
+// not depend on it.
+inline bool derivs_inside(const fp_op &op, const fp_workspace &ws, int64_t B, int64_t N, int64_t width) noexcept {
+    if (!op.threads_derivatives() || ws.nthreads < 2) return false;
+    const int64_t inner = std::min<int64_t>(ws.nthreads, (N + kChunk - 1) / kChunk);
+    return B == 1 || inner >= 2 * std::min<int64_t>(width, B);
+}
+
 template <class T>
 fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, double dgamma,
                            const double *dparams, const Arr &dout) {
@@ -1071,7 +1082,9 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
     const bool conj = ws.conj;
     const double sigma = ws.sigma;
     const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
-    parallel_for(B >= 2 ? nt : 1, B, 1, [&](int tid, int64_t r0, int64_t r1) {
+    // Images in parallel, or one at a time on all the threads.
+    const bool inside = derivs_inside(op, ws, B, N, nt);
+    parallel_for(inside ? 1 : nt, B, 1, [&](int tid, int64_t r0, int64_t r1) {
         char *set = ws.image_set(tid);
         T *a = reinterpret_cast<T *>(set);
         T *b = a + N;
@@ -1089,6 +1102,7 @@ fp_status image_jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *d
             DerivCtl dc;
             dc.tol = ws.deriv_tol;
             dc.max_iter = ws.deriv_max_iter;
+            dc.nt = inside ? ws.nthreads : 1;
             if (!conj) {
                 op.jvp_image(save, a, b, ishape, ws.step(r), dgamma, dparams, work, dc);
             } else {
@@ -1130,7 +1144,10 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
     const int64_t *ishape = g.shape + p.nlead;
     const bool conj = ws.conj;
     const int nt = std::min<int>(ws.nthreads, std::max(1, ws.image_sets));
-    parallel_for(nb >= 2 ? nt : 1, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
+    // The fixed blocks in parallel, or in block order on this thread with all
+    // the threads inside each image; the accumulators are the same.
+    const bool inside = derivs_inside(op, ws, B, N, std::min<int64_t>(nt, nb));
+    parallel_for(inside ? 1 : nt, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
         char *set = ws.image_set(tid);
         T *a = reinterpret_cast<T *>(set);
         T *b = a + N;
@@ -1146,6 +1163,7 @@ fp_status image_vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g
                 DerivCtl dc;
                 dc.tol = ws.deriv_tol;
                 dc.max_iter = ws.deriv_max_iter;
+                dc.nt = inside ? ws.nthreads : 1;
                 op.vjp_image(save, a, b, ishape, ws.step(r), ac, work, dc);
                 const_cast<double *>(ws.deriv_res.data())[r] = dc.residual;
                 const_cast<double *>(ws.deriv_its.data())[r] = dc.iters;

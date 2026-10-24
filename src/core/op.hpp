@@ -161,6 +161,7 @@ struct DerivCtl {
     int max_iter = 10000;
     double residual = 0.0;
     int iters = 0;
+    int nt = 1;  // threads for one image (operators with threads_derivatives())
 };
 
 }  // namespace fp
@@ -315,6 +316,10 @@ struct fp_op {
     // threads one image at a time only then; graph and tree TV, which run an
     // image on one thread, solve their images in parallel (audit T4).
     virtual bool splits_image() const noexcept { return false; }
+    // Whether jvp_image and vjp_image split one image over DerivCtl::nt
+    // threads (isotropic TV's conjugate gradients, audit T2); the drivers
+    // then run a batch smaller than the thread count one image at a time.
+    virtual bool threads_derivatives() const noexcept { return false; }
     virtual fp_status check_image(const int64_t *) const noexcept { return FP_OK; }
     // Bytes of the working set of one image, of the per-thread scratch used
     // inside one image, and of the structure saved for derivatives.

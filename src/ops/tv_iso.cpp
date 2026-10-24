@@ -113,6 +113,11 @@ constexpr double kDualEta = 1e-9;
 constexpr double kCurvRms = 0.1;
 // The tightest default tolerance of the derivative's conjugate gradients.
 constexpr double kDerivFloor = 1e-10;
+// Fixed blocks of the threaded derivative solves (audit T2): region sums in
+// chunks of kSeg positions of the region-ordered pixel list, region-space
+// dot products in blocks of kRegBlk regions.
+constexpr int64_t kSeg = 4096;
+constexpr int64_t kRegBlk = 4096;
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
 // The derivative loops run over rows b = r n, ..., b + n - 1 (n the last
@@ -120,19 +125,17 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // of its entries or for none, so they test (b / S_a) % L_a once per row
 // rather than per entry and axis. The arithmetic per entry is unchanged.
 //
-// x[p] += c (h[p] - h[p - e_a]), with h taken as 0 before the first entry
-// along a.
-void add_diff(const Geom &g, int a, double c, const double *h, double *x) noexcept {
-    const int64_t N = g.N, n = g.L[g.k - 1], Sa = g.S[a];
-    for (int64_t b = 0; b < N; b += n) {
-        if (a == g.k - 1) {
-            x[b] += c * h[b];
-            for (int64_t j = 1; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - 1]);
-        } else if (g.coord(b, a) > 0) {
-            for (int64_t j = 0; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - Sa]);
-        } else {
-            for (int64_t j = 0; j < n; ++j) x[b + j] += c * h[b + j];
-        }
+// x[p] += c (h[p] - h[p - e_a]) on the row at b, with h taken as 0 before
+// the first entry along a.
+void add_diff_row(const Geom &g, int a, double c, const double *h, double *x, int64_t b) noexcept {
+    const int64_t n = g.L[g.k - 1], Sa = g.S[a];
+    if (a == g.k - 1) {
+        x[b] += c * h[b];
+        for (int64_t j = 1; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - 1]);
+    } else if (g.coord(b, a) > 0) {
+        for (int64_t j = 0; j < n; ++j) x[b + j] += c * (h[b + j] - h[b + j - Sa]);
+    } else {
+        for (int64_t j = 0; j < n; ++j) x[b + j] += c * h[b + j];
     }
 }
 
@@ -163,6 +166,7 @@ struct TVIso final : ImageOp<TVIso> {
     int64_t nparams() const noexcept override { return k + static_cast<int64_t>(alpha.size()); }
     int image_ndim() const noexcept override { return k; }
     bool splits_image() const noexcept override { return true; }  // rows in parallel (row_for)
+    bool threads_derivatives() const noexcept override { return true; }  // audit T2
     fp_status check_image(const int64_t *shape) const noexcept override {
         double n = 1.0;
         for (int a = 0; a < k; ++a) n *= static_cast<double>(shape[a]);
@@ -182,11 +186,15 @@ struct TVIso final : ImageOp<TVIso> {
 
     // prox: d, z (N), u, v (k N), per-row sums; derivatives: the gradient of z
     // and a scratch field (k N each), then eight vectors of N (image, rhs, the
-    // CG vectors and the preconditioner in region space).
+    // CG vectors and the preconditioner in region space), per-row sums, and
+    // the pieces of the region sums and the block partials of the dot
+    // products (2 each per chunk of kSeg).
     size_t image_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N), K = static_cast<size_t>(k);
-        return (std::max((2 + 2 * K) * N, (8 + 2 * K) * N) + static_cast<size_t>(g.rows()) + 8) * sizeof(double);
+        const size_t nch = (N + kSeg - 1) / kSeg;
+        return (std::max((2 + 2 * K) * N, (8 + 2 * K) * N) + static_cast<size_t>(g.rows()) + 4 * nch + 8) *
+               sizeof(double);
     }
     size_t image_thread_bytes(const int64_t *shape) const noexcept override {
         return fiber_thread_bytes(*tv, Geom(k, shape));
@@ -194,12 +202,13 @@ struct TVIso final : ImageOp<TVIso> {
     // Saved: number of regions, the curvature floor mu, the certified relative
     // error of z, the exponent e of the rescaling (z, u and mu are those of
     // the problem solved, 2^-e times the input's; see prox_img), labels, flat
-    // flags, z, u (k blocks), 1/|C|.
+    // flags, z, u (k blocks), 1/|C|, and the regions' pixels: those of C in
+    // increasing order at members[rstart[C]] .. members[rstart[C + 1] - 1].
     static size_t r8(size_t b) noexcept { return (b + 7) / 8 * 8; }
     size_t struct_bytes(const int64_t *shape) const noexcept override {
         const Geom g(k, shape);
         const size_t N = static_cast<size_t>(g.N);
-        return 32 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8;
+        return 32 + r8(4 * N) + r8(N) + (2 + static_cast<size_t>(k)) * N * 8 + r8(4 * N) + r8(4 * (N + 1));
     }
     struct View {
         int64_t *ncomp, *ex;
@@ -207,6 +216,7 @@ struct TVIso final : ImageOp<TVIso> {
         int32_t *label;
         uint8_t *flat;
         double *z, *u, *inv;
+        int32_t *members, *rstart;
     };
     View view(char *s, int64_t N) const noexcept {
         View v;
@@ -220,6 +230,8 @@ struct TVIso final : ImageOp<TVIso> {
         v.z = reinterpret_cast<double *>(s + 32 + r8(4 * n) + r8(n));
         v.u = v.z + N;
         v.inv = v.u + k * N;
+        v.members = reinterpret_cast<int32_t *>(v.inv + N);
+        v.rstart = v.members + r8(4 * n) / 4;
         return v;
     }
 
@@ -597,6 +609,16 @@ struct TVIso final : ImageOp<TVIso> {
         for (int64_t i = 0; i < N; ++i) s.inv[s.label[i]] += 1.0;
         for (int64_t C = 0; C < nc; ++C) s.inv[C] = 1.0 / s.inv[C];
         *s.ncomp = nc;
+        // The regions' pixels by a counting sort: rstart[C + 1] counts C, its
+        // prefix sums start the lists, and filling in index order advances
+        // rstart[C] to the start of C + 1, which the shift undoes.
+        int32_t *rs = s.rstart;
+        std::fill(rs, rs + nc + 1, 0);
+        for (int64_t i = 0; i < N; ++i) ++rs[s.label[i] + 1];
+        for (int64_t C = 0; C < nc; ++C) rs[C + 1] += rs[C];
+        for (int64_t i = 0; i < N; ++i) s.members[rs[s.label[i]]++] = static_cast<int32_t>(i);
+        for (int64_t C = nc; C > 0; --C) rs[C] = rs[C - 1];
+        rs[0] = 0;
     }
 
     // ---- kinks (since 0.3) -----------------------------------------------------------
@@ -632,6 +654,12 @@ struct TVIso final : ImageOp<TVIso> {
 
     // ---- derivatives ----------------------------------------------------------------
 
+    // Threads (audit T2): the pixel passes run by rows, the region sums over
+    // fixed chunks of the region-ordered pixel list, and the dot products in
+    // fixed blocks of regions and of rows, so that the bits do not depend on
+    // the thread count; an image of at most one chunk, block and row block
+    // (64^2 and below) gives the bits of a single pass. jacobi stays serial
+    // (one apply's worth, once per solve).
     struct Sys {
         const TVIso &op;
         const Geom &g;
@@ -643,42 +671,136 @@ struct TVIso final : ImageOp<TVIso> {
         double *pix;  // N
         double *hbuf; // k N scratch
         int64_t nc;
+        int nt;        // threads
+        double *part;  // rows() partial sums
+        double *piece; // 2 per chunk of kSeg: the region pieces at its ends
+        double *rpart; // 2 per block of kRegBlk regions
 
         // The radius gamma alpha_p of pixel p.
         double r(int64_t p) const noexcept { return radius(gamma, alpha, p, kInf); }
-        // y_p = (G x)_p, the scaled forward differences of the image x, by rows
-        // (see add_diff).
-        void grad(const double *x, double *y) const {
+        // f(b) for the row at b = r n of every row r, in parallel.
+        template <class F>
+        void rows(F &&f) const {
+            const int64_t n = g.L[op.k - 1];
+            parallel_for(nt, g.rows(), std::max<int64_t>(1, kChunk / n), [&](int, int64_t r0, int64_t r1) {
+                for (int64_t r = r0; r < r1; ++r) f(r * n);
+            });
+        }
+        // The sum of f(b, t) (adding the row at b's terms to t, in order) over
+        // the rows, in fixed blocks of about kChunk entries added in order.
+        template <class F>
+        double row_total(F &&f) const {
+            const int64_t n = g.L[op.k - 1], R = g.rows(), rb = std::max<int64_t>(1, kChunk / n);
+            const int64_t nb = (R + rb - 1) / rb;
+            parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
+                for (int64_t blk = b0; blk < b1; ++blk) {
+                    double t = 0.0;
+                    for (int64_t r = blk * rb; r < std::min(R, (blk + 1) * rb); ++r) f(r * n, t);
+                    part[blk] = t;
+                }
+            });
+            double t = 0.0;
+            for (int64_t blk = 0; blk < nb; ++blk) t += part[blk];
+            return t;
+        }
+        // f(C0, C1) over the fixed blocks of regions, in parallel.
+        template <class F>
+        void regions(F &&f) const {
+            const int64_t nb = (nc + kRegBlk - 1) / kRegBlk;
+            parallel_for(nt, nb, std::max<int64_t>(1, kChunk / kRegBlk), [&](int, int64_t b0, int64_t b1) {
+                f(b0 * kRegBlk, std::min(nc, b1 * kRegBlk));
+            });
+        }
+        // The sums of f(C, t0, t1) (adding region C's terms to t0 and t1) over
+        // the regions, in the fixed blocks added in order.
+        template <class F>
+        void region_totals(double &s0, double &s1, F &&f) const {
+            const int64_t nb = (nc + kRegBlk - 1) / kRegBlk;
+            parallel_for(nt, nb, std::max<int64_t>(1, kChunk / kRegBlk), [&](int, int64_t b0, int64_t b1) {
+                for (int64_t blk = b0; blk < b1; ++blk) {
+                    double t0 = 0.0, t1 = 0.0;
+                    for (int64_t C = blk * kRegBlk; C < std::min(nc, (blk + 1) * kRegBlk); ++C) f(C, t0, t1);
+                    rpart[2 * blk] = t0;
+                    rpart[2 * blk + 1] = t1;
+                }
+            });
+            s0 = s1 = 0.0;
+            for (int64_t blk = 0; blk < nb; ++blk) {
+                s0 += rpart[2 * blk];
+                s1 += rpart[2 * blk + 1];
+            }
+        }
+        // out[C] = the sum of v over the pixels of C (minus it with Neg), in
+        // their order: a region inside one chunk of kSeg positions is summed
+        // by that chunk's thread as one loop did; one cut by chunk boundaries
+        // as a piece per chunk, the pieces then added in chunk order.
+        template <bool Neg>
+        void region_sum(const double *v, double *out) const {
+            const int64_t N = g.N, nch = (N + kSeg - 1) / kSeg;
+            const int32_t *rs = s.rstart, *mem = s.members, *lab = s.label;
+            parallel_for(nt, nch, std::max<int64_t>(1, kChunk / kSeg), [&](int, int64_t j0, int64_t j1) {
+                for (int64_t j = j0; j < j1; ++j) {
+                    const int64_t lo = j * kSeg, hi = std::min(N, lo + kSeg);
+                    for (int64_t C = lab[mem[lo]], m = lo; m < hi; ++C) {
+                        const int64_t end = std::min<int64_t>(rs[C + 1], hi);
+                        double t = 0.0;
+                        for (; m < end; ++m) {
+                            if constexpr (Neg) t -= v[mem[m]];
+                            else t += v[mem[m]];
+                        }
+                        if (rs[C] >= lo && rs[C + 1] <= hi) out[C] = t;
+                        else piece[2 * j + (rs[C] < lo ? 0 : 1)] = t;  // continued from before / on after
+                    }
+                }
+            });
+            double run = 0.0;  // the region open across chunks
+            for (int64_t j = 0; j < nch; ++j) {
+                const int64_t lo = j * kSeg, hi = std::min(N, lo + kSeg);
+                const int64_t C = lab[mem[lo]];
+                if (rs[C] < lo) {
+                    run += piece[2 * j];
+                    if (rs[C + 1] > hi) continue;  // the whole chunk, and on
+                    out[C] = run;
+                }
+                const int64_t Ct = lab[mem[hi - 1]];
+                if (rs[Ct] >= lo && rs[Ct + 1] > hi) run = piece[2 * j + 1];
+            }
+        }
+        // y_p = (G x)_p, the scaled forward differences of the image x, on the
+        // row at b (see add_diff_row).
+        void grad_row(const double *x, double *y, int64_t b) const {
             const int64_t N = g.N, n = g.L[op.k - 1];
             for (int a = 0; a < op.k; ++a) {
                 double *ya = y + a * N;
                 const double wv = wa[a];
                 if (wv == 0.0) {
-                    std::fill(ya, ya + N, 0.0);
+                    std::fill(ya + b, ya + b + n, 0.0);
                     continue;
                 }
                 const int64_t Sa = g.S[a];
-                for (int64_t b = 0; b < N; b += n) {
-                    if (a == op.k - 1) {
-                        for (int64_t j = 0; j + 1 < n; ++j) ya[b + j] = wv * (x[b + j + 1] - x[b + j]);
-                        ya[b + n - 1] = 0.0;
-                    } else if (g.has_next(b, a)) {
-                        for (int64_t j = 0; j < n; ++j) ya[b + j] = wv * (x[b + j + Sa] - x[b + j]);
-                    } else {
-                        std::fill(ya + b, ya + b + n, 0.0);
-                    }
+                if (a == op.k - 1) {
+                    for (int64_t j = 0; j + 1 < n; ++j) ya[b + j] = wv * (x[b + j + 1] - x[b + j]);
+                    ya[b + n - 1] = 0.0;
+                } else if (g.has_next(b, a)) {
+                    for (int64_t j = 0; j < n; ++j) ya[b + j] = wv * (x[b + j + Sa] - x[b + j]);
+                } else {
+                    std::fill(ya + b, ya + b + n, 0.0);
                 }
             }
         }
-        // x -= G^T h (h zero past the ends), i.e. x += sum_a w_a (h_a[p] - h_a[p - e_a]).
-        void sub_gradT(const double *h, double *x) const {
-            for (int a = 0; a < op.k; ++a)
-                if (wa[a] != 0.0) add_diff(g, a, wa[a], h + a * g.N, x);
+        void grad(const double *x, double *y) const {
+            rows([&](int64_t b) { grad_row(x, y, b); });
         }
-        // H_p y_p on non-flat entries, 0 on flat ones (in place).
-        void hess(double *y) const {
-            const int64_t N = g.N;
-            for (int64_t p = 0; p < N; ++p) {
+        // x -= G^T h (h zero past the ends), i.e. x += sum_a w_a (h_a[p] - h_a[p - e_a]),
+        // on the row at b.
+        void sub_gradT_row(const double *h, double *x, int64_t b) const {
+            for (int a = 0; a < op.k; ++a)
+                if (wa[a] != 0.0) add_diff_row(g, a, wa[a], h + a * g.N, x, b);
+        }
+        // H_p y_p on non-flat entries, 0 on flat ones (in place), on the row at b.
+        void hess_row(double *y, int64_t b) const {
+            const int64_t N = g.N, n = g.L[op.k - 1];
+            for (int64_t p = b; p < b + n; ++p) {
                 if (s.flat[p]) {
                     for (int a = 0; a < op.k; ++a) y[a * N + p] = 0.0;
                     continue;
@@ -693,6 +815,9 @@ struct TVIso final : ImageOp<TVIso> {
                     y[a * N + p] = h * (y[a * N + p] - na * dot / nr);
                 }
             }
+        }
+        void hess(double *y) const {
+            rows([&](int64_t b) { hess_row(y, b); });
         }
         // 1 / diag(M^T (I + G^T H G) M): |C| plus, for every non-flat entry p,
         // h^T H_p h with h = (G 1_C)_p, which is nonzero only for the regions of
@@ -734,15 +859,19 @@ struct TVIso final : ImageOp<TVIso> {
         }
         // out = M^T (I + G^T H G) M c (component space).
         void apply(const double *cv, double *out) const {
-            const int64_t N = g.N;
-            for (int64_t p = 0; p < N; ++p) pix[p] = cv[s.label[p]];
-            grad(pix, hbuf);
-            hess(hbuf);
+            rows([&](int64_t b) {
+                for (int64_t p = b; p < b + g.L[op.k - 1]; ++p) pix[p] = cv[s.label[p]];
+            });
+            rows([&](int64_t b) {
+                grad_row(pix, hbuf, b);
+                hess_row(hbuf, b);
+            });
             // pix + G^T H G pix: G^T h = -sum_a w_a (h_a[p] - h_a[p - e_a]).
-            for (int64_t p = 0; p < N; ++p) pix[p] = -pix[p];
-            sub_gradT(hbuf, pix);
-            std::fill(out, out + nc, 0.0);
-            for (int64_t p = 0; p < N; ++p) out[s.label[p]] -= pix[p];
+            rows([&](int64_t b) {
+                for (int64_t p = b; p < b + g.L[op.k - 1]; ++p) pix[p] = -pix[p];
+                sub_gradT_row(hbuf, pix, b);
+            });
+            region_sum<true>(pix, out);
         }
     };
 
@@ -752,41 +881,42 @@ struct TVIso final : ImageOp<TVIso> {
     // tolerance of 0 stops at the certified relative error of z.
     static void cg(const Sys &S, const double *b, double *x, double *r, double *pv, double *qv, double *dinv,
                    DerivCtl &dc) {
-        const int64_t nc = S.nc;
+        const double *inv = S.s.inv;
         S.jacobi(dinv);
-        double bn = 0.0;
-        for (int64_t C = 0; C < nc; ++C) bn += b[C] * b[C] * S.s.inv[C];
-        std::fill(x, x + nc, 0.0);
+        double bn = 0.0, rz = 0.0, unused = 0.0;
+        S.region_totals(bn, unused, [&](int64_t C, double &t, double &) { t += b[C] * b[C] * inv[C]; });
+        S.regions([&](int64_t C0, int64_t C1) { std::fill(x + C0, x + C1, 0.0); });
         if (bn == 0.0) {
             dc.residual = 0.0;
             dc.iters = 0;
             return;
         }
-        std::memcpy(r, b, static_cast<size_t>(nc) * sizeof(double));
-        double rz = 0.0;
-        for (int64_t C = 0; C < nc; ++C) {
+        S.region_totals(rz, unused, [&](int64_t C, double &t, double &) {
+            r[C] = b[C];
             pv[C] = r[C] * dinv[C];
-            rz += r[C] * pv[C];
-        }
+            t += r[C] * pv[C];
+        });
         const double tol = dc.tol > 0.0 ? dc.tol : std::max(kDerivFloor, *S.s.rel);
         int it = 0;
         double res = 1.0;
         while (res > tol && it < dc.max_iter) {
             S.apply(pv, qv);
             double pq = 0.0;
-            for (int64_t C = 0; C < nc; ++C) pq += pv[C] * qv[C];
+            S.region_totals(pq, unused, [&](int64_t C, double &t, double &) { t += pv[C] * qv[C]; });
             if (!(pq > 0.0)) break;
             const double alpha = rz / pq;
             double rzn = 0.0, rn = 0.0;
-            for (int64_t C = 0; C < nc; ++C) {
+            S.region_totals(rzn, rn, [&](int64_t C, double &t0, double &t1) {
                 x[C] += alpha * pv[C];
                 r[C] -= alpha * qv[C];
-                rzn += r[C] * r[C] * dinv[C];
-                rn += r[C] * r[C] * S.s.inv[C];
-            }
+                t0 += r[C] * r[C] * dinv[C];
+                t1 += r[C] * r[C] * inv[C];
+            });
             const double beta = rzn / rz;
             rz = rzn;
-            for (int64_t C = 0; C < nc; ++C) pv[C] = r[C] * dinv[C] + beta * pv[C];
+            S.regions([&](int64_t C0, int64_t C1) {
+                for (int64_t C = C0; C < C1; ++C) pv[C] = r[C] * dinv[C] + beta * pv[C];
+            });
             ++it;
             res = std::sqrt(rn / bn);
         }
@@ -794,13 +924,17 @@ struct TVIso final : ImageOp<TVIso> {
         dc.iters = it;
     }
 
-    Sys system(const char *save, const Geom &g, double gamma, char *work) const {
-        Sys S{*this, g, view(const_cast<char *>(save), g.N), gamma, pixel_weights(), {0, 0, 0}, nullptr, nullptr, nullptr, 0};
+    Sys system(const char *save, const Geom &g, double gamma, char *work, int nt) const {
+        Sys S{*this, g, view(const_cast<char *>(save), g.N), gamma, pixel_weights(), {0, 0, 0}, nullptr, nullptr,
+              nullptr, 0, std::max(1, nt), nullptr, nullptr, nullptr};
         for (int a = 0; a < k; ++a) S.wa[a] = (gamma > 0.0 && w[a] > 0.0 && g.L[a] > 1) ? w[a] : 0.0;
         double *base = reinterpret_cast<double *>(work);
         S.gz = base;
         S.hbuf = base + k * g.N;
         S.pix = base + 2 * k * g.N;
+        S.part = base + (2 * k + 8) * g.N;
+        S.piece = S.part + g.rows();
+        S.rpart = S.piece + 2 * ((g.N + kSeg - 1) / kSeg);
         S.nc = *S.s.ncomp;
         S.grad(S.s.z, S.gz);
         return S;
@@ -810,68 +944,71 @@ struct TVIso final : ImageOp<TVIso> {
     void jvp_img(const char *save, const T *dx, T *dz, const int64_t *shape, double gamma, double dgamma,
                  const double *dparams, char *work, DerivCtl &dc) const noexcept {
         const Geom g(k, shape);
-        const int64_t N = g.N;
+        const int64_t N = g.N, n = g.L[k - 1];
         // At the solved scale (prox_img): z = 2^e zh(2^-e x, 2^-e gamma, theta),
         // so the derivatives in x and gamma are zh's, and theta's carry 2^e.
         const int e = static_cast<int>(*view(const_cast<char *>(save), N).ex);
         const double sc = std::ldexp(1.0, e);
         gamma = std::ldexp(gamma, -e);
-        Sys S = system(save, g, gamma, work);
+        Sys S = system(save, g, gamma, work, dc.nt);
         double *rhs = S.pix + N, *cb = rhs + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
         // rhs = dx + sum_a dw_a (u_a[p] - u_a[p - e_a]) - G_A^T c_A,
         // c_p = H_p (dW D z)_p + dr_p n_p on non-flat entries, with
         // dr_p = dgamma alpha_p + gamma dalpha_p (dalpha_p = dparams[k + p]).
-        for (int64_t p = 0; p < N; ++p) rhs[p] = static_cast<double>(dx[p]);
-        if (dparams) {
-            for (int a = 0; a < k; ++a) {
-                if (dparams[a] == 0.0 || g.L[a] == 1) continue;
-                const double *ua = S.s.u + a * N;
-                add_diff(g, a, sc * dparams[a], ua, rhs);
-            }
-        }
         double *cA = S.hbuf;
-        for (int a = 0; a < k; ++a) {
-            double *ca = cA + a * N;
-            for (int64_t p = 0; p < N; ++p) {
-                const double wd = S.wa[a] != 0.0 ? S.gz[a * N + p] / S.wa[a] : 0.0;  // (D_a z)_p
-                ca[p] = (dparams && S.wa[a] != 0.0) ? sc * dparams[a] * wd : 0.0;
+        S.rows([&](int64_t b) {
+            for (int64_t p = b; p < b + n; ++p) rhs[p] = static_cast<double>(dx[p]);
+            if (dparams)
+                for (int a = 0; a < k; ++a)
+                    if (dparams[a] != 0.0 && g.L[a] > 1) add_diff_row(g, a, sc * dparams[a], S.s.u + a * N, rhs, b);
+            for (int a = 0; a < k; ++a) {
+                double *ca = cA + a * N;
+                for (int64_t p = b; p < b + n; ++p) {
+                    const double wd = S.wa[a] != 0.0 ? S.gz[a * N + p] / S.wa[a] : 0.0;  // (D_a z)_p
+                    ca[p] = (dparams && S.wa[a] != 0.0) ? sc * dparams[a] * wd : 0.0;
+                }
             }
-        }
-        S.hess(cA);  // H (dW D z)
-        for (int64_t p = 0; p < N; ++p) {
-            if (S.s.flat[p]) continue;
-            double nn = 0.0;
-            for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
-            const double nr = std::sqrt(nn);
-            double dr = dgamma;
-            if (S.alpha) dr = dgamma * S.alpha[p] + (dparams ? gamma * (sc * dparams[k + p]) : 0.0);
-            for (int a = 0; a < k; ++a) cA[a * N + p] += dr * S.gz[a * N + p] / nr;
-        }
-        S.sub_gradT(cA, rhs);  // rhs -= G^T c
-        std::fill(cb, cb + S.nc, 0.0);
-        for (int64_t p = 0; p < N; ++p) cb[S.s.label[p]] += rhs[p];
+            S.hess_row(cA, b);  // H (dW D z)
+            for (int64_t p = b; p < b + n; ++p) {
+                if (S.s.flat[p]) continue;
+                double nn = 0.0;
+                for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
+                const double nr = std::sqrt(nn);
+                double dr = dgamma;
+                if (S.alpha) dr = dgamma * S.alpha[p] + (dparams ? gamma * (sc * dparams[k + p]) : 0.0);
+                for (int a = 0; a < k; ++a) cA[a * N + p] += dr * S.gz[a * N + p] / nr;
+            }
+        });
+        S.rows([&](int64_t b) { S.sub_gradT_row(cA, rhs, b); });  // rhs -= G^T c
+        S.region_sum<false>(rhs, cb);
         cg(S, cb, x, r, pv, q2, dg, dc);
-        for (int64_t p = 0; p < N; ++p) dz[p] = static_cast<T>(x[S.s.label[p]]);
+        S.rows([&](int64_t b) {
+            for (int64_t p = b; p < b + n; ++p) dz[p] = static_cast<T>(x[S.s.label[p]]);
+        });
     }
 
     template <class T>
     void vjp_img(const char *save, const T *gin, T *gx, const int64_t *shape, double gamma, double *acc,
                  char *work, DerivCtl &dc) const noexcept {
         const Geom g(k, shape);
-        const int64_t N = g.N;
+        const int64_t N = g.N, n = g.L[k - 1];
         const int e = static_cast<int>(*view(const_cast<char *>(save), N).ex);  // as in jvp_img
         const double sc = std::ldexp(1.0, e);
         gamma = std::ldexp(gamma, -e);
-        Sys S = system(save, g, gamma, work);
+        Sys S = system(save, g, gamma, work, dc.nt);
         double *cb = S.pix + N, *x = cb + N, *r = x + N, *pv = r + N, *q2 = pv + N, *dg = q2 + N;
-        std::fill(cb, cb + S.nc, 0.0);
-        for (int64_t p = 0; p < N; ++p) cb[S.s.label[p]] += static_cast<double>(gin[p]);
+        S.rows([&](int64_t b) {
+            for (int64_t p = b; p < b + n; ++p) S.pix[p] = static_cast<double>(gin[p]);
+        });
+        S.region_sum<false>(S.pix, cb);
         cg(S, cb, x, r, pv, q2, dg, dc);
         double *vpix = S.pix;
-        for (int64_t p = 0; p < N; ++p) {
-            vpix[p] = x[S.s.label[p]];
-            gx[p] = static_cast<T>(vpix[p]);
-        }
+        S.rows([&](int64_t b) {
+            for (int64_t p = b; p < b + n; ++p) {
+                vpix[p] = x[S.s.label[p]];
+                gx[p] = static_cast<T>(vpix[p]);
+            }
+        });
         // Parameter gradients from v = J^T g:
         //   d/dw_a:     -<D_a v, u_a> - sum_A [H_p (G v)_p]_a (D_a z)_p
         //   d/dgamma:   -sum_A alpha_p <(G v)_p, n_p>
@@ -882,39 +1019,40 @@ struct TVIso final : ImageOp<TVIso> {
         for (int a = 0; a < k; ++a) {
             if (g.L[a] == 1) continue;
             const double *ua = S.s.u + a * N;
-            const int64_t n = g.L[k - 1], Sa = g.S[a];
-            double t = 0.0;
-            for (int64_t b = 0; b < N; b += n) {  // by rows, in the order of the entries
+            const int64_t Sa = g.S[a];
+            const double t = S.row_total([&](int64_t b, double &sum) {
                 if (a == k - 1) {
-                    for (int64_t j = 0; j + 1 < n; ++j) t += (vpix[b + j + 1] - vpix[b + j]) * ua[b + j];
+                    for (int64_t j = 0; j + 1 < n; ++j) sum += (vpix[b + j + 1] - vpix[b + j]) * ua[b + j];
                 } else if (g.has_next(b, a)) {
-                    for (int64_t j = 0; j < n; ++j) t += (vpix[b + j + Sa] - vpix[b + j]) * ua[b + j];
+                    for (int64_t j = 0; j < n; ++j) sum += (vpix[b + j + Sa] - vpix[b + j]) * ua[b + j];
                 }
-            }
+            });
             acc[a] -= sc * t;
         }
-        double ggam = 0.0;
-        for (int64_t p = 0; p < N; ++p) {
-            if (S.s.flat[p]) continue;
-            double nn = 0.0;
-            for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
-            const double nr = std::sqrt(nn);
-            double t = 0.0;
-            for (int a = 0; a < k; ++a) t += gv[a * N + p] * S.gz[a * N + p] / nr;
-            if (S.alpha) {
-                ggam += S.alpha[p] * t;
-                acc[k + p] -= sc * (gamma * t);
-            } else {
-                ggam += t;
+        const double ggam = S.row_total([&](int64_t b, double &sum) {
+            for (int64_t p = b; p < b + n; ++p) {
+                if (S.s.flat[p]) continue;
+                double nn = 0.0;
+                for (int a = 0; a < k; ++a) nn += S.gz[a * N + p] * S.gz[a * N + p];
+                const double nr = std::sqrt(nn);
+                double t = 0.0;
+                for (int a = 0; a < k; ++a) t += gv[a * N + p] * S.gz[a * N + p] / nr;
+                if (S.alpha) {
+                    sum += S.alpha[p] * t;
+                    acc[k + p] -= sc * (gamma * t);
+                } else {
+                    sum += t;
+                }
             }
-        }
+        });
         acc[P] -= ggam;
         S.hess(gv);  // H G v
         for (int a = 0; a < k; ++a) {
             if (S.wa[a] == 0.0) continue;
-            double t = 0.0;
-            for (int64_t p = 0; p < N; ++p)
-                if (!S.s.flat[p]) t += gv[a * N + p] * (S.gz[a * N + p] / S.wa[a]);
+            const double t = S.row_total([&](int64_t b, double &sum) {
+                for (int64_t p = b; p < b + n; ++p)
+                    if (!S.s.flat[p]) sum += gv[a * N + p] * (S.gz[a * N + p] / S.wa[a]);
+            });
             acc[a] -= sc * t;
         }
     }
