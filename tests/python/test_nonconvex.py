@@ -95,6 +95,26 @@ def test_closed_forms_match_newton():
         np.testing.assert_allclose(z[on], zn[on], rtol=1e-12, atol=0)
 
 
+def test_lq_near_threshold():
+    # Just above tau the root is far below x and h's rounding floor exceeds
+    # Newton's relative stopping test; the iterates stop at that floor.
+    rng = np.random.default_rng(7)
+    lam, gamma = 0.7, 1.3
+    lt = lam * gamma
+    eps = np.finfo(float).eps
+    for q in (0.3, 0.9, 0.99, 0.999):
+        beta = (2 * lt * (1 - q)) ** (1 / (2 - q))
+        tau = beta + lt * q * beta ** (q - 1)
+        a = tau * (1 + 10.0 ** rng.uniform(-12, -3, 4000))
+        x = np.where(rng.random(a.size) < 0.5, -a, a)
+        z = fp.lq(x, lam, q, gamma)
+        assert np.all(np.sign(z) == np.sign(x))
+        y = np.abs(z)
+        assert np.all(y >= beta)
+        h = y + lt * q * y ** (q - 1) - a
+        assert np.all(np.abs(h) <= 8 * eps * a), (q, np.abs(h / a).max() / eps)
+
+
 def test_step_conditions_and_known_values():
     x = np.array([-3.0, -1.0, -0.2, 0.0, 0.5, 1.2, 4.0])
     # Fan and Li's rule with gamma = 1 (a = 3.7, lambda = 1).
