@@ -3302,6 +3302,120 @@ static void test_elementwise_fast_paths() {
     }
 }
 
+// Rows along a strided axis in tiles (audit C8): for every row operator, x
+// of shape (n, *outer) along axis 0 gives the same bits as the same rows
+// stored contiguously, for prox, the conjugate, jvp and vjp (gamma and
+// parameter gradients included), at 1 and 8 threads, with the output in the
+// same layout and with a C-order output (gather tiles, per-row scatter).
+static void test_strided_tiles() {
+    for (int64_t n : {12, 257})
+        for (const auto &c : derivative_cases(n)) {
+            fp_op *op;
+            CHECK_OK(c.make(&op));
+            // Row operators only: an elementwise map has no row path.
+            Arr probe({1, n}, randn(n)), pz({1, n}), p2(probe), pz2({1, n});
+            fp_options po = opts(-1, 1);
+            CHECK_OK(fp_prox(op, c.gamma, &probe.a, &pz.a, &po, nullptr, nullptr));
+            p2.data[0] += 3.0;
+            CHECK_OK(fp_prox(op, c.gamma, &p2.a, &pz2.a, &po, nullptr, nullptr));
+            bool coupled = false;
+            for (int64_t i = 1; i < n; ++i) coupled = coupled || pz.data[i] != pz2.data[i];
+            if (!coupled) {
+                fp_op_free(op);
+                continue;
+            }
+            const int64_t P = fp_op_nparams(op);
+            // Lines of 37 and 3 x 1003 (or 3 x 103 for the long rows, to keep
+            // the test short; 3 x 21 under valgrind): not multiples of the
+            // tile, so tiles end short.
+            const int64_t inner = light() ? 21 : n > 100 ? 103 : 1003;
+            for (auto outer : {std::vector<int64_t>{37}, std::vector<int64_t>{3, inner}}) {
+                int64_t R = 1;
+                for (int64_t o : outer) R *= o;
+                // xs: (n, *outer) in C order, the axis first; xc: (*outer, n).
+                std::vector<int64_t> ss{n}, sc(outer);
+                ss.insert(ss.end(), outer.begin(), outer.end());
+                sc.push_back(n);
+                Vec base = randn(R * n, 1.5), gb = randn(R * n), db = randn(R * n);
+                auto strided = [&](const Vec &v) {
+                    Vec out(v.size());
+                    for (int64_t r = 0; r < R; ++r)
+                        for (int64_t i = 0; i < n; ++i) out[static_cast<size_t>(i * R + r)] = v[static_cast<size_t>(r * n + i)];
+                    return out;
+                };
+                for (int t : {1, 8})
+                    for (int conj = 0; conj < 2; ++conj)
+                        for (int cout = 0; cout < 2; ++cout) {
+                            // Contiguous reference.
+                            Arr xc(sc, base), zc(sc), gc(sc, gb), dc(sc, db), gxc(sc), dzc(sc);
+                            fp_options oc = opts(-1, t, 1);
+                            fp_workspace *wc;
+                            CHECK_OK(fp_workspace_create(op, &xc.a, &oc, &wc));
+                            if (conj) CHECK_OK(fp_prox_conj(op, 1.0 / c.gamma, &xc.a, &zc.a, &oc, wc, nullptr));
+                            else CHECK_OK(fp_prox(op, c.gamma, &xc.a, &zc.a, &oc, wc, nullptr));
+                            Arr gpc({std::max<int64_t>(P, 1)});
+                            double ggc = 0.0;
+                            CHECK_OK(fp_vjp(op, wc, &gc.a, &gxc.a, &ggc, P ? &gpc.a : nullptr));
+                            CHECK_OK(fp_jvp(op, wc, &dc.a, 0.3, nullptr, &dzc.a));
+                            // Strided along axis 0.
+                            Arr xs(ss, strided(base)), gs(ss, strided(gb)), ds(ss, strided(db));
+                            fp_options os = opts(0, t, 1);
+                            fp_workspace *wsx;
+                            CHECK_OK(fp_workspace_create(op, &xs.a, &os, &wsx));
+                            // The output: the same strided layout, or the
+                            // contiguous one viewed along axis 0.
+                            Arr zs(ss), gxs(ss), dzs(ss), zo(sc), gxo(sc), dzo(sc);
+                            fp_array za = zs.a, gxa = gxs.a, dza = dzs.a;
+                            std::vector<int64_t> tst(ss.size());
+                            if (cout) {
+                                // zo is (*outer, n) in C order; as an (n, *outer) view its axis-0 stride is 1.
+                                tst[0] = 1;
+                                int64_t m = n;
+                                for (int d = static_cast<int>(ss.size()) - 1; d >= 1; --d) {
+                                    tst[static_cast<size_t>(d)] = m;
+                                    m *= ss[static_cast<size_t>(d)];
+                                }
+                                za = zo.a;
+                                gxa = gxo.a;
+                                dza = dzo.a;
+                                for (fp_array *v : {&za, &gxa, &dza}) {
+                                    v->ndim = static_cast<int>(ss.size());
+                                    v->shape = ss.data();
+                                    v->strides = tst.data();
+                                }
+                            }
+                            if (conj) CHECK_OK(fp_prox_conj(op, 1.0 / c.gamma, &xs.a, &za, &os, wsx, nullptr));
+                            else CHECK_OK(fp_prox(op, c.gamma, &xs.a, &za, &os, wsx, nullptr));
+                            Arr gps({std::max<int64_t>(P, 1)});
+                            double ggs = 0.0;
+                            CHECK_OK(fp_vjp(op, wsx, &gs.a, &gxa, &ggs, P ? &gps.a : nullptr));
+                            CHECK_OK(fp_jvp(op, wsx, &ds.a, 0.3, nullptr, &dza));
+                            const Vec zr = cout ? zo.data : strided(zc.data);
+                            const Vec gxr = cout ? gxo.data : strided(gxc.data);
+                            const Vec dzr = cout ? dzo.data : strided(dzc.data);
+                            CHECK((cout ? zc.data : zs.data) == zr);
+                            CHECK((cout ? gxc.data : gxs.data) == gxr);
+                            CHECK((cout ? dzc.data : dzs.data) == dzr);
+                            CHECK(ggs == ggc && gps.data == gpc.data);
+                            // In place, without keep.
+                            Arr xi(ss, strided(base)), zi(ss);
+                            fp_options on = opts(0, t, 0);
+                            if (conj) {
+                                CHECK_OK(fp_prox_conj(op, 1.0 / c.gamma, &xi.a, &zi.a, &on, nullptr, nullptr));
+                                CHECK_OK(fp_prox_conj(op, 1.0 / c.gamma, &xi.a, &xi.a, &on, nullptr, nullptr));
+                            } else {
+                                CHECK_OK(fp_prox(op, c.gamma, &xi.a, &zi.a, &on, nullptr, nullptr));
+                                CHECK_OK(fp_prox(op, c.gamma, &xi.a, &xi.a, &on, nullptr, nullptr));
+                            }
+                            CHECK(xi.data == zi.data && zi.data == strided(zc.data));
+                            fp_workspace_free(wc);
+                            fp_workspace_free(wsx);
+                        }
+            }
+            fp_op_free(op);
+        }
+}
+
 static void test_failed_branch_keeps_override() {
     const int64_t edge[2] = {0, 1};
     struct Case {
@@ -3999,6 +4113,7 @@ int main() {
     test_image_info();
     test_refine();
     test_elementwise_fast_paths();
+    test_strided_tiles();
     test_nan_images();
     test_aliasing();
     test_descriptor_bounds();

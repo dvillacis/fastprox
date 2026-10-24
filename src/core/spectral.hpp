@@ -57,7 +57,7 @@ void row_jvp(const fp_op &op, const fp_workspace &ws, int tid, int64_t r, const 
         op.jvp_run(ws.xs<T>() + r * n, dx, 1, out, 1, n, ws.step(r), 0.0, nullptr, 0, 1, false, ws.sigma,
                    ws.tie, side, branch_tol(ws));
     } else {
-        RowBuffers<T> buf(ws, tid, n);
+        RowBuffers<T> buf(ws, op, tid, n);
         op.jvp_row(ws.xs<T>() + r * n, ws.zs<T>() + r * n, ws.code.data() + r * n, dx, out, n, ws.step(r), 0.0,
                    nullptr, buf.kernel);
     }
