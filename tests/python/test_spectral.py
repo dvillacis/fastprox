@@ -154,6 +154,100 @@ def test_eigenvalue_ties():
         np.testing.assert_allclose(op.jvp(ctx, h), fd(lambda y: op.prox(y), x, h), atol=2e-7, err_msg=name)
 
 
+@pytest.mark.parametrize("s", [(2.0, 2.0, 2.0, 1.2, 1.2), (3.0, 1.2, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 0.2, 0.2),
+                               (0.9, 0.9, 0.7, 0.7, 0.1)])
+def test_mcp_ties(s):
+    """Spectral MCP at repeated singular values on each piece of firm
+    thresholding (0, (s - gamma lam) b / (b - gamma), s), away from its kinks
+    at gamma lam = 0.5 and b lam = 1.5 (feedback U6)."""
+    op = SVD_OPS["mcp"]()
+    rng = np.random.default_rng(5)
+    x = built(7, 5, s, rng)
+    _, ctx = op.prox(x, 1.0, keep=True)
+    for _ in range(3):
+        h = rng.normal(size=x.shape)
+        np.testing.assert_allclose(op.jvp(ctx, h), fd(lambda y: op.prox(y), x, h), atol=2e-7)
+
+
+_KINKS = [("mcp", fp.MCP(0.5, 3.0), 0.5), ("mcp", fp.MCP(0.5, 3.0), 1.5),
+          ("scad", fp.SCAD(0.5, 3.7), 1.0), ("scad", fp.SCAD(0.5, 3.7), 1.85)]
+
+
+@pytest.mark.parametrize("name,scalar,t", _KINKS)
+@pytest.mark.parametrize("tied", [False, True])
+def test_kinks_and_ties(name, scalar, t, tied):
+    """Singular values on a kink of the scalar map (MCP: gamma lam, b lam;
+    SCAD: (1 + gamma) lam, a lam), alone and tied (feedback U6). There the
+    map is not differentiable and the JVP is one element of its
+    B-subdifferential, adjoint to the VJP:
+    - at values exactly on the kink, the scalar map's branch below for each,
+      so a tie's block is that slope times A's, the limit from below with the
+      tie kept;
+    - at a tie that rounding splits across the kink, as an SVD of the matrix
+      does, the limit of the Jacobian at points with the pair split by delta
+      in the same basis, which depends on that basis within the tie."""
+    op = fp.Spectral(scalar)
+    rng = np.random.default_rng(11)
+    U, _ = np.linalg.qr(rng.normal(size=(7, 5)))
+    V, _ = np.linalg.qr(rng.normal(size=(5, 5)))
+    H, G = rng.normal(size=(7, 5)), rng.normal(size=(7, 5))
+    on = [2, 3] if tied else [2]
+
+    def jvp(sv):
+        _, ctx = op.prox_from(U, sv, V.T, keep=True)
+        return op.jvp(ctx, H), ctx
+
+    s0 = np.array([2.6, 2.2, t, t if tied else 0.3, 0.1])
+    j0, ctx = jvp(s0)
+    assert np.isfinite(j0).all()
+    gx, _ = op.vjp(ctx, G)
+    assert np.sum(G * j0) == pytest.approx(np.sum(gx * H), rel=1e-12)
+    below = s0.copy()
+    below[on] = t - 1e-4  # beyond the tie band, so the quotients are used
+    np.testing.assert_allclose(j0, jvp(below)[0], atol=1e-3 * np.abs(j0).max())
+    if tied:
+        split = s0.copy()
+        split[2], split[3] = t + 4.4e-16, t - 8.9e-16
+        js, _ = jvp(split)
+        apart = s0.copy()
+        apart[2], apart[3] = t + 1e-4, t - 1e-4
+        np.testing.assert_allclose(js, jvp(apart)[0], atol=1e-3 * np.abs(js).max())
+
+
+@pytest.mark.parametrize("b", [3.0, 1.1, 1.001])
+def test_mcp_gain(b):
+    """On firm thresholding's middle piece, gamma lam < s < b lam, the
+    derivative is b / (b - gamma): unbounded as b falls to gamma, so a
+    hypergradient through it is amplified as much (feedback U6). gamma >= b
+    is refused."""
+    op = fp.Spectral(fp.MCP(0.5, b))
+    s0 = 0.25 * (1 + b)  # midway between gamma lam and b lam at gamma = 1
+    _, ctx = op.prox(np.diag([s0, 0.9 * s0, 0.3]), 1.0, keep=True)
+    e = np.zeros((3, 3))
+    e[0, 0] = 1.0
+    assert op.jvp(ctx, e)[0, 0] == pytest.approx(b / (b - 1.0), rel=1e-12)
+    with pytest.raises(ValueError):
+        op.prox(np.eye(3), b)
+
+
+def test_mcp_proximal_gradient():
+    """Proximal gradient on spectral MCP, 50% matrix completion of a rank-4
+    30 x 25 matrix, at a step 0.99 / L (L = 1): the objective decreases at
+    every iteration and the iterates stay finite (feedback U6; a step below
+    1/L is the condition for a nonconvex penalty, Bolte, Sabach and Teboulle
+    2014)."""
+    rng = np.random.default_rng(0)
+    M = rng.normal(size=(30, 4)) @ rng.normal(size=(4, 25))
+    mask = rng.random(M.shape) < 0.5
+    op = fp.Spectral(fp.MCP(0.5, 3.0))
+    X, t, f = np.zeros_like(M), 0.99, []
+    for _ in range(200):
+        X = op.prox(X - t * mask * (X - M), t)
+        f.append(0.5 * np.sum((mask * (X - M)) ** 2) + op.value(X))
+    assert np.isfinite(X).all()
+    assert all(b <= a * (1 + 1e-12) for a, b in zip(f, f[1:]))
+
+
 @pytest.mark.parametrize("seed", [0, 3, 7])
 def test_autograd_contrast(seed):
     """At tied singular values autograd through torch.linalg.svd gives NaN
