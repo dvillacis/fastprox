@@ -3326,8 +3326,10 @@ static void test_strided_tiles() {
             }
             const int64_t P = fp_op_nparams(op);
             // Lines of 37 and 3 x 1003 (or 3 x 103 for the long rows, to keep
-            // the test short): not multiples of the tile, so tiles end short.
-            for (auto outer : {std::vector<int64_t>{37}, std::vector<int64_t>{3, n > 100 ? 103 : 1003}}) {
+            // the test short; 3 x 21 under valgrind): not multiples of the
+            // tile, so tiles end short.
+            const int64_t inner = light() ? 21 : n > 100 ? 103 : 1003;
+            for (auto outer : {std::vector<int64_t>{37}, std::vector<int64_t>{3, inner}}) {
                 int64_t R = 1;
                 for (int64_t o : outer) R *= o;
                 // xs: (n, *outer) in C order, the axis first; xc: (*outer, n).
