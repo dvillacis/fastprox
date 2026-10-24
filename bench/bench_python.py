@@ -150,6 +150,39 @@ def jax_wrappers():
     }
     for name, g in lines.items():
         print(f"  {name:38s} {best(g) * 1e6:9.1f}")
+def kernel_throughput():
+    print("Row and elementwise kernels, one thread, ns per entry")
+    rng = np.random.default_rng(4)
+    n = 10**6
+    x = rng.normal(size=n)
+    w = rng.uniform(0, 2, n)
+    w[::10] = 0.0
+    setups = {"soft weighted": lambda: fp.Soft(0.3, w).prox(x, threads=1)}
+    for q in (0.9, 0.999):
+        beta = (2 * (1 - q)) ** (1 / (2 - q))
+        tau = beta + q * beta ** (q - 1)
+        op = fp.Lq(1.0, q)
+        far = tau * rng.uniform(3, 10, n)
+        near = tau * (1 + rng.uniform(1e-9, 1e-3, n))
+        setups[f"lq q={q} far"] = lambda op=op, v=far: op.prox(v, threads=1)
+        setups[f"lq q={q} near"] = lambda op=op, v=near: op.prox(v, threads=1)
+    ball = fp.L2Ball(1.0)
+    _, ctx = ball.prox(x, keep=True, threads=1)
+    dx, g = rng.normal(size=n), rng.normal(size=n)
+    setups["l2_ball prox"] = lambda: ball.prox(x, threads=1)
+    setups["l2_ball jvp"] = lambda: ball.jvp(ctx, dx)
+    setups["l2_ball vjp"] = lambda: ball.vjp(ctx, g)
+    groups = np.arange(n) // 8
+    setups["prox_l2 groups of 8"] = lambda: fp.group_soft_threshold(x, 0.5, groups=groups, threads=1)
+    soc = fp.SOC()
+    setups["soc"] = lambda: soc.prox(x, threads=1)
+    a = rng.uniform(0.5, 1.5, n)
+    setups["hyperplane box"] = lambda: fp.project_hyperplane(x, a, 0.3 * n, 0.0, 1.0, threads=1)
+    setups["sum_largest k=10"] = lambda: fp.prox_sum_largest(x, 1.0, 10, threads=1)
+    walk = np.cumsum(rng.normal(size=n))
+    setups["isotonic random walk"] = lambda: fp.isotonic(walk, threads=1)
+    for name, f in setups.items():
+        print(f"  {name:22s} {best(f, repeat=3) / n * 1e9:8.2f}")
 
 
 def scaling():
@@ -171,6 +204,7 @@ if __name__ == "__main__":
     overhead()
     tv1d_throughput()
     simplex_throughput()
+    kernel_throughput()
     scaling()
     torch_wrappers()
     jax_wrappers()

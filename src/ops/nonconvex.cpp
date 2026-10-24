@@ -19,7 +19,8 @@
 //   h(y) = y + lam q y^{q-1} - x,   beta = (2 lam (1 - q))^{1/(2-q)},
 // and it beats 0 exactly for x > tau = beta + lam q beta^{q-1}; at x = tau both
 // 0 and beta minimise. h is increasing and convex on [beta, inf), so Newton
-// from x decreases monotonically to the root. For q = 1/2 and 2/3 the root is
+// from any point above the root (x, or the tangent bound in root) decreases
+// monotonically to it. For q = 1/2 and 2/3 the root is
 // in closed form (Z. Xu, X. Chang, F. Xu and H. Zhang, IEEE Trans. Neural
 // Netw. Learn. Syst. 23(7) (2012) 1013-1027; W. Cao, J. Sun and Z. Xu,
 // J. Vis. Commun. Image Represent. 24(1) (2013) 31-41), rederived here:
@@ -144,8 +145,10 @@ struct Lq final : ElemOp<Lq> {
     Vec w;
     double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
     int form;  // 1: q = 1/2, 2: q = 2/3 (closed forms and cheap powers), 0: general
+    double inv_slope;  // 1 / h'(beta) = 1 / (1 - q/2), for root's start
     Lq(double l, double qq, Vec ww)
-        : lambda(l), q(qq), w(std::move(ww)), form(qq == 0.5 ? 1 : (qq == 2.0 / 3.0 ? 2 : 0)) {}
+        : lambda(l), q(qq), w(std::move(ww)), form(qq == 0.5 ? 1 : (qq == 2.0 / 3.0 ? 2 : 0)),
+          inv_slope(1.0 / (1.0 - 0.5 * qq)) {}
     const char *name() const noexcept override { return "lq"; }
     double step_scale() const noexcept override { return lambda * wmax_; }
     int spectral() const noexcept override { return uniform(w) ? kSpectralBoth : 0; }
@@ -181,7 +184,7 @@ struct Lq final : ElemOp<Lq> {
     }
 
     // The root of h on [beta, x] for x > tau.
-    double root(double x, double lam, double beta) const noexcept {
+    double root(double x, double lam, double beta, double tau) const noexcept {
         double y;
         int newton = 1;  // polish of the closed forms
         if (form == 1) {
@@ -206,21 +209,42 @@ struct Lq final : ElemOp<Lq> {
             const double s = 0.5 * (r2m + std::sqrt(std::fmax(0.0, 2.0 * x / r2m - 2.0 * m)));
             y = s * s * s;
         } else {
-            y = x;
             newton = 100;
         }
-        if (!(y >= beta) || !(y <= x)) {  // safeguard the closed forms
-            y = x;
+        if (newton == 100 || !(y >= beta) || !(y <= x)) {  // the general q, or the closed forms' safeguard
+            // h lies above its tangent at beta, where h' = 1 - q/2 for every
+            // lam, so the tangent's zero bounds the root from above. Just
+            // above tau it is close to the root, where starting from x took
+            // up to 9 iterations; from about 2 tau on it exceeds x.
+            // Both starts are valid; the test on x alone lets the far entries
+            // start without waiting for the bound.
+            y = x < 2.0 * tau ? std::fmin(x, beta + (x - tau) * inv_slope) : x;
             newton = 100;
         }
+        auto step = [&](double v) {
+            double vn = v - h(v, lam, x) / dh(v, lam);
+            if (!(vn >= beta)) vn = 0.5 * (v + beta);  // keep to the branch
+            return vn > x ? x : vn;
+        };
+        if (newton == 1) return step(y);  // the closed forms' polish may step either way
+        // From above the root the iterates decrease to it. Stop when the step
+        // is below 4e-16 y, or when it does not decrease y: that is the
+        // rounding floor of h, which near tau, where y is far below x,
+        // exceeds 4e-16 y (the relative test alone let the iterates oscillate
+        // up to the cap).
         for (int it = 0; it < newton; ++it) {
-            const double step = h(y, lam, x) / dh(y, lam);
-            double yn = y - step;
-            if (!(yn >= beta)) yn = 0.5 * (y + beta);  // keep to the branch
-            if (yn > x) yn = x;
-            const bool done = std::fabs(yn - y) <= 4e-16 * y;
+            const double yn = step(y), d = y - yn;
+            if (!(d > 4e-16 * y)) {
+                // A bound below the root by rounding: the step goes up, past
+                // the root (h is convex), and the descent follows.
+                if (it == 0 && d < -4e-16 * y) {
+                    y = yn;
+                    continue;
+                }
+                if (d > 0.0) y = yn;
+                break;
+            }
             y = yn;
-            if (done) break;
         }
         return y;
     }
@@ -242,7 +266,7 @@ struct Lq final : ElemOp<Lq> {
             return on ? beta : 0.0;
         }
         on = true;
-        return root(a, lam, beta);
+        return root(a, lam, beta, tau);
     }
 
     double value1(double x, int64_t i, double) const noexcept {
@@ -305,7 +329,7 @@ struct Lq final : ElemOp<Lq> {
         double beta, tau;
         thresholds(lam, beta, tau);
         const double a = std::fabs(x);
-        return branch_deriv(a > tau ? root(a, lam, beta) : beta, pc.s, gamma, i);
+        return branch_deriv(a > tau ? root(a, lam, beta, tau) : beta, pc.s, gamma, i);
     }
     int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
         const double lam = gamma * lambda * w[wi(i)];
