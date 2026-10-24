@@ -346,6 +346,30 @@ the 1.0 ABI before it freezes, and need no "since" note.
 
 **Acceptance.** The reproducer is understood and is covered by a test, and the outcome is recorded here.
 
+**Outcome so far (2026-10-24), without the reproducer.** The library behaves correctly on each plausible cause. Two of them do make an outer method diverge, or make a hypergradient blow up, and the docs now say so. Steps 2 and 4 of the plan are done; step 1 is still open.
+- **Derivative gain.** On the middle piece the JVP is exactly b/(b − γ): 1.5 at b = 3, 11 at 1.1, 1001 at 1.001, with γ = 1. γ ≥ b is refused (`ValueError`). A hypergradient through it is amplified without bound as b falls to γ.
+- **Outer step.** On 50% completion of a rank-4 30 × 25 matrix (L = 1, λ = 0.5, b = 3, 300 iterations):
+
+  | step | proximal gradient, MCP | proximal gradient, nuclear norm | FISTA, MCP | FISTA, nuclear norm |
+  |---|---|---|---|---|
+  | 0.5/L | converges, monotone | converges, monotone | converges, 78 rises | converges, 86 rises |
+  | 0.99/L | converges, monotone | converges, monotone | converges, 28 rises | converges, 100 rises |
+  | 1.5/L | converges, monotone | converges, monotone | diverges (iteration 74) | diverges (75) |
+  | 1.99/L | stalls: 150 rises, relative error 1.0 | converges, monotone | diverges (24) | diverges (24) |
+  | 2.2/L | diverges (90) | diverges (93) | diverges (20) | diverges (20) |
+
+  So FISTA diverges above 1/L whatever the penalty. Proximal gradient tolerates up to 2/L only with the convex penalty; the theory for a nonconvex one needs a step below 1/L (PALM with one block: Bolte, Sabach and Teboulle 2014; Chambolle and Pock 2016, Section 6.2). FISTA is not monotone with either penalty, since it is not a descent method.
+- **Ties at thresholds.** Values on a kink, alone or tied, give one element of the B-subdifferential, finite and adjoint to the VJP to 1e-15. On the kink each value takes the branch below. At a tie that rounding splits across the kink, the JVP is the limit of the Jacobian at points with the pair split ±δ in the same basis (agreement O(δ): 1.2e-4 at δ = 1e-3, 1.2e-5 at 1e-4). It depends on the basis inside the tie: a rotation there moved it by 12–20%. That is the same kind of choice as a branch at a kink. It explains why spectral MCP had been left out of the existing ties test, which used a tie at b λ.
+- **Tests** (`tests/python/test_spectral.py`):
+  - `test_mcp_ties`: ties on each piece, against finite differences;
+  - `test_kinks_and_ties`: MCP at γλ and bλ, SCAD at (1 + γ)λ and aλ, alone and tied, exact and split by rounding;
+  - `test_mcp_gain`;
+  - `test_mcp_proximal_gradient`: monotone at 0.99/L.
+- **Docs** (docs/api.md):
+  - "Inexact proxes inside outer solvers" gains the step conditions for nonconvex penalties, the prox's step range and the derivative gains of MCP and SCAD;
+  - "Spectral operators" gains the behaviour at kinks.
+- **Left.** Whether the report's divergence was one of these needs its script. If it was something else, a fix item follows here.
+
 ---
 
 <a id="u7"></a>

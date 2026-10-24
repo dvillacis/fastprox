@@ -235,7 +235,7 @@ Specs in [docs/feedback-2026-10.md](docs/feedback-2026-10.md), from reproducing 
 - [x] U3: One set of derivative keywords (`tol`, `max_iter`) on every operator's `jvp`/`vjp` — [spec](docs/feedback-2026-10.md#u3)
 - [x] U4: Derivatives of iterative TV at loose gaps: `ctx.deriv.exact`, `ctx.refine` — [spec](docs/feedback-2026-10.md#u4)
 - [x] U5: Weighted nuclear norm through a sorted ℓ1 (OWL/SLOPE) operator — [spec](docs/feedback-2026-10.md#u5)
-- [ ] U6: Spectral MCP divergence: get the reproducer, then test or fix — [spec](docs/feedback-2026-10.md#u6)
+- [ ] U6: Spectral MCP divergence: get the reproducer, then test or fix — Progress (2026-10-24): the three plausible causes checked without the reproducer; the library is correct on each, and the two that make outer methods fail (a step at or above 1/L, the gain b/(b − γ)) are documented, with tests at the kinks and ties; the reproducer would confirm which one the report hit — [spec](docs/feedback-2026-10.md#u6)
 - [ ] U7: Releases: 1.0.0rc2 (with the spectral operators) on PyPI, an rc3 if U1–U5 land after it, then 1.0.0 — Progress (2026-10-23): 1.0.0rc2 is on PyPI with the spectral operators, and the README gives the install paths; rc3 follows U3–U5; (2026-10-24) U3–U5 and the speed items have landed, and rc3 is prepared — [spec](docs/feedback-2026-10.md#u7)
 
 ## 1.x — GPU backend

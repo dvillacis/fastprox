@@ -746,6 +746,33 @@ $x_k$. Without gradient errors:
   to converge, for instance $\mathrm{ztol}_k = O(1/k^{2+\delta})$: a stronger
   condition, which is why FISTA stalls at a fixed loose tolerance.
 
+**Nonconvex penalties** (SCAD, MCP, $\ell_0$, $\ell_q$, the log penalty, and
+their group and spectral forms). The bounds above are for convex penalties.
+For these:
+
+- **The outer step.** Proximal gradient reaches critical points with a step
+  below $1/L$ for a nonconvex penalty: this is PALM (Bolte, Sabach and Teboulle,
+  *Math. Program.* 146, 2014) with one block, as presented by Chambolle and
+  Pock (*Acta Numerica* 25, 2016, Section 6.2). A convex penalty allows steps
+  up to $2/L$. On 50% matrix completion of a rank-4 30 × 25 matrix ($L = 1$)
+  with spectral MCP ($\lambda = 0.5$, $b = 3$), steps of $0.5/L$ to $1.5/L$
+  converged. At $1.99/L$ the objective rose at half the iterations and the
+  iterates did not approach the matrix, while the nuclear norm still
+  converged there. FISTA needs a step of at most $1/L$ even with a convex
+  penalty: at $1.5/L$ it diverged on that problem with MCP and with the
+  nuclear norm. FISTA is not a descent method: its objective rose at up to a
+  third of the iterations at smaller steps, with either penalty. For a
+  nonconvex penalty it also has no convergence guarantee.
+- **The prox's step range.** The outer step is the prox's $\gamma$, so it must
+  also satisfy SCAD's $a > 1 + \gamma \max w$ and MCP's $b > \gamma \max w$
+  (`FP_EPARAM`, `ValueError` in Python).
+- **Derivatives.** On MCP's middle piece, $\gamma w_i \lambda < \lvert x_i
+  \rvert < b \lambda$, the derivative is $b / (b - \gamma w_i)$. SCAD's
+  concave branch has $(a - 1)/(a - 1 - \gamma w_i)$. Both are unbounded as
+  the parameter falls to the edge of its range, and a hypergradient through
+  the prox is amplified as much: $b \ge 2 \gamma \max w$ keeps MCP's gain
+  at most 2.
+
 **Warnings** (*since 1.0*). A call that stops at `max_iter` before its
 tolerance raises `fastprox.ConvergenceWarning`, with the error it did
 certify (`zerr`). This holds for `prox`, `prox_conj` and `solve`, the
@@ -1021,6 +1048,17 @@ other count as tied (docs/spec.md, "Spectral operators").
 - **The VJP.** The map is self-adjoint, so a cotangent $G$ goes through the
   same call with $A = U^\top G V$. The gradients in $\gamma$ and the
   parameters are `fp_vjp` on $\operatorname{diag}(A)$.
+- **Kinks.** At a singular value on a kink of the scalar map, the map is not
+  differentiable. Examples are MCP at $\gamma\lambda$ and $b\lambda$, SCAD at
+  $(1 + \gamma)\lambda$ and $a\lambda$, and soft thresholding at
+  $\gamma\lambda$. There the JVP is one element of the B-subdifferential, and
+  stays adjoint to the VJP:
+  - at values exactly on the kink, the scalar map's branch below, for each
+    value;
+  - at a tie that rounding splits across the kink, as an SVD of such a
+    matrix does, the limit of the Jacobian at points with the pair split
+    in the same basis. It depends on the singular vectors chosen inside the
+    tie: rotating them within the tie moved the JVP by 12–20% on a 7 × 5 example.
 - **Cost.** $O(k^2)$ per matrix and one JVP on the spectrum per row; the
   first call on a workspace sizes about $8k$ doubles of scratch per thread,
   and later calls allocate nothing.
