@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Two audits of 1.0.0's mathematics, `docs/mathematical-audit-2026-10-25.md` and `docs/theoretical-audit-2026-10-25.md`, with errata from checking their claims against the cited literature. Their reproduction scripts are under `reports/`. The specs for 1.0.1 that address them are in `docs/math-audit-2026-10.md`.
+
 ### Changed
 
 - The conda recipe's `libfastprox` exports a pin on the major version (`upper_bound='x'`), instead of the minor, as the ABI now holds for every 1.x.

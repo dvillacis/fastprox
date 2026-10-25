@@ -1,0 +1,91 @@
+{
+  "restricted_chain_rule": {
+    "propagated": 2.0,
+    "actual": 1.0
+  },
+  "critical_log_penalty": [
+    {
+      "h": 0.01,
+      "prox": 0.10512492197250257,
+      "right_difference_quotient": 10.512492197250257
+    },
+    {
+      "h": 0.0001,
+      "prox": 0.010050124999206341,
+      "right_difference_quotient": 100.5012499920634
+    },
+    {
+      "h": 1e-06,
+      "prox": 0.0010005001250809526,
+      "right_difference_quotient": 1000.5001250809527
+    }
+  ],
+  "graph_dual_dependent_mask": {
+    "mask": [
+      0,
+      0,
+      1
+    ],
+    "strict_dual_flow": [
+      0.3333333333333333,
+      0.3333333333333333,
+      0.6666666666666666
+    ],
+    "strict_dual_divergence": [
+      1.0,
+      0.0,
+      -1.0
+    ],
+    "primal_jacobian": [
+      [
+        0.3333333333333333,
+        0.3333333333333333,
+        0.3333333333333333
+      ],
+      [
+        0.3333333333333333,
+        0.3333333333333333,
+        0.3333333333333333
+      ],
+      [
+        0.3333333333333333,
+        0.3333333333333333,
+        0.3333333333333333
+      ]
+    ],
+    "nearby_mean_checks": 20
+  },
+  "small_gap_wrong_region": [
+    {
+      "eps": 0.01,
+      "gap": 0.00010000000000000018,
+      "jacobian_error_norm": 1.0
+    },
+    {
+      "eps": 0.0001,
+      "gap": 9.999999999997797e-09,
+      "jacobian_error_norm": 1.0
+    },
+    {
+      "eps": 1e-06,
+      "gap": 9.999999998354668e-13,
+      "jacobian_error_norm": 1.0
+    }
+  ],
+  "nonconvex_conjugate": {
+    "moreau_residual": 0.5,
+    "true_fenchel_prox": 0.0
+  },
+  "singular_bilevel_system": {
+    "fixed_point_matrix": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0
+      ]
+    ]
+  }
+}
