@@ -346,3 +346,24 @@ def test_l0_threshold_below_the_normal_range():
     t = np.sqrt(2.0) * 1e-160
     x = np.array([1.0001 * t, 0.9999 * t])
     np.testing.assert_array_equal(fp.L0(1e-160).prox(x, 1e-160), [x[0], 0.0])
+
+
+def test_shrinkage_at_any_scale():
+    """Every penalty here is even and nondecreasing in |z|, so its prox keeps
+    |z_i| <= |x_i| with x's sign. The log penalty's root rounded an ulp above
+    |x| where lambda << |x| eps (fuzz, 2026-10-25: x = 8.2e-60 came back
+    8.2e-60 (1 + 2^-52)); it is now taken as at most |x|."""
+    rng = np.random.default_rng(5)
+    for _ in range(400):
+        eps, lam, gamma = 10.0 ** rng.uniform(-300, 300), 10.0 ** rng.uniform(-300, 300), 10.0 ** rng.uniform(-5, 5)
+        if gamma * lam > 2.0**950:
+            continue
+        x = 10.0 ** rng.uniform(-300, 300, 60) * rng.choice([-1.0, 1.0], 60)
+        z = fp.LogPenalty(lam, eps).prox(x, gamma)
+        assert np.all(np.abs(z) <= np.abs(x)) and np.all(np.sign(z) * np.sign(x) >= 0)
+    # The fuzz case's regime: lambda gamma / eps far below |x|.
+    x = 8.1655919073597091e-60 * (1 + np.arange(200) / 7)
+    for eps in (1e-40, 1e-20, 1.0, 1e20, 1e200):
+        for lam in (1e-200, 1e-150, 1e-120):
+            z = fp.LogPenalty(lam, eps).prox(x, 3.578125)
+            assert np.all(z <= x)

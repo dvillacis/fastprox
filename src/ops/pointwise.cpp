@@ -59,10 +59,11 @@ struct Soft final : ElemOp<Soft> {
     template <class T>
     T prox1(T x, double gamma, int64_t i) const noexcept {
         const double xd = static_cast<double>(x);
-        const double tau = gamma * lambda * w[wi(i)];
+        const double tau = prod3(gamma, lambda, w[wi(i)]);
         return static_cast<T>(std::copysign(pos(std::fabs(xd) - tau), xd));
     }
-    // By-value kernels (audit C4): tau as prox1 forms it, (gamma lambda) w.
+    // By-value kernels (audit C4): tau as prox1 forms it, (gamma lambda) w,
+    // the indexed one only where gamma lambda is normal (kernel_exact).
     static constexpr bool kUniformKernel = true, kIndexedKernel = true;
     template <class T>
     struct UK {
@@ -73,7 +74,8 @@ struct Soft final : ElemOp<Soft> {
         }
     };
     template <class T>
-    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda * w[0]}; }
+    UK<T> uniform_kernel(double gamma) const noexcept { return {prod3(gamma, lambda, w[0])}; }
+    bool kernel_exact(double gamma) const noexcept { return normal_product(gamma, lambda); }
     template <class T>
     struct IK {
         double gl;
@@ -92,7 +94,7 @@ struct Soft final : ElemOp<Soft> {
     // where s = 0 at x = 0). Kink 1 at |x| = tau > 0.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
-        const double tau = gamma * lambda * w[wi(i)];
+        const double tau = prod3(gamma, lambda, w[wi(i)]);
         return {!(tau > 0.0) || std::fabs(x) > tau ? 1 : 0, sgn(x)};
     }
     ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
@@ -113,7 +115,7 @@ struct Soft final : ElemOp<Soft> {
     // entry cost more than the derivative itself on random data.
     ElemDeriv deriv1(double x, double gamma, int64_t i) const noexcept {
         const int64_t k = wi(i);
-        const double tau = gamma * lambda * w[k];
+        const double tau = prod3(gamma, lambda, w[k]);
         const bool on = !(tau > 0.0) || std::fabs(x) > tau;
         const double s = static_cast<double>(x > 0) - static_cast<double>(x < 0);  // sgn(x)
         const double dg = -s * lambda * w[k], pv = -s * gamma * lambda;
@@ -126,7 +128,7 @@ struct Soft final : ElemOp<Soft> {
         return e;
     }
     int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
-        const double tau = gamma * lambda * w[wi(i)];
+        const double tau = prod3(gamma, lambda, w[wi(i)]);
         if (!(tau > 0.0) || !(std::fabs(std::fabs(x) - tau) <= tol)) return 0;
         k.b = std::copysign(tau, x);
         k.scale = tau;
@@ -504,7 +506,7 @@ struct L1Box final : ElemOp<L1Box> {
         const double xd = static_cast<double>(x);
         // tau as its own statement, as in Soft and deriv1: a compiler may
         // contract a - b * c into one rounding within an expression.
-        const double tau = gamma * lambda * w[at(w, i)];
+        const double tau = prod3(gamma, lambda, w[at(w, i)]);
         const double y = std::copysign(pos(std::fabs(xd) - tau), xd);
         const double l = lo[at(lo, i)], h = hi[at(hi, i)];
         return static_cast<T>(y < l ? l : (y > h ? h : y));
@@ -520,7 +522,8 @@ struct L1Box final : ElemOp<L1Box> {
         }
     };
     template <class T>
-    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda * w[0], lo[0], hi[0]}; }
+    UK<T> uniform_kernel(double gamma) const noexcept { return {prod3(gamma, lambda, w[0]), lo[0], hi[0]}; }
+    bool kernel_exact(double gamma) const noexcept { return normal_product(gamma, lambda); }
     template <class T, bool WP, bool LP, bool HP>
     struct IK {
         double gl;
@@ -558,7 +561,7 @@ struct L1Box final : ElemOp<L1Box> {
     // soft(x) = lower, 3 where soft(x) = upper.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
-        const double tau = gamma * lambda * w[at(w, i)];
+        const double tau = prod3(gamma, lambda, w[at(w, i)]);
         const double y = std::copysign(pos(std::fabs(x) - tau), x);
         const double l = lo[at(lo, i)], h = hi[at(hi, i)];
         if (y < l || (y == l && l == h)) return {2, sgn(x)};  // lo = hi: fixed (audit K11)
@@ -595,7 +598,7 @@ struct L1Box final : ElemOp<L1Box> {
         return v > 0.0 ? v + tau : (v < 0.0 ? v - tau : at0);
     }
     int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
-        const double tau = gamma * lambda * w[at(w, i)];
+        const double tau = prod3(gamma, lambda, w[at(w, i)]);
         const double l = lo[at(lo, i)], h = hi[at(hi, i)];
         int code = 0;
         double best = tol;

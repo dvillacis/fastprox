@@ -358,6 +358,26 @@ namespace fp {
 // Bits of fp_op::spectral(): absolutely symmetric maps act on both kinds.
 constexpr int kSpectralEig = 1, kSpectralSvd = 2, kSpectralBoth = kSpectralEig | kSpectralSvd;
 // Spectral use needs the same map for every entry: no weights, or equal ones.
+// (a b) c for a, b, c >= 0 finite, rounded as written where a b is normal,
+// and otherwise from the mantissas, so that a b cannot overflow or underflow
+// when the product is in range: gamma = 1e308 with lambda w = 1e-308 made
+// the l0 threshold inf, and zeroed an entry whose minimiser is itself (math
+// audit M3). Scaling by powers of 2 commutes with rounding, so the two paths
+// agree wherever both are in range.
+// Since 1.0.1 also soft thresholding, l1 over a box and group l2, whose
+// gamma lambda overflowed to inf where every weight is 0 (NaN; fuzz).
+inline bool normal_product(double a, double b) noexcept {
+    const double ab = a * b;
+    return ab <= std::numeric_limits<double>::max() &&
+           (ab >= std::numeric_limits<double>::min() || (ab == 0.0 && (a == 0.0 || b == 0.0)));
+}
+inline double prod3(double a, double b, double c) noexcept {
+    if (normal_product(a, b)) return a * b * c;
+    int ea, eb, ec;
+    const double ma = std::frexp(a, &ea), mb = std::frexp(b, &eb), mc = std::frexp(c, &ec);
+    return std::ldexp(ma * mb * mc, ea + eb + ec);
+}
+
 // The largest of v (0 when empty), for step_scale().
 inline double vmax(const std::vector<double> &v) noexcept {
     double m = 0.0;
@@ -436,6 +456,9 @@ struct ElemOp : fp_op {
     // Operators with ties keep prox1.
     static constexpr bool kUniformKernel = false;
     static constexpr bool kIndexedKernel = false;
+    // false where the indexed kernel's hoisted product (gamma lambda) leaves
+    // the normal range: prox1 then runs, with prod3 (since 1.0.1).
+    bool kernel_exact(double) const noexcept { return true; }
     // dz/dgamma is identically zero (projections): the vjp skips the gamma
     // slot (audit C5).
     static constexpr bool kGammaFree = false;
@@ -550,7 +573,7 @@ struct ElemOp : fp_op {
             }
         }
         if constexpr (D::kIndexedKernel && !D::kTies) {
-            if (!conj && this->axis_params()) {
+            if (!conj && this->axis_params() && d.kernel_exact(gamma)) {
                 d.template with_indexed_kernel<T>(gamma, [&](const auto k) {
                     indexed_loops<T>(k, x, xs, z, zs, len, widx, wstep, save);
                 });

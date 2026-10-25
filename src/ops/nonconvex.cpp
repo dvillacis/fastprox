@@ -74,21 +74,6 @@ fp_status emit(fp_op **out, A &&...a) {
 
 inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 
-// (a b) c for a, b, c >= 0 finite, rounded as written where a b is normal,
-// and otherwise from the mantissas, so that a b cannot overflow or underflow
-// when the product is in range: gamma = 1e308 with lambda w = 1e-308 made
-// the l0 threshold inf, and zeroed an entry whose minimiser is itself (math
-// audit M3). Scaling by powers of 2 commutes with rounding, so the two paths
-// agree wherever both are in range.
-inline double prod3(double a, double b, double c) noexcept {
-    const double ab = a * b;
-    if (ab <= std::numeric_limits<double>::max() && (ab >= std::numeric_limits<double>::min() || (ab == 0.0 && (a == 0.0 || b == 0.0))))
-        return ab * c;
-    int ea, eb, ec;
-    const double ma = std::frexp(a, &ea), mb = std::frexp(b, &eb), mc = std::frexp(c, &ec);
-    return std::ldexp(ma * mb * mc, ea + eb + ec);
-}
-
 // sqrt(2 a b c) without the underflow of a b c where the root is normal: an
 // l0 threshold sqrt(2 gamma lambda w) of 1e-160 has gamma lambda w = 1e-320.
 inline double sqrt2prod3(double a, double b, double c) noexcept {
@@ -634,7 +619,10 @@ struct LogPen final : ElemOp<LogPen> {
     // unchanged but for a positive factor: (a + eps)^2 overflowed beyond 1e154
     // and r (r/2 - a) underflowed into a spurious tie. For a < eps the root is
     // 2 (a eps - lam) / ((eps - a) + sqrt(D)), the same root without the
-    // cancellation of (a - eps) + sqrt(D); fma is correctly rounded.
+    // cancellation of (a - eps) + sqrt(D); fma is correctly rounded. The root
+    // is below a for lam > 0, and taken as at most a: rounding put it an ulp
+    // above at lam << a eps (fuzz, 2026-10-25), and the prox moved an entry
+    // away from 0.
     struct Root {
         double r, df;
     };
@@ -648,11 +636,11 @@ struct LogPen final : ElemOp<LogPen> {
         const double q = std::sqrt(D);
         double r;
         if (a >= eps) {
-            r = 0.5 * ((a - eps) + q);
+            r = std::fmin(0.5 * ((a - eps) + q), a);
         } else {
             const double num = std::fma(a, eps, -lam);
             if (!(num > 0.0)) return {0.0, 0.0};
-            r = 2.0 * num / ((eps - a) + q);
+            r = std::fmin(2.0 * num / ((eps - a) + q), a);
         }
         if (!(r > 0.0)) return {0.0, 0.0};
         return {r, r * (0.5 * r - a) + lam * std::log1p(r / eps)};
@@ -662,7 +650,9 @@ struct LogPen final : ElemOp<LogPen> {
         int k;
         std::frexp(std::max(a, eps), &k);
         // lam 2^-2k may be +inf: no root then, as 4 lam > S^2.
-        return root_at(std::ldexp(a, -k), std::ldexp(eps, -k), std::ldexp(lam, -2 * k), std::ldexp(1.0, -k));
+        Root rt = root_at(std::ldexp(a, -k), std::ldexp(eps, -k), std::ldexp(lam, -2 * k), std::ldexp(1.0, -k));
+        rt.r = std::fmin(rt.r, a);  // a 2^-k can be subnormal, and the root then an ulp above a
+        return rt;
     }
     // The root and df in units scaled by t (a power of two; 1 unscaled).
     static Root root_at(double ah, double eh, double lh, double t) noexcept {
@@ -671,11 +661,11 @@ struct LogPen final : ElemOp<LogPen> {
         const double q = std::sqrt(D);
         double rh;
         if (ah >= eh) {
-            rh = 0.5 * ((ah - eh) + q);
+            rh = std::fmin(0.5 * ((ah - eh) + q), ah);
         } else {
             const double num = std::fma(ah, eh, -lh);  // a eps - lam: a positive root needs > 0
             if (!(num > 0.0)) return {0.0, 0.0};      // (and skips the division below the breakpoint)
-            rh = 2.0 * num / ((eh - ah) + q);
+            rh = std::fmin(2.0 * num / ((eh - ah) + q), ah);
         }
         if (!(rh > 0.0)) return {0.0, 0.0};
         return {t == 1.0 ? rh : rh / t, rh * (0.5 * rh - ah) + lh * std::log1p(rh / eh)};

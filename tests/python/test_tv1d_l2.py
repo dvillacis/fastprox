@@ -279,7 +279,8 @@ def test_weight_scale():
         _, r1 = op.vjp(ctx, v)
         for k in (-1000, -600, -200, 200, 600, 900):
             c = 2.0**k
-            pos = w[w > 0] * c
+            with np.errstate(over="ignore"):
+                pos = w[w > 0] * c
             if not (pos.size and np.log2(g) - k < 1023 and pos.min() >= 2.0**-1022
                     and np.isfinite(pos.max())):
                 continue  # the scaled problem itself is not representable
@@ -297,3 +298,27 @@ def test_weight_scale():
             _, rc = opc.vjp(cc, v)
             assert rc.gamma / c == pytest.approx(r1.gamma, rel=1e-13, abs=1e-14 * np.abs(dg).max())
             np.testing.assert_allclose(rc.params * c, r1.params, rtol=1e-13, atol=1e-14 * np.abs(r1.params).max())
+
+
+def test_entries_near_overflow():
+    """Rows with an entry near the largest double (fuzz, 2026-10-25). The
+    piece mean summed offsets from the first entry, which overflowed for
+    x_0 = 9.2e307 among small entries (the row came back -inf); and gamma
+    times the row's scale 2^-1024 underflowed to 0, which returned the
+    piecewise mean for gamma = 3.6e-97, where z = x to rounding."""
+    op = fp.TV1DL2()
+    col = np.array([9.18953224e+307, -64.140625, 25.09375, -122.35546875, 0, 0, 0, 44.48828125, -32.92578125,
+                    67.01171875, 102, 76, 1.93257735e+204, -22.52734375, 76.21875, -28, 0, 86.3203125, 11.015625])
+    z = op.prox(col, 5.639754439021782e+218)
+    assert np.all(np.isfinite(z))
+    # |z - x| <= 2 gamma, below the rounding of |x| here.
+    assert np.linalg.norm(z - col) <= 2 * 5.64e218
+    x = np.array([-123.29296875, 1.0584055116233093e+308, 61, -22.6015625, -17, 21.51171875, 16.421875,
+                  -1.9236206764566657e+149, 84.03125, -13.2265625, -47.890625])
+    np.testing.assert_array_equal(op.prox(x, 3.5833485176407953e-97), x)
+    # Near overflow and at unit scale, the same answer (prox(c x; c gamma) = c prox(x; gamma)).
+    rng = np.random.default_rng(3)
+    for k in (900, 1000):
+        y = rng.normal(size=19)
+        np.testing.assert_allclose(op.prox(y * 2.0**k, 0.7 * 2.0**(k - 100)) / 2.0**k,
+                                   op.prox(y, 0.7 * 2.0**-100), rtol=0, atol=1e-15)

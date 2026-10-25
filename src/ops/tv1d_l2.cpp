@@ -200,15 +200,27 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     // huge dual (found by fuzzing: NaN at w_e = 2e-53). Each entry is still
     // rounded once (centring on the first entry itself rounded twice and left
     // 25x larger residuals on a long random walk without FMA contraction).
+    // Should the sum of offsets overflow (x0 = 9e307 with 18 small entries,
+    // fuzz 2026-10-25: the row came back -inf), it is summed again over 2^k,
+    // k from the piece's length, and only then.
     template <class T>
     void center(const T *x, double *xc, int64_t n) const noexcept {
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e < n - 1 && ae(e) != 0.0) continue;
             const double x0 = static_cast<double>(x[s]);  // piece [s, e]
+            const double len = static_cast<double>(e - s + 1);
             double m = 0.0;
             for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]) - x0;
-            m = x0 + m / static_cast<double>(e - s + 1);
+            if (std::isfinite(m)) {
+                m = x0 + m / len;
+            } else {
+                int k;
+                std::frexp(len, &k);
+                m = 0.0;
+                for (int64_t i = s; i <= e; ++i) m += std::ldexp(static_cast<double>(x[i]), -k - 1) - std::ldexp(x0, -k - 1);
+                m = x0 + std::ldexp(m / len, k + 1);
+            }
             for (int64_t i = s; i <= e; ++i) xc[i] = static_cast<double>(x[i]) - m;
             s = e + 1;
         }
@@ -272,6 +284,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         std::frexp(t, &k);
         t = std::ldexp(1.0, -k);
         const double gt = gamma * t;
+        // gamma t below the normal range: |z - x| <= 2 gamma, under 2^-1020
+        // of the largest entry, so z = x to rounding. Taken as it, since the
+        // bracket below would start from [0, inf] (fuzz 2026-10-25: the
+        // piecewise mean came back, at gamma = 3.6e-97 with an entry of 1e308).
+        if (gt < DBL_MIN) {
+            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+            return kRowOk;
+        }
         // ||u0||^2 and ||y0||^2 (y0 per piece, mean-free), and ||W D xc||^2.
         double rho0sq = 0.0, kap0 = 0.0, wdx = 0.0;
         {
