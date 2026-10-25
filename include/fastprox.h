@@ -458,7 +458,9 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *                      flow, the sum of x - z over the subtree below it, is
  *                      within tol of gamma w_e
  *   graph TV (0.4)     the same with the solver's flow, saved by the prox
- *                      call (on a graph with cycles the flow is not unique)
+ *                      call (on a graph with cycles the flow is not unique,
+ *                      and the mask, edges biactive in that flow, can flag
+ *                      edges where the prox is smooth)
  * (edges and pixels of zero bound are free, not kinks).
  * fp_workspace_kinks writes the codes into mask (FP_I8, the shape
  * of x, any strides; for graph and tree TV, whose kinks are edges, the shape of x with
@@ -542,7 +544,10 @@ FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_
  * is checked for every sigma < 1 in float32, and in float64 for sigma < 2^-64;
  * above that, only entries beyond about 1e289 can overflow, and their outputs
  * are then +-inf or NaN. FP_EINVAL for weighted isotonic regression
- * (fp_op_isotonic, since 1.0.1). */
+ * (fp_op_isotonic, since 1.0.1). For the nonconvex penalties (l0, lq, SCAD,
+ * MCP, the log penalty and their group and spectral forms) the result is the
+ * Moreau residual, not the prox of g*, which is 0: their g* is the indicator
+ * of {0}. */
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_array *out, const fp_options *opt,
                               fp_workspace *ws, fp_info *info);
@@ -658,7 +663,11 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
  * regions, graph TV when no part was stopped by tol, tree TV always, and
  * isotropic TV only without smoothing; smoothing is then the largest
  * curvature cap mu of isotropic TV's derivative, in the units of x (0 for the
- * others). Either may be NULL. FP_EINVAL without a kept point, and for other
+ * others). Exact means that the saved regions are certified as the
+ * solution's; it is not a bound in terms of the gap, and a small gap alone
+ * does not make a derivative exact (near a switch between regions, a refine
+ * identifies them only once the switch's margin exceeds the error; since
+ * 1.0.1). Either may be NULL. FP_EINVAL without a kept point, and for other
  * operators.
  *
  * fp_workspace_refine solves the kept call again from its saved input and its

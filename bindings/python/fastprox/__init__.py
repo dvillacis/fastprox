@@ -130,7 +130,10 @@ class DerivInfo(NamedTuple):
     the operators in closed form always; isotropic TV caps its curvature at
     $\gamma / \mu$ with $\mu$ = ``smoothing`` (in the units of $x$), which
     vanishes with the gap. ``ctx.refine`` or ``refine=`` make it exact or
-    nearly so."""
+    nearly so. Exact means that the saved regions are those of the solution,
+    as certified at the saved point; it is not a bound in terms of the gap,
+    which alone does not certify a derivative (since 1.0.1: near a switch, a
+    tiny gap can come with wrong regions)."""
 
     residual: float
     iters: int
@@ -189,7 +192,10 @@ class Context:
         :func:`inner_accuracy` its ztol by default), and returns the refined
         $z$ (since 1.0; iterative image operators). The derivatives then read
         the refined point, which is what makes them exact or nearly so at a
-        loose first solve (``ctx.deriv.exact``), and ``ctx.info`` is the
+        loose first solve (``ctx.deriv.exact``, which then says whether the
+        refined point's regions are certified: near a switch between regions,
+        refining identifies them only once the margin of the switch exceeds
+        the remaining error), and ``ctx.info`` is the
         refined call's. The $z$ returned by the first call is not changed: use
         the one returned here. Graph TV refines to ``tol=0``, the exact
         solution, for any ``ztol``. A refine that stops at ``max_iter`` raises
@@ -603,7 +609,9 @@ class Operator:
     def prox_conj(self, y, sigma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
                   copy=False):
         r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
-        (Moreau)."""
+        (Moreau) for a convex $g$. For the nonconvex penalties the call
+        returns the same formula, the Moreau residual, which is not the prox
+        of $g^*$ (their $g^*$ is the indicator of $\{0\}$)."""
         return self._run(y, sigma, axis, out, threads, keep, ctx, copy, conj=True)
 
     def _check_conj(self):
@@ -1411,7 +1419,10 @@ class GraphTV(_ImageOperator):
     shape of x with the last axis over the edges, in the order of
     ``edges``. An edge is at a kink when its ends are equal and the
     solver's flow on it is on its bound (on a graph with cycles the flow is
-    not unique; this is the one behind ``info.gap``). -1 joins its ends (the
+    not unique; this is the one behind ``info.gap``). The mask is then the
+    edges biactive in that flow: on a graph with cycles it can flag edges
+    where the prox is smooth, and a branch override there may select no
+    piece the prox has (since 1.0.1). -1 joins its ends (the
     default), +1 keeps them apart; a region splits only where every edge
     across the split is kept apart."""
 
@@ -1568,7 +1579,9 @@ class _Pointwise(Operator):
 
 class L0(_Pointwise):
     r"""$g(z) = \lambda \sum_i w_i [z_i \ne 0]$ (hard thresholding at
-    $\sqrt{2 \gamma \lambda w_i}$). Parameters: weights (the map is piecewise constant in them)."""
+    $\sqrt{2 \gamma \lambda w_i}$). The map jumps there, from 0 to the
+    threshold, and the derivative at the jump is the selected branch's, a
+    convention. Parameters: weights (the map is piecewise constant in them)."""
 
     def __init__(self, lam=1.0, weights=None):
         w = _vec(weights)
@@ -1578,7 +1591,10 @@ class L0(_Pointwise):
 
 class Lq(_Pointwise):
     r"""$g(z) = \lambda \sum_i w_i \lvert z_i \rvert^q$ with $0 < q < 1$ (closed form
-    for $q = 1/2$ and $2/3$, safeguarded Newton otherwise). Parameters: weights;
+    for $q = 1/2$ and $2/3$, safeguarded Newton otherwise). The map jumps from
+    0 to $\beta = (2c(1 - q))^{1/(2-q)}$, $c = \gamma\lambda w_i$, at
+    $\lvert x_i \rvert = \beta + c q \beta^{q-1}$, and the derivative at the jump
+    is the selected branch's, a convention. Parameters: weights;
     ``grads.lam`` is also provided."""
 
     def __init__(self, lam=1.0, q=0.5, weights=None):
@@ -1637,7 +1653,10 @@ class MCP(_Pointwise):
 
 class LogPenalty(_Pointwise):
     r"""$g(z) = \lambda \sum_i \log(1 + \lvert z_i \rvert / \varepsilon)$,
-    $\varepsilon > 0$. Parameters: lam, eps."""
+    $\varepsilon > 0$. The map is Lipschitz for $\gamma\lambda < \varepsilon^2$,
+    Hölder-½ at $\lvert x \rvert = \varepsilon$ for $\gamma\lambda = \varepsilon^2$,
+    and jumps at its tie above; there the derivative is the selected branch's,
+    a convention. Parameters: lam, eps."""
 
     _layout = [("lam", 1, True), ("eps", 1, True)]
 

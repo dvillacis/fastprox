@@ -254,12 +254,12 @@ Two audits of 1.0.0's mathematics are [docs/mathematical-audit-2026-10-25.md](do
 
 **Guarantees in the spec and the docs**
 
-- [ ] C1: Three classes of prox maps: Lipschitz, Hölder-½ (log penalty at γλ = ε²) and discontinuous (ℓ0, ℓq, log above it). Clarke and B-subdifferential claims are limited to the first class; elsewhere the derivative is a named branch convention — [spec](docs/math-audit-2026-10.md#c1)
-- [ ] C2: Nonconvex penalties. Only SCAD, MCP and ℓ0 are bounded; existence is stated as what was observed; the README's conjugate claim gets the caveat (g* = δ{0}, the returned map is the Moreau residual) — [spec](docs/math-audit-2026-10.md#c2)
-- [ ] C3: Composed and bilevel gradients. A section "What the derivatives guarantee": chain rules off switching sets, Clarke 2.6.6 for a C¹ loss applied directly, and the caller's regularity for implicit differentiation — [spec](docs/math-audit-2026-10.md#c3)
-- [ ] C4: A small gap does not certify a derivative. `deriv.exact` and `refine` describe the regions, not a bound in the gap — [spec](docs/math-audit-2026-10.md#c4)
-- [ ] C5: Graph TV kinks describe the saved flow, a superset of the prox's kinks on graphs with cycles — [spec](docs/math-audit-2026-10.md#c5)
-- [ ] C6: Outer-method statements. Hypotheses and "sufficient" for forward–backward, FISTA, nonconvex descent and error summability, each checked in its source — [spec](docs/math-audit-2026-10.md#c6)
+- [x] C1: Three classes of prox maps: Lipschitz, Hölder-½ (log penalty at γλ = ε²) and discontinuous (ℓ0, ℓq, log above it). Clarke and B-subdifferential claims are limited to the first class; elsewhere the derivative is a named branch convention — [spec](docs/math-audit-2026-10.md#c1)
+- [x] C2: Nonconvex penalties. Only SCAD, MCP and ℓ0 are bounded; existence is stated as what was observed; the README's conjugate claim gets the caveat (g* = δ{0}, the returned map is the Moreau residual) — [spec](docs/math-audit-2026-10.md#c2)
+- [x] C3: Composed and bilevel gradients. A section "What the derivatives guarantee": chain rules off switching sets, Clarke 2.6.6 for a C¹ loss applied directly, and the caller's regularity for implicit differentiation — [spec](docs/math-audit-2026-10.md#c3)
+- [x] C4: A small gap does not certify a derivative. `deriv.exact` and `refine` describe the regions, not a bound in the gap — [spec](docs/math-audit-2026-10.md#c4)
+- [x] C5: Graph TV kinks describe the saved flow, a superset of the prox's kinks on graphs with cycles — [spec](docs/math-audit-2026-10.md#c5)
+- [x] C6: Outer-method statements. Hypotheses and "sufficient" for forward–backward, FISTA, nonconvex descent and error summability, each checked in its source — [spec](docs/math-audit-2026-10.md#c6)
 - [x] A1: Commit both audits with errata (Ky Fan index in T9, T3's equality, T5's scaling, T7's strict complementarity, T8's prox-bound), the scripts under `reports/`, and the three pages in `mkdocs.yml` — [spec](docs/math-audit-2026-10.md#a1)
 - [ ] R1: Every M item's counterexample as an assertion in the suite (fixtures, no CVXPY or mpmath at test time); full suites, the sanitizer build and a 24-hour fuzz run; then 1.0.1 on PyPI — [spec](docs/math-audit-2026-10.md#r1)
 

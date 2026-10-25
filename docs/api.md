@@ -214,14 +214,19 @@ problem $\tfrac12 (z - x)^2 + \gamma\psi(z)$:
   sat on a tie, the same for any thread count. A tie means the input is
   exactly the threshold computed in double precision; a threshold that
   falls between two doubles has no tie.
-- **Derivatives** are those of the selected branch: 0 off the support, and
+- **Derivatives** are those of the selected branch (at a jump of ℓ0, ℓq or
+  the log penalty, a convention: see "Why these are valid derivatives"): 0 off the support, and
   $1/(1 + \gamma\lambda\psi''(z))$ on it, from the scalar equation
   $z + \gamma\lambda\psi'(z) = x$, with the $\gamma$ and parameter derivatives
   from the same equation. ℓ0 is piecewise constant in $\gamma$ and $w$.
-- **Conjugates.** `fp_prox_conj` returns
+- **Conjugates.** `fp_prox_conj` returns the Moreau residual
   $y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$. For these nonconvex
   $g$ that is not the prox of $g^\ast$: the Moreau identity holds only for
-  convex $g$.
+  convex $g$ (Bauschke and Combettes, Thm 14.3). Their Fenchel conjugate is
+  trivial: $g$ is finite, nonnegative, $g(0) = 0$ and $g(tv) = o(t)$ along
+  every ray, so $g^\ast = \delta_{\{0\}}$ and $\operatorname{prox}_{\sigma g^\ast}
+  = 0$. A primal–dual step built from the residual is not a conjugate prox
+  step of $g$, and needs its own analysis.
 - Every decision is made in double precision, also for float32 inputs, so
   float32 and float64 pick the same branch.
 
@@ -519,7 +524,9 @@ graph can be given as it is. In Python `TreeTV` is a subclass of `GraphTV`.
 
 
 Every operator is piecewise smooth. At a point where two pieces meet,
-`fp_jvp` and `fp_vjp` use the Jacobian of one of them, chosen as follows:
+`fp_jvp` and `fp_vjp` use the Jacobian of one of them, chosen as follows
+(for the rows marked *branch*, the map jumps there, and the choice is a
+convention; see "Why these are valid derivatives" below):
 
 | Operator | At the kink | Jacobian used |
 | --- | --- | --- |
@@ -550,7 +557,8 @@ Every operator is piecewise smooth. At a point where two pieces meet,
 | sorted ℓ1 | adjacent blocks with equal values; a block at 0 | blocks not pooled; the block at 0 thresholded |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
 | anisotropic TV | an edge with no jump whose dual is on its bound | not joined: its two sides averaged apart, with the sign of the dual |
-| ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
+| ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | *branch:* the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
+| log penalty at $\gamma\lambda = \varepsilon^2$ | $\lvert x_i \rvert = \varepsilon$ (continuous, Hölder-½) | *branch:* thresholded: 0 |
 | SCAD, MCP | $\lvert x_i \rvert$ at a breakpoint | the branch below it (at $\gamma\lambda$: thresholded) |
 | isotropic TV | an entry with a vanishing gradient whose dual is on the sphere | not flat: $H_p$ from its gradient (flat only when the gradient is at the rounding level) |
 
@@ -564,10 +572,25 @@ $x - \gamma\lambda P(x/(\gamma\lambda))$, with $P$ the projection onto the ℓ1
 ball, so an entry kept off the support of $P$ is left unclipped. `fp_prox_conj`
 flips its operator's rule in the same way.
 
-**Why these are valid derivatives.** Every choice in the table is the
-Jacobian of one of the smooth pieces that meet at the point. So it belongs
-to the B-subdifferential, the set of limits of nearby Jacobians, and hence
-to Clarke's generalised Jacobian:
+**Why these are valid derivatives** (revised in 1.0.1, math audit C1). The
+maps fall into three classes:
+- **Lipschitz:** every convex operator (1-Lipschitz, firmly nonexpansive,
+  with a symmetric Jacobian with eigenvalues in $[0, 1]$ where it exists),
+  and SCAD, MCP and the log penalty at $\gamma\lambda < \varepsilon^2$ under
+  their step conditions ($1/(1 - \gamma\rho)$-Lipschitz, with $\rho = w/(a -
+  1)$, $w/b$ and $\lambda/\varepsilon^2$; these can expand, see "Nonconvex
+  penalties" below).
+- **Hölder-½:** the log penalty at $\gamma\lambda = \varepsilon^2$, unique
+  and continuous but not locally Lipschitz at $\lvert x \rvert =
+  \varepsilon$.
+- **Discontinuous:** ℓ0, ℓq and the log penalty at $\gamma\lambda >
+  \varepsilon^2$, which jump at their threshold (see "Kink masks" below for
+  the points).
+
+For the first class, every choice in the table is the Jacobian of one of
+the smooth pieces that meet at the point. So it belongs to the
+B-subdifferential, the set of limits of nearby Jacobians, and hence to
+Clarke's generalised Jacobian, which is defined for locally Lipschitz maps:
 - S. Scholtes, *Introduction to Piecewise Differentiable Equations*,
   Springer 2012, Prop. 4.3.1, and Prop. 2.4.3–2.4.5 for projections onto
   polyhedra (simplex, ℓ1 ball, monotone cone, and 1D TV through the Moreau
@@ -576,10 +599,18 @@ to Clarke's generalised Jacobian:
   Optimization*, Ex. 14.10. For soft thresholding at $\lvert x \rvert = \tau$,
   both 0 and 1 are such limits, and neither is canonical.
 
+For the other two classes, at a jump or at the Hölder point, the derivative
+is the slope of the branch the forward pass selected (the rows marked
+*branch*). That is a convention: no locally Lipschitz calculus applies
+there, and no tie rule removes the jump. Away from those points the maps
+have ordinary Jacobians.
+
 The derivatives in $x$, $\gamma$ and the parameters $\theta$ all come from the
 same saved structure. Together they are therefore the Jacobian of one piece in
-the joint variables $(x, \gamma, \theta)$. As a result, a VJP through a smooth
-outer loss is a Clarke subgradient of the composition.
+the joint variables $(x, \gamma, \theta)$. As a result, for a map of the first
+class, a VJP through a $C^1$ outer loss applied to its output directly is a
+Clarke subgradient of the composition. Further compositions need more: see
+"What the derivatives guarantee" below.
 
 At a kink, the JVP is not the one-sided directional derivative for
 directions that leave the chosen piece. Finite-difference tests therefore
@@ -604,10 +635,14 @@ SCD subspaces of each entry:
   $\lvert x \rvert = \gamma w_i \lambda$, 2: $(1 + \gamma w_i)\lambda$, 3:
   $a\lambda$; MCP 1: $\lvert x \rvert = \gamma w_i \lambda$, 2: $b\lambda$.
   Since 0.3 the ties of the nonconvex maps too, each with code 1: ℓ0 at
-  $\lvert x \rvert = \sqrt{2\gamma\lambda w_i}$, ℓq at its threshold $\tau$,
-  the log penalty at its tie (found by bisection) or, where its map is
-  continuous ($\gamma\lambda \le \varepsilon^2$), at
-  $\lvert x \rvert = \gamma\lambda/\varepsilon$; their two sides are the zero
+  $\lvert x \rvert = \sqrt{2\gamma\lambda w_i}$, where it jumps from 0 to
+  $\sqrt{2\gamma\lambda w_i}$; ℓq at its threshold
+  $\tau = \beta + c q \beta^{q-1}$, where it jumps from 0 to
+  $\beta = (2c(1 - q))^{1/(2-q)}$, $c = \gamma\lambda w_i$; the log penalty at
+  its tie (found by bisection), where it jumps for $\gamma\lambda >
+  \varepsilon^2$, or, where its map is continuous ($\gamma\lambda \le
+  \varepsilon^2$), at $\lvert x \rvert = \gamma\lambda/\varepsilon$, which is
+  a kink below $\varepsilon^2$ and the Hölder-½ point at it; their two sides are the zero
   piece and the nonzero branch, taken at $\max(\lvert x \rvert, \tau)$ where
   the branch starts at $\tau$. A map that is the identity ($\gamma w_i = 0$ or
   $\lambda = 0$) has none. The mask is
@@ -635,7 +670,17 @@ SCD subspaces of each entry:
   the sum of $x - z$ over the subtree below the edge, unique on a forest;
   graph TV uses the flow its solver found, saved with the structure (one
   double per edge and image), since on a graph with cycles the flow is not
-  unique and a kink depends on which one is used.
+  unique. Graph TV's mask is therefore the edges biactive *in the saved
+  flow* (*revised in 1.0.1*, math audit C5): on a graph with cycles it is a
+  superset of the prox's kinks, since the prox's differentiability does not
+  depend on the dual. On the triangle with $x = (1, 0, -1)$ and $\gamma = 1$
+  the flows $(0, 0, 1)$ and $(1/3, 1/3, 2/3)$ are both optimal; the prox is
+  smooth there, with Jacobian $\mathbf 1 \mathbf 1^\top / 3$, which the
+  library returns, but the first flow saturates an edge and the mask flags
+  it. A branch override on such an edge may select no piece the prox
+  actually has. For tree TV, 1D TV and anisotropic TV, where the dual of a
+  region is unique, each side of a flagged edge is the derivative of the
+  one-sided difference in a direction that keeps its piece.
 - **Isotropic TV** has masks but no branch overrides (`fp_workspace_set_branch`
   returns `FP_EINVAL`): keeping a pixel with zero gradient apart from its
   neighbours has infinite curvature $\gamma / \lVert g_p \rVert$, which its
@@ -699,6 +744,63 @@ dn = op.jvp(ctx, dx, branch=-1, kink_tol=1e-8)        # and on the x - eps side
 d = ctx.jacobian_diag(branch=1, kink_tol=1e-8)        # the same as up here, dx being ones
 ```
 
+### What the derivatives guarantee (*since 1.0.1*)
+
+The JVPs and VJPs are local derivatives of the prox. What they mean once
+composed, inside a training loop or a bilevel method, depends on where they
+are taken and on hypotheses only the caller can check (math audit C3):
+
+| Use | What holds |
+| --- | --- |
+| Off switching sets (no kink, no jump) | The derivatives are classical, and compose by the ordinary chain rule. |
+| At a kink, $C^1$ loss $L$ on the output: $L(\operatorname{prox}(x))$ | For a Lipschitz map, $\nabla L^\top J$ is a Clarke subgradient of $L \circ \operatorname{prox}$ in $x$ (Clarke, *Optimization and Nonsmooth Analysis*, Thm 2.6.6, with equality for every element of the generalised Jacobian). |
+| At a kink, after a parametrisation $x = A t$ or another nonsmooth map | No guarantee: Clarke's chain rule is an inclusion there (Thm 2.6.6; Thm 2.3.10 for a map that is not onto). |
+| At a jump (ℓ0, ℓq, log penalty above $\varepsilon^2$) | The selected branch's slope, a convention; no Clarke property. |
+| A lower problem solved by fixed-point iteration, differentiated implicitly | Needs the caller's regularity: see below. |
+| Iterative image operators | Exact only once the saved regions are the solution's (`ctx.deriv.exact`); a small gap alone does not make them so. |
+
+**A composition that breaks.** Project $(t, -t)$ onto the nonnegative orthant
+and take $L(z) = z_1 - z_2$. Since $\max(t, 0) - \max(-t, 0) = t$, the
+composition is the identity in $t$, with derivative 1. At $t = 0$ the
+orthant's rule takes $J = I$ (both entries inside), and the chain rule gives
+$(1, -1) I (1, -1)^\top = 2$. Each factor is a valid generalised derivative;
+the product is not, because no point on the line $(t, -t)$ reaches the piece
+$J = I$. Conservative fields compose exactly (Bolte and Pauwels, *Math.
+Program.* 188, 2021, Lemma 5) but may contain such spurious values on a set
+of measure zero, which is where automatic differentiation takes them.
+
+**Bilevel problems.** For a lower problem $\min_z f(z, \theta) + g(z,
+\theta)$ solved by $z = \operatorname{prox}_{\gamma g}(z - \gamma \nabla_z f)$,
+implicit differentiation solves
+$[I - J (I - \gamma \nabla^2_{zz} f)]\, D_\theta z = -\gamma J \nabla^2_{z\theta} f + \partial_\theta \operatorname{prox}$,
+with $J$ the prox's Jacobian. An exact $J$ does not make that system
+solvable: at $f = g = 0$ the prox is the identity, $J = I$, and the matrix is
+0, since every $z$ solves the lower problem. The caller supplies the
+regularity:
+- the fixed-point matrix must be invertible (for instance from strong
+  convexity of the lower problem);
+- where a TV derivative is used, strict complementarity: a dual with
+  $\lVert q_j \rVert < 1$ on every flat group (De los Reyes and Meyer,
+  *Nonsmooth analysis of optimization problems with variational inequality
+  constraints involving the discrete total variation*, Cor. 2.10; Villacís,
+  PhD thesis, Thm 4.6).
+  Under it, near the solution, the TV prox is smooth on its fused-region
+  manifold with
+  $J = Q[Q^\top (I + K_A^\top H K_A) Q]^{-1} Q^\top$,
+  where $Q$ spans $\{d : K_F d = 0\}$ for the flat groups $F$, and $H$ is the
+  curvature of the active groups $A$
+  ($\gamma r_p (I - n_p n_p^\top) / \lVert (Kz)_p \rVert$, 0 for anisotropic
+  TV, where $J$ is the projection onto the region subspace). This is the
+  system the TV derivatives solve.
+
+At nonsmooth points the result of implicit differentiation is a
+conservative Jacobian, not a Clarke one (Bolte, Le, Pauwels and
+Silveti-Falls, *Nonsmooth implicit differentiation for machine learning and
+optimization*, NeurIPS 2021). In short, the library supplies local prox
+sensitivities and diagnostics (kink masks, `ctx.deriv`); it cannot certify
+the hypergradient of an enclosing problem without information about that
+problem.
+
 ### Inexact proxes inside outer solvers (*since 1.0*)
 
 The iterative operators (`TVAniso`, `TVIso`, `GraphTV` and the device-native
@@ -759,59 +861,92 @@ an outer method such as proximal gradient or FISTA to keep its rate.
   the gaps' sum. The errors are computed at the scale the image was solved
   at, so they hold where the gap itself overflows or underflows.
 
-**What outer methods need.** Schmidt, Le Roux and Bach (*Convergence rates of
-inexact proximal-gradient methods for convex optimization*, NeurIPS 2011,
-arXiv:1109.2415) analyse $x_k = \operatorname{prox}_{h/L}(y_{k-1} - \nabla
-g(y_{k-1})/L)$ with the prox solved to $\varepsilon_k$ in the objective
-$\tfrac{L}{2}\lVert x - y \rVert^2 + h(x)$ (their (4)). With $\gamma = 1/L$
-that objective is $L$ times fastprox's, so $\varepsilon_k = L \cdot
-\mathrm{gap}_k$, and the quantity their bounds use, $\sqrt{2\varepsilon_k/L}$, is
-$\sqrt{2\,\mathrm{gap}_k}$: the certified distance $\lVert z_k - z_k^\star
-\rVert$, at most $\mathrm{ztol}_k \lVert x_k \rVert$ for the prox's input
-$x_k$. Without gradient errors:
+**What outer methods need** (*revised in 1.0.1*, math audit C6; each
+statement below was read in its source). Schmidt, Le Roux and Bach
+(*Convergence rates of inexact proximal-gradient methods for convex
+optimization*, NeurIPS 2011, arXiv:1109.2415) assume $g$ convex with an
+$L$-Lipschitz gradient, $h$ proper, closed and convex, and that $f = g + h$
+attains its minimum at some $x^\star$ (their (H)). They analyse $x_k =
+\operatorname{prox}_{h/L}(y_{k-1} - \nabla g(y_{k-1})/L)$ with the prox
+solved to $\varepsilon_k$ in the objective $\tfrac{L}{2}\lVert x - y \rVert^2
++ h(x)$ (their (4)). With $\gamma = 1/L$ that objective is $L$ times
+fastprox's, so $\varepsilon_k = L \cdot \mathrm{gap}_k$, and the quantity
+their bounds use, $\sqrt{2\varepsilon_k/L}$, is $\sqrt{2\,\mathrm{gap}_k}$:
+the certified distance $\lVert z_k - z_k^\star \rVert$, at most
+$\mathrm{ztol}_k \lVert v_k \rVert$ for the prox's input $v_k$. Without
+gradient errors (their sums also carry $\lVert e_i \rVert / L$ for an error
+$e_i$ in the gradient):
 
 - **Proximal gradient** (their Proposition 1): $f(\bar x_k) - f^\star \le
   \frac{L}{2k}\bigl(\lVert x_0 - x^\star \rVert + 2A_k + \sqrt{2B_k}\bigr)^2$
-  for the average $\bar x_k$ of the iterates, with $A_k = \sum_{i \le k}
-  \sqrt{2\varepsilon_i/L}$ and $B_k = \sum_{i \le k} \varepsilon_i/L$. The
-  $O(1/k)$ rate holds when $\sum_k \sqrt{\varepsilon_k}$ converges, for
-  instance when $\mathrm{ztol}_k$ falls as $O(1/k^{1+\delta})$.
-- **Accelerated proximal gradient** with $\beta_k = (k-1)/(k+2)$ (their
-  Proposition 2): $f(x_k) - f^\star \le
+  for the average $\bar x_k$ of the iterates (and so for the best one), with
+  $A_k = \sum_{i \le k} \sqrt{2\varepsilon_i/L}$ and $B_k = \sum_{i \le k}
+  \varepsilon_i/L$. The $O(1/k)$ rate follows when $\sum_k
+  \sqrt{\varepsilon_k}$ converges, a sufficient condition.
+- **Accelerated proximal gradient** with $y_k = x_k + \frac{k-1}{k+2}(x_k -
+  x_{k-1})$ (their Proposition 2): $f(x_k) - f^\star \le
   \frac{2L}{(k+1)^2}\bigl(\lVert x_0 - x^\star \rVert + 2\tilde A_k +
-  \sqrt{2\tilde B_k}\bigr)^2$ with $\tilde A_k = \sum_{i \le k} i
-  \sqrt{2\varepsilon_i/L}$ and $\tilde B_k = \sum_{i \le k} i^2
-  \varepsilon_i/L$. The $O(1/k^2)$ rate needs $\sum_k k\sqrt{\varepsilon_k}$
-  to converge, for instance $\mathrm{ztol}_k = O(1/k^{2+\delta})$: a stronger
-  condition, which is why FISTA stalls at a fixed loose tolerance.
+  \sqrt{2\tilde B_k}\bigr)^2$ for the last iterate, with $\tilde A_k =
+  \sum_{i \le k} i \sqrt{2\varepsilon_i/L}$ and $\tilde B_k = \sum_{i \le k}
+  i^2 \varepsilon_i/L$. The $O(1/k^2)$ rate follows when $\sum_k
+  k\sqrt{\varepsilon_k}$ converges: a stronger sufficient condition. At a
+  fixed tolerance the bound guarantees no convergence, and the authors note
+  that the accelerated method is the more sensitive to errors; that FISTA
+  then stalls is our reading of it, not their theorem.
+- **From `ztol` to these sums.** $\sqrt{2\,\mathrm{gap}_k} \le
+  \mathrm{ztol}_k \lVert v_k \rVert$, so a power-law schedule such as
+  $\mathrm{ztol}_k = O(1/k^{1+\delta})$ (or $O(1/k^{2+\delta})$ accelerated)
+  meets the conditions only if the prox inputs stay bounded. The paper does
+  not assume that, and its own bound on the iterates already uses the
+  summability, so it cannot supply it here.
+  The direct recipe needs no such assumption: take $\mathrm{ztol}_k =
+  \eta_k / \max(1, \lVert v_k \rVert)$ with $\sum_k \eta_k$ (or $\sum_k k
+  \eta_k$) finite, so that $\sqrt{2\,\mathrm{gap}_k} \le \eta_k$.
 
 **Nonconvex penalties** (SCAD, MCP, $\ell_0$, $\ell_q$, the log penalty, and
 their group and spectral forms). The bounds above are for convex penalties.
 For these:
 
-- **A minimiser may not exist.** These penalties are bounded, so with a data
-  term that sees only part of the entries the objective is not coercive. On
-  matrix completion of MovieLens ratings (300 × 300, 30% observed) with
-  spectral MCP, the objective kept falling while the iterates grew without
-  bound, for FISTA and for proximal gradient at $0.99/L$ alike: after 16 000
-  FISTA iterations $\lVert W \rVert_F$ was 12 000 and unobserved entries
-  exceeded 2 000, on centred ratings between −2.7 and 1.3. The nuclear norm settled within
+- **A minimiser may not exist.** SCAD, MCP and $\ell_0$ are bounded, so with
+  a data term that sees only part of the entries the objective need not be
+  coercive. $\ell_q$ and the log penalty are unbounded but sublinear; with
+  positive weights they are coercive, though weakly. Noncoercivity is a
+  risk, not a proof that no minimiser exists. On matrix completion of
+  MovieLens ratings (300 × 300, 30% observed) with spectral MCP, this was
+  observed: the objective kept falling while the iterates grew, for FISTA
+  and for proximal gradient at $0.99/L$ alike. After 16 000 FISTA iterations
+  $\lVert W \rVert_F$ was 12 000 and unobserved entries exceeded 2 000, on
+  centred ratings between −2.7 and 1.3. The nuclear norm settled within
   250 iterations. `bench/repro_u6_spectral_mcp.py` reproduces it. Such a
-  model needs a coercive term as well, for instance a small nuclear or
-  Frobenius norm.
-- **The outer step.** Proximal gradient reaches critical points with a step
-  below $1/L$ for a nonconvex penalty: this is PALM (Bolte, Sabach and Teboulle,
-  *Math. Program.* 146, 2014) with one block, as presented by Chambolle and
-  Pock (*Acta Numerica* 25, 2016, Section 6.2). A convex penalty allows steps
-  up to $2/L$. On 50% matrix completion of a rank-4 30 × 25 matrix ($L = 1$)
-  with spectral MCP ($\lambda = 0.5$, $b = 3$), steps of $0.5/L$ to $1.5/L$
+  model is safer with a coercive term as well, for instance a small nuclear
+  or Frobenius norm.
+- **The outer step.** For a nonconvex penalty, proximal gradient with a
+  step $\gamma < 1/L$ is PALM (Bolte, Sabach and Teboulle, *Math. Program.*
+  146, 2014) with one block, as presented by Chambolle and Pock (*Acta
+  Numerica* 25, 2016, Section 6.2). Each step decreases the objective,
+  $\varphi(x_{k+1}) \le \varphi(x_k) - \frac{1 - \gamma L}{2\gamma} \lVert
+  x_{k+1} - x_k \rVert^2$, for $\gamma$ below the penalty's prox-boundedness
+  threshold (Themelis, Stella and Patrinos, *SIAM J. Optim.* 28, 2018,
+  Lemma 2.1), which is $\infty$ for every penalty here, since each is bounded
+  below. Convergence of the whole sequence to a critical point needs more:
+  the penalty closed and bounded below, the objective a Kurdyka–Łojasiewicz
+  function, and *bounded iterates* (Bolte, Sabach and
+  Teboulle's convergence theorem, Theorem 3.1 and its one-block case,
+  Proposition 3.1, in the authors' manuscript). PALM's steps are exact
+  proxes; the theory says nothing about an inexact one. Bounded iterates
+  are exactly what can fail, as in the MovieLens example above. With a
+  convex penalty, constant steps $\gamma \in (0, 2/L)$ converge, with the
+  endpoint excluded and a minimiser assumed (Bauschke and Combettes, Cor.
+  28.9). On 50% matrix completion of a rank-4 30 × 25 matrix ($L = 1$) with
+  spectral MCP ($\lambda = 0.5$, $b = 3$), steps of $0.5/L$ to $1.5/L$
   converged. At $1.99/L$ the objective rose at half the iterations and the
   iterates did not approach the matrix, while the nuclear norm still
-  converged there. FISTA needs a step of at most $1/L$ even with a convex
-  penalty: at $1.5/L$ it diverged on that problem with MCP and with the
+  converged there. FISTA's standard guarantee uses $\gamma \le 1/L$
+  (Chambolle and Pock, Algorithm 5 and Theorem 4.10), a sufficient
+  condition; on that problem at $1.5/L$ it diverged with MCP and with the
   nuclear norm. FISTA is not a descent method: its objective rose at up to a
   third of the iterations at smaller steps, with either penalty. For a
-  nonconvex penalty it also has no convergence guarantee.
+  nonconvex penalty it has no convergence guarantee.
 - **The prox's step range.** The outer step is the prox's $\gamma$, so it must
   also satisfy SCAD's $a > 1 + \gamma \max w$ and MCP's $b > \gamma \max w$
   (`FP_EPARAM`, `ValueError` in Python).
@@ -877,9 +1012,22 @@ structure saved at the returned point, which is exact only when that point
 has the solution's regions: anisotropic TV once its polish certified them
 (from about 1e-8 to 1e-10 on 128² images), graph TV when no part was stopped
 by `tol`, tree TV always. Isotropic TV caps its curvature at a smoothing that
-vanishes with the gap, so its derivative carries an error of the order of the
-certified error of $z$: on 2 × 128² images 3% after a 1e-6 solve, 1e-4 after
-a 1e-10 one.
+vanishes with the gap, so its derivative carries an error that, measured on
+2 × 128² images, was of the order of the certified error of $z$: 3% after a
+1e-6 solve, 1e-4 after a 1e-10 one. These are measurements, not a bound.
+
+**A small gap does not certify a derivative** (*since 1.0.1*, math audit
+C4). In two-node TV with $x = (1 + \delta, -1 - \delta)$ and $\gamma = 1$, the
+fused candidate $z = (0, 0)$ has gap $\delta^2$, while its derivative, the
+average, misses the true Jacobian $I$ by 1 for every $\delta$. No bound
+$\lVert J - \tilde J \rVert \le C \sqrt{\mathrm{gap}}$ holds uniformly.
+Identifying the regions needs a margin: a dual strictly inside its bounds
+on the flat groups by more than the dual's error (Bertrand et al., *Implicit
+differentiation for fast hyperparameter selection in non-smooth convex
+learning*, JMLR 23, 2022, Assumption 4). So `exact` means that the saved
+regions are certified as the solution's, not that the gap is small, and a
+refine near a switch makes the derivative exact only once the margin
+exceeds the remaining error.
 
 - **`ctx.deriv`** is a `DerivInfo(residual, iters, exact, smoothing)` after
   every derivative; `fp_workspace_deriv_exact(ws, &exact, &smoothing)` in C.
@@ -888,7 +1036,8 @@ a 1e-10 one.
   `AccuracyWarning` once per point.
 - **`ctx.refine(ztol)`** solves the kept call again, from its saved input and
   its dual as a warm start, to `ztol`, and returns the refined $z$; the
-  derivatives then read the refined point. `jvp(..., refine=ztol)` and
+  derivatives then read the refined point, and `ctx.deriv.exact` says
+  whether its regions are certified. `jvp(..., refine=ztol)` and
   `vjp(..., refine=ztol)` refine first. In C,
   `fp_workspace_refine(op, ws, tol, max_iter, out, info)`, bit for bit a
   fresh solve seeded with the kept dual. Graph TV refines to `tol=0`.
@@ -1100,7 +1249,7 @@ other count as tied (docs/spec.md, "Spectral operators").
 - **Kinks.** At a singular value on a kink of the scalar map, the map is not
   differentiable. Examples are MCP at $\gamma\lambda$ and $b\lambda$, SCAD at
   $(1 + \gamma)\lambda$ and $a\lambda$, and soft thresholding at
-  $\gamma\lambda$. There the JVP is one element of the B-subdifferential, and
+  $\gamma\lambda$. There, for a Lipschitz scalar map, the JVP is one element of the B-subdifferential, and
   stays adjoint to the VJP:
   - at values exactly on the kink, the scalar map's branch below, for each
     value;
@@ -1165,6 +1314,7 @@ Since 1.0 the computation depends on the operator (audit A1).
 
 - **Positively homogeneous $g$ and cone indicators.** This covers soft thresholding, ℓ2 and group ℓ2, the tree-structured norms, ℓ∞, the maximum, the sums of the largest entries, every TV operator, the nonnegative orthant, the second-order cone and isotonic regression with unit or equal weights (with unequal weights there is no Euclidean conjugate, and the call returns `FP_EINVAL`; *since 1.0.1*). There $g^\ast$ is the indicator of a set $C$, and the result, $y - \operatorname{prox}_g(y)$, is the projection onto $C$. It is the same for every $\sigma > 0$, computed without scaling, so it is exact even at $\sigma = 10^{-320}$. Its derivative in $\sigma$ is 0. After the call, an image operator's dual is that of $\operatorname{prox}_g(y)$ at unit step, and $\sum_a q_a$ is the output; this is the same dual for every $\sigma$.
 - **The other operators** evaluate the formula as written. $1/\sigma$ must lie in `fp_prox`'s step range, and every $y_i/\sigma$ must be finite in the array's dtype; otherwise the call returns `FP_EPARAM`. The quotients are checked for every $\sigma < 1$ in float32, and in float64 for $\sigma < 2^{-64}$. Above that, a float64 quotient can overflow only for $\lvert y_i \rvert$ beyond about $10^{289}$, and its output is then $\pm\infty$ or NaN. A check for every $\sigma < 1$ cost 15–30% on the cheapest conjugates. At large $\sigma$ the result itself can leave the range: it is about $-\sigma$ times a parameter, near $-\sigma r / n$ for the simplex of radius $r$, and $\pm\infty$ once that exceeds the largest finite value (for example $r = 10^{45}$ at $\sigma = 10^{273}$). There is no step range in $\sigma$, so the call succeeds.
+- **Nonconvex penalties** (ℓ0, ℓq, SCAD, MCP, the log penalty, and their group and spectral forms; *revised in 1.0.1*, math audit C2). The call evaluates the same formula, which for them is the Moreau residual, not $\operatorname{prox}_{\sigma g^\ast}$: Moreau's identity needs a convex $g$ (Bauschke and Combettes, Thm 14.3; Rockafellar and Wets, 12.19). Their Fenchel conjugate is $\delta_{\{0\}}$, since each is finite and nonnegative with $g(0) = 0$ and $g(tv) = o(t)$ along rays, so the true conjugate prox is 0. A primal–dual method that uses the residual as a dual step is not covered by the convex theory of that method.
 
 ### Errors
 
@@ -1596,7 +1746,9 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
 ## Conventions
 
 - Derivatives are an element of the generalized Jacobian, chosen by the
-  structure of the forward pass (see "Kinks" above).
+  structure of the forward pass, for the Lipschitz maps; for ℓ0, ℓq and the
+  log penalty at and above $\gamma\lambda = \varepsilon^2$, the selected
+  branch's slope at a jump (see "Kinks" above).
 - Exact operators report `gap = 0`; `iters` and `ties` are zero for every
   0.1 operator. Iterative operators report their duality gap and iterations,
   and the nonconvex maps the number of entries on a tie.
