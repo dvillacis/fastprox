@@ -477,8 +477,13 @@ void run(const uint8_t *data, size_t size) {
     // successful prox has no NaN, and in float64 is finite (since 1.0, audit
     // A1: steps beyond the operator's range and conjugates whose y / sigma
     // overflow return FP_EPARAM instead). In float32 an exact result beyond
-    // FLT_MAX is +-inf. Moderate means far from overflow in the array's dtype.
+    // FLT_MAX is +-inf, and so is a conjugate's in float64 when sigma times a
+    // parameter exceeds 2^960: y - sigma P(y / sigma) is about -sigma r / n
+    // for the simplex of radius r (r = 1.1e45 at sigma = 9.7e272 gave -6.5e316,
+    // fuzz 2026-10-24; docs/api.md, "Conjugates"). Moderate means far from
+    // overflow in the array's dtype.
     const double big = f32 ? 1e12 : 1e100;
+    const bool inf_ok = f32 || (conj && gamma * b.max_param > 0x1p960);
     if (written && std::isfinite(gamma) && b.max_param < big) {
         bool moderate = true;
         std::vector<double> xs;
@@ -497,7 +502,7 @@ void run(const uint8_t *data, size_t size) {
             for (int64_t i = 0; i < numel; ++i) {
                 const double v = f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[i])
                                      : reinterpret_cast<double *>(z1.data())[i];
-                if (f32 ? std::isnan(v) : !std::isfinite(v)) {
+                if (inf_ok ? std::isnan(v) : !std::isfinite(v)) {
                     std::fprintf(stderr, "x (raw buffer):");
                     for (int64_t k = 0; k < total; ++k)
                         std::fprintf(stderr, " %.9g", f32 ? static_cast<double>(reinterpret_cast<float *>(xbuf.data())[k])

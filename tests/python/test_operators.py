@@ -600,6 +600,22 @@ def test_isotonic_extremes():
         res.append((z, op.vjp(ctx, g)[1].params))
     np.testing.assert_array_equal(res[1][0], res[0][0])
     np.testing.assert_allclose(res[1][1] * 2.0 ** 300, res[0][1], rtol=1e-14)
+    # Weights below 2^-1023, where 2^-k itself overflowed (nightly fuzz: NaN
+    # from weights 5.5e-318 and 1e-315). Subnormal weights scale up exactly,
+    # so they act as the same weights at unit scale, bit for bit; their
+    # perturbations dp at the same scale give the same jvp.
+    w2 = [5.5044446481948287e-318, 1.000212031694253e-315]
+    np.testing.assert_array_equal(fp.Isotonic(w2).prox(np.array([0.0, 58.0]), 4.6829915107396111e-309), [0.0, 58.0])
+    ws = np.ldexp(w, -1050)
+    tiny, unit = fp.Isotonic(ws), fp.Isotonic(np.ldexp(ws, 1050))
+    (zt, ct), (zu, cu) = tiny.prox(x, keep=True), unit.prox(x, keep=True)
+    np.testing.assert_array_equal(zt, zu)
+    dx, dp = rng.normal(size=12), rng.normal(size=12)
+    np.testing.assert_array_equal(tiny.jvp(ct, dx), unit.jvp(cu, dx))
+    np.testing.assert_array_equal(tiny.vjp(ct, g)[0], unit.vjp(cu, g)[0])
+    dps = np.ldexp(dp, -1050)  # rounded to subnormal precision, as the weights
+    np.testing.assert_allclose(tiny.jvp(ct, dx, dparams=dps), unit.jvp(cu, dx, dparams=np.ldexp(dps, 1050)),
+                               rtol=1e-14, atol=1e-14)
 
 
 def test_degenerate_box_bounds():
