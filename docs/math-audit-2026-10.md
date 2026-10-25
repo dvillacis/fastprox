@@ -263,12 +263,18 @@ calls that newly fail are those that returned a wrong result (M2, M5).
    - **Why it holds.** The rounding of a double iterate z to T is at most u_T‖z‖. Every image operator's prox is nonexpansive and maps 0 to 0, so ‖z‖ ≤ ‖x‖. For a conjugate output y − σz the same holds with ‖y‖, because Id − prox is also nonexpansive with fixed point 0.
    - **Where.** `image_zerr` adds the term (`src/core/driver.hpp`). It is one addition per image, with no pass over the output.
 2. **Unattainable targets.** A `ztol` below u_T cannot be certified in that dtype.
-   - The stopping rule is unchanged: it still tests the gap of the iterate.
-   - The final `zerr` now exceeds such a `ztol`, so the `ConvergenceWarning` of feedback U2 fires. Its message names the dtype's floor.
+   - The stopping rule is unchanged: it still tests the gap of the iterate, so a converged call has zerr ≤ ztol + u_T(1 + ztol).
+   - As built, the call raises `AccuracyWarning` when it starts, naming the dtype's floor, rather than a `ConvergenceWarning` after it: such a call converges, and the cause is known before it runs. It applies to a call's own `ztol` and to `inner_accuracy`'s, not to a `tol=`; `ztol=0` asks for no tolerance and does not warn.
+   - The inexact-derivative warning (feedback U4), whose limit is a ztol, allows for the same term.
 3. **Docs.**
    - `docs/spec.md` ("Optimality certificate"), `docs/api.md` (U1's section), the `ztol`/`zerr` docstrings and the C header's tolerance text state the bound with its u_T term.
    - They also state that the gap is evaluated in floating point, so the bound holds to working precision, not as a directed-rounding enclosure.
    - They state that an exact operator's gap 0 means that no certificate is computed.
+4. **As built, the exact bound** (`certified_error`, `src/core/driver.hpp`) is r + k(u_T(1 + r) + η√n/‖x‖), with r = √(2·gap)/‖x‖:
+   - ‖z‖ ≤ (1 + r)‖x‖ for the iterate, not ‖x‖;
+   - k = 2 after a conjugate, whose output rounds twice (z to T, then y − σz);
+   - η√n is the absolute rounding of n outputs below the normal range, η half T's smallest subnormal.
+   The PyTorch and JAX device solves report the same bound.
 
 **Constraints.**
 - **ABI:** unchanged; `fp_workspace_image_info` returns the new value.

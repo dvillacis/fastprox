@@ -732,10 +732,25 @@ an outer method such as proximal gradient or FISTA to keep its rate.
   $\mathrm{ztol} \min_i \lVert x_i \rVert / (\sqrt{n}\,(\max x_i - \min x_i))$.
   `ztol` and `tol` are exclusive, and a positive `ztol` below about 1e-154,
   whose square underflows, raises `ValueError`.
-- **`IterInfo.zerr`** is the error certified for the worst image,
-  $\max_i \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert$, in `ztol`'s units:
-  below `ztol` when the call converged, above it when an image stopped at
-  `max_iter`. It is NaN when an image holds a NaN. In float32 (JAX's
+- **`IterInfo.zerr`** is the error certified for the worst image, in
+  `ztol`'s units, of the array returned: with
+  $r_i = \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert$ the error of the
+  solver's iterate, it is $\max_i r_i + u(1 + r_i)$, with $u$ the unit
+  roundoff of the output dtype ($2^{-24}$ in float32, $2^{-53}$ in float64),
+  since rounding the iterate moves it by at most $u \lVert z \rVert \le u(1 +
+  r_i) \lVert x_i \rVert$ (the prox is nonexpansive and maps 0 to 0). After
+  a conjugate, whose output is rounded twice, the term is $2u(1 + r_i)$, and
+  outputs below the normal range add their absolute rounding (*since
+  1.0.1*, math audit M7: a float32 solve reported 0 for an array $2.4 \cdot
+  10^{-8}$ from the solution). It is at most $\mathrm{ztol} + u(1 +
+  \mathrm{ztol})$ when the call converged, since the stopping test reads the
+  iterate's gap, and above `ztol` when an image stopped at `max_iter`. It
+  is NaN when an image holds a NaN. A positive `ztol` below $u$, which no
+  solve can certify in that dtype, raises `AccuracyWarning` (inside
+  `inner_accuracy` too). The gap is evaluated in floating point, so these
+  bounds hold to working precision, not as a directed-rounding enclosure;
+  the exact operators report a gap of 0, which is a convention, not a
+  computed certificate. In float32 (JAX's
   default) the gap is a difference of two sums of the size of
   $\lVert x \rVert^2$, so its rounding, and `zerr`'s, can reach a fraction of
   a percent at tight tolerances. In C the per-image gaps and

@@ -250,7 +250,7 @@ Two audits of 1.0.0's mathematics are [docs/mathematical-audit-2026-10-25.md](do
 - [x] M4: Log barrier leaves its domain. Bounded scale s = √γ·√λ; an underflowing root returns the dtype's smallest positive value — [spec](docs/math-audit-2026-10.md#m4)
 - [x] M5: 1D TV with ℓ2 drops edges whose squared weight underflows. Weights stored over a power of two, with the factor folded into γ; positive weights below 2⁻⁵¹¹·max w rejected — [spec](docs/math-audit-2026-10.md#m5)
 - [x] M6: SCAD and MCP overflow. Bounded-ratio forms for the values and every derivative, scalar and group — [spec](docs/math-audit-2026-10.md#m6)
-- [ ] M7: Certificates and output rounding. `zerr` adds the output dtype's unit roundoff; a `ztol` below it warns; the docs say "to working precision" — [spec](docs/math-audit-2026-10.md#m7)
+- [x] M7: Certificates and output rounding. `zerr` adds the output dtype's unit roundoff; a `ztol` below it warns; the docs say "to working precision" — [spec](docs/math-audit-2026-10.md#m7)
 
 **Guarantees in the spec and the docs**
 

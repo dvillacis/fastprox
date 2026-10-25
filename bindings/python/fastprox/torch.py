@@ -41,7 +41,7 @@ import numpy as np
 import torch
 import torch.autograd.forward_ad as fwAD
 
-from . import _MAX_ITER, _call_tol, _sq_tol, _warn_unconverged
+from . import _MAX_ITER, _call_tol, _check_floor, _sq_tol, _warn_unconverged
 from . import _tv_torch as _tvt
 from ._interop import Spec, check_step, spectral_step_grad, steps
 
@@ -295,6 +295,13 @@ class _SpectralProx(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 
 
+def _floor(x, tol, ztol, warn):
+    """The ztol floor of x's dtype (math audit M7), for tv_iso and tv_aniso."""
+    if isinstance(x, torch.Tensor) and x.is_floating_point():
+        _check_floor(tol, ztol, torch.finfo(x.dtype).eps, str(x.dtype).removeprefix("torch."), warn,
+                     stacklevel=4)
+
+
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, ztol=None,
            max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
            deriv_max_iter=10000, warn=True):
@@ -318,7 +325,9 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     0.3): $\alpha \ge 0$ in $\gamma \sum_p \alpha_p \lVert (w D z)_p \rVert_2$, a
     tensor that broadcasts to x.shape (one map for every image, or one per image, e.g. predicted by a network),
     differentiable like gamma."""
-    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    t = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    _floor(x, tol, ztol, warn)
+    tol = t
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, pixel_weights, warn and "fastprox.torch.tv_iso")
 
@@ -335,7 +344,9 @@ def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None,
     $\gamma \sum_a w_a \sum_p \beta[a, \dots, p] \lvert z_{p + e_a} - z_p \rvert$, a
     tensor that broadcasts to (ndim, *x.shape) ($\beta[a]$ at the last entry
     along $a$ unused), differentiable like gamma."""
-    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    t = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    _floor(x, tol, ztol, warn)
+    tol = t
     return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, edge_weights, warn and "fastprox.torch.tv_aniso")
 
@@ -466,7 +477,7 @@ class _DeviceTV(torch.autograd.Function):
             ctx.sw = None if sw is None else sw.detach()
             z, u, gap, it, conv = _tvt.solve(xb, gam, cfg.w, cfg.iso, cfg.tol, cfg.max_iter, u0, ctx.sw)
             dual = _tvt.dual_out(cfg.w, u, cfg.iso, k).reshape((k,) + tuple(x.shape))
-        cfg.info = _tvt.info(gap, it, conv, dual, (xb * xb).flatten(1).sum(1))
+        cfg.info = _tvt.info(gap, it, conv, dual, (xb * xb).flatten(1).sum(1), xb[0].numel())
         ctx.cfg, ctx.xb, ctx.z, ctx.u, ctx.gap, ctx.gam = cfg, xb, z, u, gap, gam
         ctx.shape = tuple(x.shape)
         ctx.wt = wt

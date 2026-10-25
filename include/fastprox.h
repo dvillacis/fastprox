@@ -93,7 +93,8 @@ typedef struct {
     int    threads;        /* 0 = fp_default_threads(), 1 = serial; values above
                               4 x the available CPUs (at most 4096) count as that cap */
     double tol;            /* relative duality-gap tolerance (iterative ops): the
-                              gap tol ||x||^2 / 2 certifies ||z - z*|| <= sqrt(tol) ||x|| */
+                              gap tol ||x||^2 / 2 certifies ||z - z*|| <= sqrt(tol) ||x||
+                              for the iterate, before its rounding to the dtype */
     int    max_iter;       /* iteration cap (iterative ops) */
     int    tie;            /* fp_tie, for nonconvex ops */
     int    keep_structure; /* save structure in the workspace for jvp/vjp */
@@ -294,8 +295,9 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
  * Iterative: fp_info reports the duality gap, and the call stops when the gap
  * of every image is at most tol * ||x||^2 / 2 (FP_ENOTCONV after max_iter,
  * with the last iterate written). The prox objective is 1-strongly convex, so
- * ||z - z*||^2 <= 2 gap: the certified relative error of z is sqrt(tol), and
- * tol = 1e-10 gives ||z - z*|| <= 1e-5 ||x||. fp_workspace_image_info gives
+ * ||z - z*||^2 <= 2 gap: the certified relative error of the iterate is
+ * sqrt(tol), and tol = 1e-10 gives ||z - z*|| <= 1e-5 ||x||; the array
+ * returned adds its rounding (fp_workspace_image_info). fp_workspace_image_info gives
  * each image's gap. Its dual is kept in the workspace. Images
  * far from unit scale are solved rescaled by a power of two (since 1.0), so
  * prox(c x, c gamma) = c prox(x, gamma) for c = 2^k up to rounding; the gap
@@ -640,9 +642,12 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
 
 /* Per image, the results of the last fp_prox, fp_prox_steps or fp_prox_conj
  * call on ws of an iterative image operator: its duality gap (fp_info.gap is
- * their sum), its iterations, and the relative error of its z that the gap
- * certifies, sqrt(2 gap) / ||x||, since ||z - z*||^2 <= 2 gap (0 for an image
- * of zeros). An image holding a NaN has gap and error NaN and 0 iterations.
+ * their sum), its iterations, and the relative error of the z returned that
+ * the gap certifies: r + u (1 + r) with r = sqrt(2 gap) / ||x||, since
+ * ||z - z*||^2 <= 2 gap, and u the unit roundoff of the output dtype for its
+ * rounding (2u after fp_prox_conj; outputs below the normal range add their
+ * absolute rounding; since 1.0.1). 0 for an image of zeros. The gap is
+ * evaluated in floating point: the bound holds to working precision. An image holding a NaN has gap and error NaN and 0 iterations.
  * gaps, iters and zerrs are contiguous arrays of count entries, in the
  * batch's C order, count the number of images (the product of x's shape
  * without the image axes: FP_ESHAPE otherwise); any of them may be NULL.

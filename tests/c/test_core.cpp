@@ -3062,7 +3062,9 @@ static void test_image_info() {
             CHECK(r == 4 ? std::isnan(gaps[r]) && iters[r] == 0 : gaps[r] >= 0.0 && iters[r] > 0);
             double xx = 0.0;
             for (int64_t i = 0; i < side * side; ++i) xx += x.data[r * side * side + i] * x.data[r * side * side + i];
-            CHECK(r == 4 ? std::isnan(zerrs[r]) : std::fabs(zerrs[r] - std::sqrt(2.0 * gaps[r] / xx)) <= 1e-12 * zerrs[r]);
+            // sqrt(2 gap) / |x| and the rounding of a double output (math audit M7).
+            const double r0 = std::sqrt(2.0 * gaps[r] / xx), want = r0 + 0x1p-53 * (1.0 + r0);
+            CHECK(r == 4 ? std::isnan(zerrs[r]) : std::fabs(zerrs[r] - want) <= 1e-12 * zerrs[r]);
         }
         CHECK(std::isnan(sum) && std::isnan(info.gap) && most == info.iters);
         double g2[B];

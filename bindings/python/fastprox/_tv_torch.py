@@ -599,7 +599,10 @@ def dual_in(q, w, iso, k, gamma):
     return torch.stack(us)
 
 
-def info(gap, iters, converged, dual, xx):
-    """The IterInfo of a solve from the per-image gaps and squared norms xx."""
-    zerr = _zerr(gap.detach().cpu().double().numpy(), xx.detach().cpu().double().numpy())  # MPS has no float64
+def info(gap, iters, converged, dual, xx, n=1):
+    """The IterInfo of a solve from the per-image gaps and squared norms xx,
+    for images of n entries in dual's dtype."""
+    f = torch.finfo(dual.dtype)
+    zerr = _zerr(gap.detach().cpu().double().numpy(), xx.detach().cpu().double().numpy(),  # MPS has no float64
+                 f.eps, f.tiny, n)
     return IterInfo(float(gap.sum()), int(iters), 0, bool(converged), dual, zerr)
