@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-10-25
+
+A patch release with the fixes from the two mathematical audits of 2026-10-25 (M1–M7, docs/math-audit-2026-10.md), the documentation of what the derivatives are and guarantee (C1–C6), and eight defects at extreme scales found by the fuzz harness, which now draws parameters from every binade. It adds no C function and changes no signature, so the ABI is 1.0.0's. Three calls now return errors where they gave wrong results: `fp_prox_conj` of weighted isotonic regression with unequal weights (`FP_EINVAL`), and group Huber, SCAD and MCP steps beyond γ · max(λ, 1) · max c ≤ 2^960 (`FP_EPARAM`; they gave NaN). Some results change in the last ulp (SCAD, MCP, and where the new bounds apply).
+
 ### Added
 
 - Two audits of 1.0.0's mathematics, `docs/mathematical-audit-2026-10-25.md` and `docs/theoretical-audit-2026-10-25.md`, with errata from checking their claims against the cited literature. Their reproduction scripts are under `reports/`. The specs for 1.0.1 that address them are in `docs/math-audit-2026-10.md`.
