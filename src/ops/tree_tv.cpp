@@ -28,6 +28,13 @@
 // breakpoints of the one child form a sorted deque, as in Section 4.1: the
 // clip points are added at its two ends, O(n) in all.
 // An edge with gamma w_e = 0 splits the tree: its child is solved as a root.
+// Capacities are capped at L = 2 n (max x - min x) (since 1.0.1): z lies in
+// [min x, max x], so every flow, a subtree sum of x - z, is below L, and the
+// prox, unique, is unchanged. Without the cap, gamma w_e far above the data
+// put clip points at differences of numbers of that size, a child an ulp
+// apart from its parent, and the region means then took gamma w_e as a
+// boundary flow (fuzz, 2026-10-25: gamma w = 8e34 on entries of 100 gave
+// z = 1.7e34; at gamma w near 2^960 the sums of capacities overflowed).
 //
 // Exactness. The values are then recomputed as means: on each region R (the
 // subtrees of edges with gamma w_e > 0 whose child took its parent's value),
@@ -262,9 +269,15 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
         if (st != kRowOk || done) return st;
         const double gamma0 = c.gamma;
         const int e = rescale(wk.d, c);
-        for (int64_t j = 0; j < n; ++j) wk.x[j] = wk.d[order[static_cast<size_t>(j)]];
-        solve(wk, c.gamma);
-        polish(wk, c.gamma);
+        double xmin = 0.0, xmax = 0.0;
+        for (int64_t j = 0; j < n; ++j) {
+            wk.x[j] = wk.d[order[static_cast<size_t>(j)]];
+            xmin = j ? std::min(xmin, wk.x[j]) : wk.x[j];
+            xmax = j ? std::max(xmax, wk.x[j]) : wk.x[j];
+        }
+        const double L = 2.0 * static_cast<double>(n) * (xmax - xmin);  // inf where the range overflows
+        solve(wk, c.gamma, L);
+        polish(wk, c.gamma, L);
         for (int64_t j = 0; j < n; ++j) wk.zn[order[static_cast<size_t>(j)]] = wk.zv[j];
         certificate(wk.d, wk.zn, wk.s, c);
         if (c.save) structure(wk.d, wk.zn, wk.lo, wk.hmax, c);
@@ -313,16 +326,16 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
         void cut() noexcept { f = b = mid; }
     };
 
-    void solve(Work &wk, double gamma) const noexcept {
+    void solve(Work &wk, double gamma, double L) const noexcept {
         if (chains) {
             Deque st{static_cast<int32_t>(n), static_cast<int32_t>(n), static_cast<int32_t>(n)};
-            climb(wk, gamma, st);
+            climb(wk, gamma, L, st);
         } else {
             std::fill(wk.hmin, wk.hmin + n, -1);
             std::fill(wk.hmax, wk.hmax + n, -1);
             Heaps st{{wk.pos, wk.cmin, wk.smin, false}, {wk.pos, wk.cmax, wk.smax, true},
                      wk.hmin, wk.hmax, wk.dead};
-            climb(wk, gamma, st);
+            climb(wk, gamma, L, st);
         }
         // Down.
         const double *lo = wk.lo, *hi = wk.hi;
@@ -335,13 +348,13 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
 
     // Up: m_i from its children's clipped messages, then its own clip points.
     template <class S>
-    void climb(Work &wk, double gamma, S &st) const noexcept {
+    void climb(Work &wk, double gamma, double L, S &st) const noexcept {
         const double *x = wk.x;
         double *lo = wk.lo, *hi = wk.hi, *s = wk.s, *pos = wk.pos, *ds = wk.ds;
         std::fill(s, s + n, 0.0);
         for (int32_t i = static_cast<int32_t>(n) - 1; i >= 0; --i) {
             const int32_t p = up[static_cast<size_t>(i)];
-            const double l = gamma * wup[static_cast<size_t>(i)];
+            const double l = std::min(gamma * wup[static_cast<size_t>(i)], L);
             double aL = 1.0, bL = -x[i] - s[i], aR = 1.0, bR = -x[i] + s[i];
             for (int32_t t; (t = st.top_lo(i)) >= 0 && aL * pos[t] + bL < -l;) {
                 aL += ds[t];
@@ -374,14 +387,14 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
     }
 
     // Values as region means; then the subtree sums of x - z into s, the flow.
-    void polish(Work &wk, double gamma) const noexcept {
+    void polish(Work &wk, double gamma, double L) const noexcept {
         const double *x = wk.x;
         double *zv = wk.zv, *sum = wk.lo, *cnt = wk.hi, *s = wk.s;
         int32_t *lab = wk.hmin;
         int32_t nr = 0;
         for (int64_t j = 0; j < n; ++j) {
             const int32_t p = up[static_cast<size_t>(j)];
-            const bool same = p >= 0 && gamma * wup[static_cast<size_t>(j)] > 0.0 && zv[j] == zv[p];
+            const bool same = p >= 0 && std::min(gamma * wup[static_cast<size_t>(j)], L) > 0.0 && zv[j] == zv[p];
             lab[j] = same ? lab[p] : nr++;
         }
         std::fill(sum, sum + nr, 0.0);
@@ -390,7 +403,7 @@ struct TreeTV final : edge_tv::Base<TreeTV> {
             sum[lab[j]] += x[j];
             cnt[lab[j]] += 1.0;
             const int32_t p = up[static_cast<size_t>(j)];
-            const double l = gamma * wup[static_cast<size_t>(j)];
+            const double l = std::min(gamma * wup[static_cast<size_t>(j)], L);
             if (p < 0 || lab[j] == lab[p] || !(l > 0.0)) continue;
             const double t = zv[j] > zv[p] ? l : -l;
             sum[lab[j]] -= t;

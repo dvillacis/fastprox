@@ -106,3 +106,28 @@ def test_tree_l2_scale_free_chain(sigma):
     _, ctx = op.prox(x, keep=True)
     np.testing.assert_allclose(op.jvp(ctx, np.array([1.0, 0.0])), [0.936, 0.048], rtol=1e-13)
     np.testing.assert_allclose(op.vjp(ctx, np.array([1.0, 0.0]))[0], [0.936, 0.048], rtol=1e-13)
+
+
+def test_thresholds_where_gamma_lambda_overflows():
+    """Soft thresholding, l1 over a box and group l2 formed gamma lambda w as
+    (gamma lambda) w (fuzz, 2026-10-25): with every weight 0 the step range
+    does not apply, gamma lambda overflowed and inf * 0 gave NaN, where the
+    map is the identity; and with gamma lambda = 2^1100, w = 2^-200 the
+    threshold 2^900 came out infinite. The product is rounded as written
+    from the mantissas there (math audit M3), and unchanged elsewhere."""
+    x = np.array([-30.0, 0.5, 2.0**899, -(2.0**901)])
+    lam, gamma = 2.0**600, 2.0**500
+    for op in (fp.Soft(lam, np.zeros(4)), fp.L1Box(lam, -np.inf, np.inf, np.zeros(4)),
+               fp.GroupL2(lam, np.arange(4), np.zeros(4))):
+        np.testing.assert_array_equal(op.prox(x, gamma), x)
+    w = np.full(4, 2.0**-200)
+    want = np.array([0.0, 0.0, 0.0, -(2.0**901 - 2.0**900)])
+    for op in (fp.Soft(lam, w), fp.L1Box(lam, -np.inf, np.inf, w), fp.GroupL2(lam, np.arange(4), w)):
+        np.testing.assert_array_equal(op.prox(x, gamma), want)
+        _, ctx = op.prox(x, gamma, keep=True)
+        np.testing.assert_array_equal(op.jvp(ctx, np.ones(4)), [0.0, 0.0, 0.0, 1.0])
+    # Ordinary scales: bit for bit the plain product.
+    rng = np.random.default_rng(2)
+    x, w = rng.normal(size=50), rng.uniform(0.1, 2.0, 50)
+    tau = (0.7 * 0.9) * w
+    np.testing.assert_array_equal(fp.Soft(0.9, w).prox(x, 0.7), np.sign(x) * np.maximum(np.abs(x) - tau, 0))

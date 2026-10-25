@@ -5,7 +5,11 @@
 // input:
 //   * every call returns a valid fp_status and never crashes or hangs;
 //   * results are bit-identical for one and several threads;
-//   * finite moderate inputs give finite outputs from a successful prox.
+//   * finite moderate inputs give finite outputs from a successful prox;
+//   * at any scale (since 1.0.1, math audit M3-M6): the shrinkage maps keep
+//     |z_i| <= |x_i| with x's sign (l0: z_i in {0, x_i}), the log barrier
+//     stays in its domain, z > 0 and z >= x, and the exact norm-like proxes
+//     and cone projections keep |z| <= |x|.
 //
 // Built as a libFuzzer target where the compiler supports -fsanitize=fuzzer,
 // and otherwise as a standalone driver (fuzz/standalone.cpp) that replays
@@ -18,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <vector>
 
 namespace {
@@ -51,17 +56,32 @@ struct Bytes {
         }
     }
     double max_param = 0.0;  // largest magnitude handed out by param()
+    int last_exp = 0;        // the binade of the last extreme param()
     // Raises max_param to m. NaN sticks: a plain !(m <= max_param) test let a
     // NaN replace an infinity and the next finite value replace the NaN, which
     // lost an a of 6e-322 for the plane and flagged its genuine overflow.
     void raise(double m) {
         if (!std::isnan(max_param) && !(m <= max_param)) max_param = m;
     }
+    // Since 1.0.1 (math audit M3-M6) also any binade from subnormal to near
+    // overflow, and the reciprocal binade of the last such value, so that a
+    // step and a parameter can be far from 1 while their product is not.
     double param() {
         double v;
-        switch (u8() % 6) {
+        switch (u8() % 8) {
             case 0: v = f64(); break;
             case 1: v = 0.0; break;
+            case 2: {
+                last_exp = static_cast<int>(u8()) * 8 - 1030;  // -1030 to 1010
+                v = std::ldexp(1.0 + u8() / 256.0, last_exp);
+                break;
+            }
+            case 3:
+                if (last_exp) {
+                    v = std::ldexp(1.0 + u8() / 256.0, -last_exp);
+                    break;
+                }
+                [[fallthrough]];
             default: v = (u8() + 1) / 64.0;
         }
         raise(std::fabs(v));
@@ -219,12 +239,11 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
         case 21: return fp_op_sum_largest(b.param(), static_cast<int64_t>(b.u8() % 40) - 2, b.u8() % 2, &c.op);
         case 22: {  // hyperplane or half-space with a box; b often infeasible
             fill(c.params[0], pick);
+            double ainv = 0.0;  // the largest 1 / |a_i|
             for (auto &v : c.params[0]) {
                 if (b.u8() % 4 == 0) v = -v;
                 else if (b.u8() % 8 == 0) v = 0.0;
-                // The projection scales like |b| / |a_i|: count 1 / |a_i| as a
-                // parameter size for the finite-output check.
-                if (v != 0.0) b.raise(1.0 / std::fabs(v));
+                if (v != 0.0) ainv = std::fmax(ainv, 1.0 / std::fabs(v));
             }
             fill(c.params[1], b.u8() % 2 ? n : 1);
             s0[0] = static_cast<int64_t>(c.params[0].size());
@@ -234,6 +253,11 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             const double lo = b.u8() % 3 ? -b.param() : -INFINITY, hi = b.u8() % 3 ? b.param() : INFINITY;
             const bool upper = b.u8() % 2;  // per-entry upper bounds from params[1]
             const double rhs = (b.u8() % 2 ? -1.0 : 1.0) * b.param();
+            // The projection scales like |b| / |a_i| and the bounds: count
+            // both as parameter sizes for the finite-output check (|b| / |a|
+            // = 1.5e69 |b| at sigma = 5.2e205 overflows the conjugate; fuzz).
+            b.raise(ainv);
+            b.raise(std::fabs(rhs) * ainv);
             return fp_op_hyperplane(b.u8() % 4 ? &a0 : nullptr, rhs, lo, hi, nullptr,
                                     upper ? &a1 : nullptr, b.u8() % 2, &c.op);
         }
@@ -517,6 +541,89 @@ void run(const uint8_t *data, size_t size) {
                     fail("non-finite output from finite input");
                 }
             }
+    }
+
+    // Invariants at any scale (since 1.0.1): every entry of x finite, any
+    // successful prox. View entry i (C order) is x through its strides.
+    if (written && s1 == FP_OK && std::isfinite(gamma) && numel > 0) {
+        auto xat = [&](int64_t i) {
+            int64_t off = 0;
+            for (int d = ndim - 1; d >= 0; --d) {
+                off += (i % shape[d]) * strides[d];
+                i /= shape[d];
+            }
+            const unsigned char *q = static_cast<const unsigned char *>(x0) + off * static_cast<int64_t>(item);
+            if (f32) {
+                float f;
+                std::memcpy(&f, q, 4);
+                return static_cast<double>(f);
+            }
+            double v;
+            std::memcpy(&v, q, 8);
+            return v;
+        };
+        auto zat = [&](int64_t i) {
+            return f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[i])
+                       : reinterpret_cast<double *>(z1.data())[i];
+        };
+        auto dump = [&] {
+            std::fprintf(stderr, "x:");
+            for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", xat(i));
+            std::fprintf(stderr, "\nz:");
+            for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", zat(i));
+            std::fprintf(stderr, "\nparams:");
+            for (auto p : c.params[0]) std::fprintf(stderr, " %.17g", p);
+            std::fprintf(stderr, "\ngroups:");
+            for (auto g : c.groups) std::fprintf(stderr, " %lld", static_cast<long long>(g));
+            std::fprintf(stderr, "\n");
+        };
+        bool finite = true;
+        for (int64_t i = 0; i < numel && finite; ++i) finite = std::isfinite(xat(i));
+        auto is = [&](std::initializer_list<const char *> names) {
+            for (const char *nm : names)
+                if (std::strcmp(opname, nm) == 0) return true;
+            return false;
+        };
+        if (finite && !conj && is({"soft", "elastic_net", "huber", "l0", "lq", "scad", "mcp", "log", "group_l2",
+                                   "group_huber", "group_scad", "group_mcp"})) {
+            const bool l0 = std::strcmp(opname, "l0") == 0;
+            for (int64_t i = 0; i < numel; ++i) {
+                const double xv = xat(i), zv = zat(i);
+                if (!(std::fabs(zv) <= std::fabs(xv)) || xv * zv < 0.0 || (l0 && zv != 0.0 && zv != xv)) {
+                    std::fprintf(stderr, "entry %lld: x %.17g z %.17g params", static_cast<long long>(i), xv, zv);
+                    for (auto p : c.params[0]) std::fprintf(stderr, " %.17g", p);
+                    std::fprintf(stderr, "\n");
+                    fail("a shrinkage map moved an entry away from 0");
+                }
+            }
+        }
+        if (finite && !conj && gamma > 0.0 && std::strcmp(opname, "log_barrier") == 0)  // 0: the identity
+            for (int64_t i = 0; i < numel; ++i)
+                // Finite in float64, where z <= |x| + sqrt(gamma lambda) <= |x| + 2^480;
+                // in float32 a z beyond FLT_MAX is +inf.
+                if (!(zat(i) > 0.0 && zat(i) >= xat(i) && (f32 || std::isfinite(zat(i)))))
+                    fail("log barrier left its domain");
+        if (finite && is({"soft", "l2", "group_l2", "tree_l2", "linf", "sorted_l1", "tv1d", "tv1d_l2", "tree_tv",
+                          "nonneg", "soc"})) {
+            // |z| <= |x| (z = x - P_C(x) with 0 in C, or a projection onto a
+            // cone), summed scaled by the largest entry, with room for rounding.
+            double m = 0.0;
+            for (int64_t i = 0; i < numel; ++i) m = std::fmax(m, std::fmax(std::fabs(xat(i)), std::fabs(zat(i))));
+            if (m > 0.0 && std::isfinite(m)) {
+                double sx = 0.0, sz = 0.0;
+                for (int64_t i = 0; i < numel; ++i) {
+                    sx += (xat(i) / m) * (xat(i) / m);
+                    sz += (zat(i) / m) * (zat(i) / m);
+                }
+                if (!(sz <= sx * (1.0 + 1e-5) + 1e-280)) {
+                    dump();
+                    fail("a norm-like prox grew |z| beyond |x|");
+                }
+            } else if (!(m == 0.0)) {
+                dump();
+                fail("non-finite output from finite input at any scale");
+            }
+        }
     }
 
     // Derivatives at the saved structure.

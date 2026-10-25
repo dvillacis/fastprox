@@ -99,7 +99,7 @@ struct GroupL2 final : RowOp<GroupL2> {
                          scale + G);
         for (int64_t g = 0; g < G; ++g) {
             const double m = scale[g], t = scale[G + g];
-            const double tau = gamma * lambda * c[ci(g)];
+            const double tau = prod3(gamma, lambda, c[ci(g)]);  // math audit M3, as soft thresholding
             // NaN norms give NaN scales, so the whole group becomes NaN. A
             // zero threshold is the identity, also at x_g = 0, so its group is
             // live there.
@@ -143,7 +143,7 @@ struct GroupL2 final : RowOp<GroupL2> {
         }
         safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, s, M);
         for (int64_t g = 0; g < G; ++g) {
-            const double tau = gamma * lambda * c[ci(g)];
+            const double tau = prod3(gamma, lambda, c[ci(g)]);  // math audit M3, as soft thresholding
             const bool kink = first[g] >= 0.0 && tau > 0.0 && std::fabs(s[g] / M[g] - tau) <= tol;
             at[g] = !kink ? 0 : (side ? side[static_cast<int64_t>(first[g])] : 1);
         }
@@ -204,7 +204,7 @@ struct GroupL2 final : RowOp<GroupL2> {
         live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
             const double m = a[g], t = M[g];
-            const double tau = gamma * lambda * c[ci(g)];
+            const double tau = prod3(gamma, lambda, c[ci(g)]);  // math audit M3, as soft thresholding
             if (live[g] && !(m > 0.0)) {  // tau = 0 at x_g = 0: the identity
                 a[g] = 1.0;
                 b[g] = 0.0;
@@ -237,7 +237,7 @@ struct GroupL2 final : RowOp<GroupL2> {
         live_groups(code, n, live);
         for (int64_t g = 0; g < G; ++g) {
             const double m = a[g], t = M[g];
-            const double tau = gamma * lambda * c[ci(g)];
+            const double tau = prod3(gamma, lambda, c[ci(g)]);  // math audit M3, as soft thresholding
             if (live[g] && !(m > 0.0)) {  // tau = 0 at x_g = 0: the identity
                 a[g] = 1.0;
                 b[g] = 0.0;

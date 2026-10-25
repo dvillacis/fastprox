@@ -56,6 +56,14 @@
 //
 // Kinks: ||u0|| = gamma is inside.
 //
+// Weights. They are stored over 2^k, k the exponent of the largest (as for
+// isotonic regression), and every call runs at the step gamma 2^k, since
+// ||W D z|| is homogeneous in w: a weight of 1e-180 at gamma = 1e180 squared
+// to 0 and dropped its edge, a problem whose solution is 0 (math audit M5).
+// Derivatives in gamma pick up 2^k and those in w 2^-k. A positive weight
+// below 2^-511 times the largest is FP_EPARAM: its square would still not be
+// normal.
+//
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
 #include "ops/ops.hpp"
@@ -71,11 +79,18 @@ namespace {
 constexpr uint8_t kInside = 1;  // code[0]: z is the piecewise mean
 
 struct TV1DL2 final : RowOp<TV1DL2> {
-    Vec w, a;  // weights and their squares: length 1 or n - 1
-    double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
+    Vec w, a;  // weights over 2^wk and their squares: length 1 or n - 1
+    double wmax_ = vmax(w);  // the largest weight as given, for step_scale: once, not per call (it scanned every weight on each prox call)
+    int wk = 0;
     static constexpr int kMaxIter = 100;
 
-    TV1DL2(Vec ww, Vec aa) : w(std::move(ww)), a(std::move(aa)) {}
+    explicit TV1DL2(Vec ww) : w(std::move(ww)), a(w.size()) {
+        std::frexp(wmax_, &wk);
+        for (size_t e = 0; e < w.size(); ++e) {
+            w[e] = std::ldexp(w[e], -wk);
+            a[e] = w[e] * w[e];
+        }
+    }
 
     const char *name() const noexcept override { return "tv1d_l2"; }
     double step_scale() const noexcept override { return wmax_; }
@@ -185,15 +200,27 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     // huge dual (found by fuzzing: NaN at w_e = 2e-53). Each entry is still
     // rounded once (centring on the first entry itself rounded twice and left
     // 25x larger residuals on a long random walk without FMA contraction).
+    // Should the sum of offsets overflow (x0 = 9e307 with 18 small entries,
+    // fuzz 2026-10-25: the row came back -inf), it is summed again over 2^k,
+    // k from the piece's length, and only then.
     template <class T>
     void center(const T *x, double *xc, int64_t n) const noexcept {
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e < n - 1 && ae(e) != 0.0) continue;
             const double x0 = static_cast<double>(x[s]);  // piece [s, e]
+            const double len = static_cast<double>(e - s + 1);
             double m = 0.0;
             for (int64_t i = s; i <= e; ++i) m += static_cast<double>(x[i]) - x0;
-            m = x0 + m / static_cast<double>(e - s + 1);
+            if (std::isfinite(m)) {
+                m = x0 + m / len;
+            } else {
+                int k;
+                std::frexp(len, &k);
+                m = 0.0;
+                for (int64_t i = s; i <= e; ++i) m += std::ldexp(static_cast<double>(x[i]), -k - 1) - std::ldexp(x0, -k - 1);
+                m = x0 + std::ldexp(m / len, k + 1);
+            }
             for (int64_t i = s; i <= e; ++i) xc[i] = static_cast<double>(x[i]) - m;
             s = e + 1;
         }
@@ -225,11 +252,12 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     double value_row(const double *x, int64_t n, double, double *) const noexcept override {
         double s = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) s += ae(e) * (x[e + 1] - x[e]) * (x[e + 1] - x[e]);
-        return std::sqrt(s);
+        return std::ldexp(std::sqrt(s), wk);
     }
 
     template <class T>
     int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
+        gamma = std::ldexp(gamma, wk);  // the stored weights' step
         if (!all_finite(x, n)) {
             bool nan;
             if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
@@ -256,6 +284,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         std::frexp(t, &k);
         t = std::ldexp(1.0, -k);
         const double gt = gamma * t;
+        // gamma t below the normal range: |z - x| <= 2 gamma, under 2^-1020
+        // of the largest entry, so z = x to rounding. Taken as it, since the
+        // bracket below would start from [0, inf] (fuzz 2026-10-25: the
+        // piecewise mean came back, at gamma = 3.6e-97 with an entry of 1e308).
+        if (gt < DBL_MIN) {
+            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+            return kRowOk;
+        }
         // ||u0||^2 and ||y0||^2 (y0 per piece, mean-free), and ||W D xc||^2.
         double rho0sq = 0.0, kap0 = 0.0, wdx = 0.0;
         {
@@ -439,6 +475,8 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     template <class T>
     void jvp(const T *, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n,
              double gamma, double dgamma, const double *dp, void *scr) const noexcept {
+        gamma = std::ldexp(gamma, wk);
+        dgamma = std::ldexp(dgamma, wk);
         double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *r = y + n;
         Scale sc;
         double c = 0.0;
@@ -458,7 +496,7 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         if (dp) {
             double wsum = 0.0;
             for (int64_t e = 0; e + 1 < n; ++e) {
-                const double de = sc.delta(z, e), dwe = dp[w.size() == 1 ? 0 : e];
+                const double de = sc.delta(z, e), dwe = std::ldexp(dp[w.size() == 1 ? 0 : e], -wk);
                 const double q = 2.0 * gamma * we(e) * de * dwe;
                 r[e] += q;
                 r[e + 1] -= q;
@@ -467,13 +505,22 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             for (int64_t i = 0; i < n; ++i) r[i] += gamma * wsum * pi[i];
         }
         solve(c, inv, pi, n);  // tau = A^{-1} pi
+        // The solve is linear: on r over a power of two, so that a large
+        // right-hand side (dgamma 2^k for weights far from unit scale) cannot
+        // overflow inside it where dz itself is in range (M5).
+        double rm = 0.0;
+        for (int64_t i = 0; i < n; ++i) rm = std::fmax(rm, std::fabs(r[i]));
+        int re = 0;
+        if (rm > 0.0 && std::isfinite(rm)) std::frexp(rm, &re);
+        for (int64_t i = 0; i < n; ++i) r[i] = std::ldexp(r[i], -re);
         apply_hinv(c, inv, pi, pty, r, n);
-        for (int64_t i = 0; i < n; ++i) dz[i] = static_cast<T>(r[i]);
+        for (int64_t i = 0; i < n; ++i) dz[i] = static_cast<T>(std::ldexp(r[i], re));
     }
 
     template <class T>
     void vjp(const T *, const T *z, const uint8_t *code, const T *gv, T *gx, int64_t n,
              double gamma, double *acc, void *scr) const noexcept {
+        gamma = std::ldexp(gamma, wk);
         double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *q = y + n;
         Scale sc;
         double c = 0.0;
@@ -496,10 +543,10 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         double piq = 0.0;
         for (int64_t i = 0; i < n; ++i) piq += y[i] * q[i];
         const int64_t P = nparams();
-        acc[P] -= piq;
+        acc[P] -= std::ldexp(piq, wk);  // d/dgamma = 2^k d/d(gamma 2^k)
         for (int64_t e = 0; e + 1 < n; ++e) {
             const double de = sc.delta(z, e);
-            acc[w.size() == 1 ? 0 : e] -= gamma * we(e) * de * (2.0 * (q[e + 1] - q[e]) - piq * de);
+            acc[w.size() == 1 ? 0 : e] -= std::ldexp(gamma * we(e) * de * (2.0 * (q[e + 1] - q[e]) - piq * de), -wk);
         }
     }
 };
@@ -508,13 +555,12 @@ struct TV1DL2 final : RowOp<TV1DL2> {
 
 fp_status make_tv1d_l2(Vec w, fp_op **out) {
     if (w.empty()) w.assign(1, 1.0);
-    Vec a(w.size());
-    for (size_t e = 0; e < w.size(); ++e) {
-        if (!finite_nonneg(w[e])) return FP_EPARAM;
-        a[e] = w[e] * w[e];
-        if (!finite_nonneg(a[e])) return FP_EPARAM;  // w_e^2 overflows
-    }
-    *out = new TV1DL2(std::move(w), std::move(a));
+    for (double v : w)
+        if (!finite_nonneg(v)) return FP_EPARAM;
+    const double m = vmax(w);
+    for (double v : w)
+        if (v > 0.0 && v < 0x1p-511 * m) return FP_EPARAM;  // its square, over 2^k, not normal (M5)
+    *out = new TV1DL2(std::move(w));
     return FP_OK;
 }
 

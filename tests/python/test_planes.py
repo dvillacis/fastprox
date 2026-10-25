@@ -295,3 +295,19 @@ def test_degenerate_bounds():
     g = np.random.default_rng(3).normal(size=3)
     dx = np.random.default_rng(4).normal(size=3)
     assert abs(g @ op.jvp(ctx, dx) - op.vjp(ctx, g)[0] @ dx) <= 1e-14 * (1 + abs(g @ op.jvp(ctx, dx)))
+
+
+def test_coefficients_of_disparate_size():
+    """Breakpoints (x_i - bound) / a_i with a_i far below max |a_i| (fuzz,
+    2026-10-25): a_i = 6.6e-76 of a normalised a and |x| = 2e239 put them at
+    3e314, and the projection came out NaN and inf. Since 1.0.1 the scale
+    also counts min |a_i|; it is unchanged when the a_i are of one size.
+    P_{tC}(t x) = t P_C(x) for t = 2^k checks it."""
+    a = np.array([2.09375, 1.640625, 0, -0.0, -1.578125, 3.078125, -0.53125, 2.890625, 3.1732573283419783e+75])
+    y = np.array([-28, 0, -76.4179688, 0, 0, -0.000194345913, 82.8125, -8.578125, 89.21875])
+    for k in (790, 600, 0, -600):
+        t = 2.0**k
+        z = fp.Hyperplane(a, 1.0, -np.inf, 3.0).prox(y * t)
+        assert np.all(np.isfinite(z)) and np.all(z <= 3.0)
+        zt = fp.Hyperplane(a, 2.0**-k, -np.inf, 3.0 * 2.0**-k).prox(y)
+        np.testing.assert_allclose(z, zt * t, rtol=1e-12, atol=0)

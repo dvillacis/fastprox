@@ -122,7 +122,10 @@ y = fpt.prox(fp.TV1D, torch.randn(64, 1000, dtype=torch.float64), 0.5, weights=w
 | Images | anisotropic and isotropic TV in 2D and 3D, with per-axis and per-pixel weights and warm starts; on GPUs through PyTorch and JAX |
 | Graphs | TV on any graph, exact, by parametric max-flow; TV on trees and paths by dynamic programming |
 
-Every operator also has its conjugate prox, through the Moreau identity. The
+Every convex operator also has its conjugate prox, through the Moreau
+identity; for the nonconvex penalties the same call returns the Moreau
+residual $y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$, since their
+Fenchel conjugate is the indicator of $\{0\}$. The
 operators with kinks report which entries sit at one, and differentiate
 either side of it on request: the thresholding and nonconvex maps, the box
 and orthant, the simplex and ℓ1 ball, group ℓ2, and 1D, image, graph and

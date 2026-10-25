@@ -74,6 +74,7 @@ struct Plane {
     bool unbounded = false;  // every bound infinite
     double bmax = 0.0;       // the largest finite |lo_i|, |hi_i|
     double sc = 1.0;         // the bounds' scale in a Scaled solve
+    int ea = 1;              // the exponent of the smallest nonzero |a_i| (frexp; a = 1: 1)
     double A(int64_t i) const noexcept { return sa ? a[0] : a[i]; }
     double L(int64_t i) const noexcept { return sl ? lo[0] : lo[i]; }
     double H(int64_t i) const noexcept { return sh ? hi[0] : hi[i]; }
@@ -237,13 +238,18 @@ inline void plane_project_at(const Plane &p, bool ineq, const double *x, T *z, i
 
 // The exponent k of the scale 2^-k for a problem of magnitude M (max |x|, |b|
 // and the finite bounds), or 0 when M is in [2^-960, 2^960], where no sum of
-// n < 2^62 terms over- or underflows (audit K7). 2^k itself may overflow
-// (k = 1024 near DBL_MAX), so results go back with ldexp.
-inline int plane_scale(double M) noexcept {
-    if (!(M > 0.0) || (M >= 0x1p-960 && M <= 0x1p960)) return 0;
+// n < 2^62 terms over- or underflows (audit K7), and the breakpoints
+// (x_i - bound) / a_i, below M / min |a_i| = M 2^(1 - ea), are at most about
+// 2^960 too (since 1.0.1: a_i = 6.6e-76 beside max |a_i| = 1 put them at
+// 3e314 for |x| = 2e239, a NaN projection; fuzz). Scaled, M is near 1, or
+// near 2^(ea + 960) where that is smaller (at least 2^-114). 2^k itself may
+// overflow (k = 1024 near DBL_MAX), so results go back with ldexp.
+inline int plane_scale(double M, int ea) noexcept {
+    if (!(M > 0.0)) return 0;
     int k;
     std::frexp(M, &k);
-    return k;
+    if (M >= 0x1p-960 && M <= 0x1p960 && k - ea <= 960) return 0;  // ea = 1: the rule before 1.0.1
+    return k - std::min(0, ea + 960);
 }
 
 // z = P_C(x) with the states in code (if given); x in double, scratch that
@@ -251,7 +257,7 @@ inline int plane_scale(double M) noexcept {
 template <class T>
 inline void plane_project(const Plane &p, bool ineq, double *x, T *z, int64_t n, double *bp, uint8_t *code,
                           double xmax) noexcept {
-    const int k = plane_scale(std::max({xmax, std::fabs(p.b), p.bmax}));
+    const int k = plane_scale(std::max({xmax, std::fabs(p.b), p.bmax}), p.ea);
     if (k == 0) {
         plane_project_at<false>(p, ineq, x, z, n, bp, code, 0);
         return;
@@ -289,13 +295,18 @@ struct HyperBox final : RowOp<HyperBox> {
         unbounded = std::all_of(lo.begin(), lo.end(), [](double v) { return v == -kInf; }) &&
                     std::all_of(hi.begin(), hi.end(), [](double v) { return v == kInf; });
         bmax = std::max(finite_max(lo), finite_max(hi));
+        double amin = 1.0;
+        for (double v : a)
+            if (v != 0.0) amin = std::min(amin, std::fabs(v));
+        std::frexp(amin, &ea);
     }
 
     bool unbounded;
     double bmax;
+    int ea;
     Plane plane() const noexcept {
         return Plane{a.data(), lo.data(), hi.data(), a.size() == 1, lo.size() == 1, hi.size() == 1, b, unbounded,
-                     bmax};
+                     bmax, 1.0, ea};
     }
     const char *name() const noexcept override { return ineq ? "halfspace" : "hyperplane"; }
     double step_scale() const noexcept override { return 0.0; }
@@ -353,7 +364,7 @@ struct HyperBox final : RowOp<HyperBox> {
         // The sums in units scaled by t, as in plane_project (t = 1: exact).
         double xmax = 0.0;
         for (int64_t i = 0; i < n; ++i) xmax = std::max(xmax, std::fabs(static_cast<double>(x[i])));
-        const int k = plane_scale(std::max({xmax, std::fabs(b), bmax}));
+        const int k = plane_scale(std::max({xmax, std::fabs(b), bmax}), ea);
         double num = -std::ldexp(b, -k);
         for (int64_t i = 0; i < n; ++i) {
             const double ai = p.A(i);

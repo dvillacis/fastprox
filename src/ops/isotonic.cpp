@@ -31,15 +31,23 @@ struct Isotonic final : RowOp<Isotonic> {
     Vec w;  // empty: unit weights; else the weights over 2^k
     int wk = 0;  // k
     bool increasing;
+    bool euclidean = true;  // unit or equal weights: the Euclidean projection
     Isotonic(Vec ww, bool inc) : w(std::move(ww)), increasing(inc) {
         if (w.empty()) return;
         std::frexp(vmax(w), &wk);
-        for (double &v : w) v = std::ldexp(v, -wk);
+        for (double &v : w) {
+            v = std::ldexp(v, -wk);
+            euclidean = euclidean && v == w[0];
+        }
     }
 
     const char *name() const noexcept override { return "isotonic"; }
     double step_scale() const noexcept override { return 0.0; }
     bool conj_homogeneous() const noexcept override { return true; }
+    // Unequal weights project in the metric W, where y - P_C^W(y) is not the
+    // Euclidean conjugate's prox: W (y - P_C^W(y)) lies in the polar cone,
+    // y - P_C^W(y) need not (math audit M2).
+    bool conj_supported() const noexcept override { return euclidean; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (w.empty() || static_cast<int64_t>(w.size()) == n) ? FP_OK : FP_ESHAPE;

@@ -79,6 +79,21 @@ class Info(NamedTuple):
     ties: int
 
 
+def _check_floor(tol, ztol, eps, dtype, warn, stacklevel):
+    """AccuracyWarning when the ztol asked for (the call's, or inner_accuracy's
+    without tol), if positive, is below the unit roundoff eps / 2 of the output dtype:
+    zerr counts the rounding of the returned array (math audit M7), so no
+    solve certifies it."""
+    if not warn:
+        return
+    need = ztol if ztol is not None else (_ACCURACY.get() if tol is None else None)
+    floor = 0.5 * float(eps)
+    if need is not None and 0.0 < float(need) < floor:  # 0 asks for no tolerance: max_iter
+        warnings.warn(f"ztol={float(need):g} is below the unit roundoff {floor:.3g} of {dtype}: "
+                      f"rounding the result to {dtype} alone can exceed it, so info.zerr cannot "
+                      f"certify it", AccuracyWarning, stacklevel=stacklevel)
+
+
 class IterInfo(NamedTuple):
     r"""Certificate of an iterative operator: the duality gap of the prox
     problem at the returned point (summed over the batch;
@@ -87,8 +102,12 @@ class IterInfo(NamedTuple):
     the dual of shape (ndim, *x.shape), which
     ``warm_start=`` accepts back, and (since 1.0) ``zerr``, the certified
     relative error of the worst image,
-    $\max_i \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert_2 \ge \lVert z_i - z_i^* \rVert_2 / \lVert x_i \rVert_2$,
-    in the units ``ztol=`` takes (0 for an image of zeros). ``gap`` and ``zerr``
+    $\max_i r_i + u(1 + r_i) \ge \lVert z_i - z_i^* \rVert_2 / \lVert x_i \rVert_2$ with
+    $r_i = \sqrt{2\,\mathrm{gap}_i} / \lVert x_i \rVert_2$ and $u$ the unit roundoff of
+    the output dtype, for the rounding of the array returned (since 1.0.1;
+    $2u$ after ``prox_conj``), in the units ``ztol=`` takes (0 for an image
+    of zeros). It holds to working precision: the gap is evaluated in
+    floating point. ``gap`` and ``zerr``
     are NaN when an image contains a NaN;
     ``converged`` says whether no image stopped at ``max_iter`` (an image with
     a NaN is not iterated and counts as finished)."""
@@ -111,7 +130,10 @@ class DerivInfo(NamedTuple):
     the operators in closed form always; isotropic TV caps its curvature at
     $\gamma / \mu$ with $\mu$ = ``smoothing`` (in the units of $x$), which
     vanishes with the gap. ``ctx.refine`` or ``refine=`` make it exact or
-    nearly so."""
+    nearly so. Exact means that the saved regions are those of the solution,
+    as certified at the saved point; it is not a bound in terms of the gap,
+    which alone does not certify a derivative (since 1.0.1: near a switch, a
+    tiny gap can come with wrong regions)."""
 
     residual: float
     iters: int
@@ -170,7 +192,10 @@ class Context:
         :func:`inner_accuracy` its ztol by default), and returns the refined
         $z$ (since 1.0; iterative image operators). The derivatives then read
         the refined point, which is what makes them exact or nearly so at a
-        loose first solve (``ctx.deriv.exact``), and ``ctx.info`` is the
+        loose first solve (``ctx.deriv.exact``, which then says whether the
+        refined point's regions are certified: near a switch between regions,
+        refining identifies them only once the margin of the switch exceeds
+        the remaining error), and ``ctx.info`` is the
         refined call's. The $z$ returned by the first call is not changed: use
         the one returned here. Graph TV refines to ``tol=0``, the exact
         solution, for any ``ztol``. A refine that stops at ``max_iter`` raises
@@ -183,6 +208,7 @@ class Context:
             if ztol is None:
                 raise ValueError("refine needs ztol or tol (or an inner_accuracy block)")
         t = op._refine_tol(tol, ztol)
+        _check_floor(tol, ztol, np.finfo(self.dtype).eps, np.dtype(self.dtype).name, warn, stacklevel=3)
         z = np.empty(self.shape, self.dtype)
         with self.lock:
             gap, iters, conv = _C.refine(op._op, self.ws, t, _deriv_iters(max_iter), z)
@@ -470,13 +496,21 @@ def _gap_tol(tol, ztol, default):
     return ztol * ztol
 
 
-def _zerr(gaps, xx):
-    """max_i sqrt(2 gap_i) / |x_i| from the per-image gaps and squared norms:
-    0 for an image of zeros (its gap is 0) and for no images, NaN when an
-    image holds a NaN (its gap is NaN)."""
+def _zerr(gaps, xx, eps, tiny, n):
+    """max_i of r_i + u (1 + r_i) + eta sqrt(n) / |x_i|, r_i = sqrt(2 gap_i) / |x_i|,
+    from the per-image gaps and squared norms, with u = eps / 2 the unit
+    roundoff and eta = tiny eps / 2 half the smallest subnormal of the output
+    dtype (eps and tiny as finfo gives them), for n entries per image: the C
+    library's bound (math audit M7). 0 for an image of zeros and for no
+    images, NaN when an image holds a NaN (its gap is NaN)."""
     if gaps.size == 0:
         return 0.0
-    return float(np.max(np.sqrt(2.0 * np.maximum(gaps, 0.0) / np.where(xx > 0, xx, 1.0))))
+    u, eta = 0.5 * float(eps), 0.5 * float(tiny) * float(eps)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        nx = np.sqrt(xx)
+        r = np.sqrt(2.0 * np.maximum(gaps, 0.0)) / np.where(nx > 0, nx, 1.0)
+        b = np.where(nx > 0, r + u * (1.0 + r) + eta * np.sqrt(n) / np.where(nx > 0, nx, 1.0), r)
+    return float(np.max(b))
 
 
 def _deriv_tol(tol):
@@ -575,8 +609,14 @@ class Operator:
     def prox_conj(self, y, sigma=1.0, *, axis=-1, out=None, threads=0, keep=False, ctx=None,
                   copy=False):
         r"""$\operatorname{prox}_{\sigma g^*}(y) = y - \sigma \operatorname{prox}_{g/\sigma}(y/\sigma)$
-        (Moreau)."""
+        (Moreau) for a convex $g$. For the nonconvex penalties the call
+        returns the same formula, the Moreau residual, which is not the prox
+        of $g^*$ (their $g^*$ is the indicator of $\{0\}$)."""
         return self._run(y, sigma, axis, out, threads, keep, ctx, copy, conj=True)
+
+    def _check_conj(self):
+        """Raises when the operator has no Euclidean conjugate (the framework
+        wrappers call it before tracing)."""
 
     def _run(self, x, step, axis, out, threads, keep, ctx, copy, conj):
         axis, threads = _axis_threads(axis, threads)
@@ -702,7 +742,9 @@ class Operator:
             need = _ACCURACY.get()
             limit = 1e-4 if need is None else need
             zerr = getattr(ctx.info, "zerr", float("nan"))
-            if zerr > limit:
+            # zerr includes the output's rounding (math audit M7), which a
+            # solve to ztol = limit adds on top of it.
+            if zerr > limit + 0.5 * float(np.finfo(ctx.dtype).eps) * (1.0 + limit):
                 ctx.warned = True
                 warnings.warn(f"{type(self).__name__}: the derivative at this point is not exact "
                               f"(certified error of z {zerr:.2g} > {limit:g}"
@@ -1097,12 +1139,27 @@ class HalfSpace(Hyperplane):
 class Isotonic(Operator):
     r"""Projection onto the monotone cone along the axis (pool-adjacent-
     violators), minimising $\sum_i w_i (z_i - x_i)^2$. Parameters: weights,
-    all > 0 with min/max >= 1e-100 (since 1.0)."""
+    all > 0 with min/max >= 1e-100 (since 1.0).
+
+    With unequal weights the fit is the projection in the metric $W$, and
+    :meth:`prox_conj` raises ``ValueError`` (since 1.0.1): $y - P(y)$ is not
+    the prox of the Euclidean conjugate, though $W(y - P(y))$ lies in the
+    polar cone. Equal weights keep the conjugate."""
 
     def __init__(self, weights=None, increasing=True):
         w = _vec(weights)
         super().__init__(_C.isotonic(w, bool(increasing)))
         self._layout = [] if w is None else [("weights", w.size, False)]
+        self._metric = w is not None and bool(np.any(w != w.flat[0]))
+
+    def prox_conj(self, y, sigma=1.0, **kwargs):
+        self._check_conj()
+        return super().prox_conj(y, sigma, **kwargs)
+
+    def _check_conj(self):
+        if self._metric:
+            raise ValueError("Isotonic with unequal weights projects in the weighted metric and "
+                             "has no Euclidean conjugate; W (y - prox(y)) is its polar-cone part")
 
 
 class SortedL1(Operator):
@@ -1157,7 +1214,9 @@ class TV1DL2(Operator):
     r"""$g(z) = \lVert W D z \rVert_2 = \sqrt{\sum_i w_i^2 (z_{i+1} - z_i)^2}$ along
     the axis:
     1D TV with the l2 norm of the differences (Newton on the dual trust-region
-    problem, to rounding). Weights as in TV1D. Parameters: weights."""
+    problem, to rounding). Weights as in TV1D; a positive weight below
+    2^-511 times the largest raises ValueError (since 1.0.1). Parameters:
+    weights."""
 
     def __init__(self, weights=None):
         w = _vec(weights)
@@ -1189,7 +1248,10 @@ class _ImageOperator(Operator):
         may be (since 1.0) an array that broadcasts to the batch shape: one
         step per image. ``tol`` (default 1e-6) or ``ztol`` (since 1.0; not
         both) sets the accuracy: ``ztol`` is the relative error of $z$ to
-        certify, $\lVert z - z^* \rVert_2 \le \mathrm{ztol}\,\lVert x \rVert_2$ per image."""
+        certify, $\lVert z - z^* \rVert_2 \le \mathrm{ztol}\,\lVert x \rVert_2$ per image, for the
+        solver's iterate; the array returned adds its rounding to the dtype
+        (``info.zerr``), and a positive ``ztol`` below the dtype's unit roundoff
+        raises :class:`AccuracyWarning` (since 1.0.1)."""
         z, ctx, _ = self._iter(x, gamma, out, threads, keep, ctx, copy, False, tol, ztol,
                                max_iter, warm_start, warm, keep or ctx is not None)
         return (z, ctx) if keep else z
@@ -1243,7 +1305,9 @@ class _ImageOperator(Operator):
                              f"least {self.ndim} dimensions")
         z = _output(x, out)
         step, steps = _steps(step, conj, self, x.shape, -1)
-        tol = self._tol(x, tol, ztol, warn)
+        t = self._tol(x, tol, ztol, warn)  # validates first
+        _check_floor(tol, ztol, np.finfo(x.dtype).eps, x.dtype.name, warn, stacklevel=4)
+        tol = t
 
         def call(ws):
             nonlocal x, steps
@@ -1297,8 +1361,9 @@ class TVAniso(_ImageOperator):
     which certifies $\lVert z - z^* \rVert_2 \le \sqrt{\mathrm{tol}}\,\lVert x \rVert_2$:
     the default 1e-6 gives $z$ to 1e-3 relative, ``tol=1e-10`` to 1e-5.
     ``ztol=`` (since 1.0) asks for that relative error directly, and
-    ``info.zerr`` reports the one certified (see "Inexact proxes inside outer
-    solvers" in the API docs).
+    ``info.zerr`` reports the one certified for the array returned, its
+    rounding to the dtype included (since 1.0.1; see "Inexact proxes inside
+    outer solvers" in the API docs).
     ``prox`` returns ``z`` (or ``(z, ctx)`` with ``keep=True``, where
     ``ctx.info`` is an :class:`IterInfo`). ``warm_start=dual`` starts from a
     dual (``IterInfo.dual``); with ``ctx=`` and ``warm=True`` a call starts from
@@ -1354,7 +1419,10 @@ class GraphTV(_ImageOperator):
     shape of x with the last axis over the edges, in the order of
     ``edges``. An edge is at a kink when its ends are equal and the
     solver's flow on it is on its bound (on a graph with cycles the flow is
-    not unique; this is the one behind ``info.gap``). -1 joins its ends (the
+    not unique; this is the one behind ``info.gap``). The mask is then the
+    edges biactive in that flow: on a graph with cycles it can flag edges
+    where the prox is smooth, and a branch override there may select no
+    piece the prox has (since 1.0.1). -1 joins its ends (the
     default), +1 keeps them apart; a region splits only where every edge
     across the split is kept apart."""
 
@@ -1511,7 +1579,9 @@ class _Pointwise(Operator):
 
 class L0(_Pointwise):
     r"""$g(z) = \lambda \sum_i w_i [z_i \ne 0]$ (hard thresholding at
-    $\sqrt{2 \gamma \lambda w_i}$). Parameters: weights (the map is piecewise constant in them)."""
+    $\sqrt{2 \gamma \lambda w_i}$). The map jumps there, from 0 to the
+    threshold, and the derivative at the jump is the selected branch's, a
+    convention. Parameters: weights (the map is piecewise constant in them)."""
 
     def __init__(self, lam=1.0, weights=None):
         w = _vec(weights)
@@ -1521,7 +1591,10 @@ class L0(_Pointwise):
 
 class Lq(_Pointwise):
     r"""$g(z) = \lambda \sum_i w_i \lvert z_i \rvert^q$ with $0 < q < 1$ (closed form
-    for $q = 1/2$ and $2/3$, safeguarded Newton otherwise). Parameters: weights;
+    for $q = 1/2$ and $2/3$, safeguarded Newton otherwise). The map jumps from
+    0 to $\beta = (2c(1 - q))^{1/(2-q)}$, $c = \gamma\lambda w_i$, at
+    $\lvert x_i \rvert = \beta + c q \beta^{q-1}$, and the derivative at the jump
+    is the selected branch's, a convention. Parameters: weights;
     ``grads.lam`` is also provided."""
 
     def __init__(self, lam=1.0, q=0.5, weights=None):
@@ -1580,7 +1653,10 @@ class MCP(_Pointwise):
 
 class LogPenalty(_Pointwise):
     r"""$g(z) = \lambda \sum_i \log(1 + \lvert z_i \rvert / \varepsilon)$,
-    $\varepsilon > 0$. Parameters: lam, eps."""
+    $\varepsilon > 0$. The map is Lipschitz for $\gamma\lambda < \varepsilon^2$,
+    Hölder-½ at $\lvert x \rvert = \varepsilon$ for $\gamma\lambda = \varepsilon^2$,
+    and jumps at its tie above; there the derivative is the selected branch's,
+    a convention. Parameters: lam, eps."""
 
     _layout = [("lam", 1, True), ("eps", 1, True)]
 
@@ -1625,9 +1701,11 @@ class Spectral:
     low-rank penalties) and permutation invariant for eigenvalues (also
     ``NonNeg``: the PSD cone, ``Simplex``: the spectraplex, ``LogBarrier``:
     $-\lambda \log\det$). The decomposition and the matrix products are NumPy's
-    (``numpy.linalg.svd``, ``eigh``); the derivatives come from the C core, exact
+    (``numpy.linalg.svd``, ``eigh``); the derivatives come from the C core, also
     where singular values repeat or sit on a threshold, where autograd through
-    an SVD fails. An ``eigh`` input that is not symmetric is replaced by
+    an SVD fails. Between two distinct values the derivative holds their
+    divided difference, to rounding that grows as one over their gap (since
+    1.0.1 also across a breakpoint of the scalar map between them). An ``eigh`` input that is not symmetric is replaced by
     $(X + X^\top)/2$.
     """
 

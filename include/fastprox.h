@@ -93,7 +93,8 @@ typedef struct {
     int    threads;        /* 0 = fp_default_threads(), 1 = serial; values above
                               4 x the available CPUs (at most 4096) count as that cap */
     double tol;            /* relative duality-gap tolerance (iterative ops): the
-                              gap tol ||x||^2 / 2 certifies ||z - z*|| <= sqrt(tol) ||x|| */
+                              gap tol ||x||^2 / 2 certifies ||z - z*|| <= sqrt(tol) ||x||
+                              for the iterate, before its rounding to the dtype */
     int    max_iter;       /* iteration cap (iterative ops) */
     int    tie;            /* fp_tie, for nonconvex ops */
     int    keep_structure; /* save structure in the workspace for jvp/vjp */
@@ -205,7 +206,11 @@ FP_API fp_status fp_op_soc(fp_op **out);
 /* Projection onto the monotone cone (isotonic regression by PAVA), minimising
  * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0, with
  * min/max >= 1e-100 (since 1.0).
- * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL). */
+ * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL).
+ * With unequal weights the fit is the projection in the metric W, not the
+ * Euclidean one, and fp_prox_conj returns FP_EINVAL (since 1.0.1): its
+ * y - P(y) is not the prox of the Euclidean conjugate, though W (y - P(y))
+ * lies in the polar cone. Equal weights keep the conjugate. */
 FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op **out);
 
 /* The sorted l1 norm (OWL, SLOPE; since 1.0): g(z) = sum_k w_k |z|_(k) along
@@ -233,7 +238,9 @@ FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_
  * (since 0.2): 1D TV with the l2 norm of the differences. The dual is a
  * trust-region problem, solved by Newton's method on its secular equation with
  * one tridiagonal solve per step, to rounding (fp_info.gap is 0).
- * edge_weights as fp_op_tv1d, with w_i^2 finite. theta = w. */
+ * edge_weights as fp_op_tv1d; a positive weight below 2^-511 times the
+ * largest is FP_EPARAM (since 1.0.1; before, w_i^2 had to be finite).
+ * theta = w. */
 FP_API fp_status fp_op_tv1d_l2(const fp_array *edge_weights, fp_op **out);
 
 /* Nonconvex pointwise maps (elementwise). The prox can be set-valued at a
@@ -288,8 +295,9 @@ FP_API fp_status fp_op_group_mcp(double lambda, double b, int64_t n, const int64
  * Iterative: fp_info reports the duality gap, and the call stops when the gap
  * of every image is at most tol * ||x||^2 / 2 (FP_ENOTCONV after max_iter,
  * with the last iterate written). The prox objective is 1-strongly convex, so
- * ||z - z*||^2 <= 2 gap: the certified relative error of z is sqrt(tol), and
- * tol = 1e-10 gives ||z - z*|| <= 1e-5 ||x||. fp_workspace_image_info gives
+ * ||z - z*||^2 <= 2 gap: the certified relative error of the iterate is
+ * sqrt(tol), and tol = 1e-10 gives ||z - z*|| <= 1e-5 ||x||; the array
+ * returned adds its rounding (fp_workspace_image_info). fp_workspace_image_info gives
  * each image's gap. Its dual is kept in the workspace. Images
  * far from unit scale are solved rescaled by a power of two (since 1.0), so
  * prox(c x, c gamma) = c prox(x, gamma) for c = 2^k up to rounding; the gap
@@ -450,7 +458,9 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  *                      flow, the sum of x - z over the subtree below it, is
  *                      within tol of gamma w_e
  *   graph TV (0.4)     the same with the solver's flow, saved by the prox
- *                      call (on a graph with cycles the flow is not unique)
+ *                      call (on a graph with cycles the flow is not unique,
+ *                      and the mask, edges biactive in that flow, can flag
+ *                      edges where the prox is smooth)
  * (edges and pixels of zero bound are free, not kinks).
  * fp_workspace_kinks writes the codes into mask (FP_I8, the shape
  * of x, any strides; for graph and tree TV, whose kinks are edges, the shape of x with
@@ -496,8 +506,9 @@ FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side,
  * hold for dx and dout in fp_jvp, g and gx in fp_vjp, and x and out in
  * fp_value (since 1.0; before, such overlaps were undefined). gamma must be
  * finite, >= 0, and at most 2^960 (about 2.4e289) divided by the operator's
- * largest parameter (lambda, a weight, ...; projections ignore gamma):
- * FP_EPARAM otherwise (since 1.0). On error the contents of out are
+ * largest parameter (lambda, a weight, ...; projections ignore gamma;
+ * for group Huber, SCAD and MCP, max(lambda, 1) times the largest group
+ * weight, since 1.0.1): FP_EPARAM otherwise (since 1.0). On error the contents of out are
  * unspecified. The step is checked even on an empty batch, and an empty
  * batch with keep_structure saves an empty point: derivatives return FP_OK
  * and write nothing, gradients 0 (since 1.0).
@@ -533,7 +544,11 @@ FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_
  * and y_i / sigma must be finite in the array's dtype, else FP_EPARAM. That
  * is checked for every sigma < 1 in float32, and in float64 for sigma < 2^-64;
  * above that, only entries beyond about 1e289 can overflow, and their outputs
- * are then +-inf or NaN. */
+ * are then +-inf or NaN. FP_EINVAL for weighted isotonic regression
+ * (fp_op_isotonic, since 1.0.1). For the nonconvex penalties (l0, lq, SCAD,
+ * MCP, the log penalty and their group and spectral forms) the result is the
+ * Moreau residual, not the prox of g*, which is 0: their g* is the indicator
+ * of {0}. */
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_array *out, const fp_options *opt,
                               fp_workspace *ws, fp_info *info);
@@ -633,9 +648,12 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
 
 /* Per image, the results of the last fp_prox, fp_prox_steps or fp_prox_conj
  * call on ws of an iterative image operator: its duality gap (fp_info.gap is
- * their sum), its iterations, and the relative error of its z that the gap
- * certifies, sqrt(2 gap) / ||x||, since ||z - z*||^2 <= 2 gap (0 for an image
- * of zeros). An image holding a NaN has gap and error NaN and 0 iterations.
+ * their sum), its iterations, and the relative error of the z returned that
+ * the gap certifies: r + u (1 + r) with r = sqrt(2 gap) / ||x||, since
+ * ||z - z*||^2 <= 2 gap, and u the unit roundoff of the output dtype for its
+ * rounding (2u after fp_prox_conj; outputs below the normal range add their
+ * absolute rounding; since 1.0.1). 0 for an image of zeros. The gap is
+ * evaluated in floating point: the bound holds to working precision. An image holding a NaN has gap and error NaN and 0 iterations.
  * gaps, iters and zerrs are contiguous arrays of count entries, in the
  * batch's C order, count the number of images (the product of x's shape
  * without the image axes: FP_ESHAPE otherwise); any of them may be NULL.
@@ -646,7 +664,11 @@ FP_API fp_status fp_workspace_info(const fp_workspace *ws, fp_info *info);
  * regions, graph TV when no part was stopped by tol, tree TV always, and
  * isotropic TV only without smoothing; smoothing is then the largest
  * curvature cap mu of isotropic TV's derivative, in the units of x (0 for the
- * others). Either may be NULL. FP_EINVAL without a kept point, and for other
+ * others). Exact means that the saved regions are certified as the
+ * solution's; it is not a bound in terms of the gap, and a small gap alone
+ * does not make a derivative exact (near a switch between regions, a refine
+ * identifies them only once the switch's margin exceeds the error; since
+ * 1.0.1). Either may be NULL. FP_EINVAL without a kept point, and for other
  * operators.
  *
  * fp_workspace_refine solves the kept call again from its saved input and its

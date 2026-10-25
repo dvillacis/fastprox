@@ -164,3 +164,106 @@ def test_ztol_jax(jit, x64):
     a = fpj.prox(fp.TVAniso(2), np.asarray(x, np.float64), 0.4, ztol=1e-4)
     b = fpj.prox(fp.TVAniso(2), np.asarray(x, np.float64), 0.4, tol=1e-8)
     assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+# ---------------------------------------------------------------- output rounding (math audit M7)
+
+def _exact_err(z, ref, x):
+    """|z - ref| / |x| over the whole array, in float64."""
+    z, ref, x = (np.asarray(a, np.float64) for a in (z, ref, x))
+    return np.sqrt(np.sum((z - ref) ** 2) / np.sum(x * x))
+
+
+@pytest.mark.parametrize("Op", [fp.TVIso, fp.TVAniso])
+def test_zerr_counts_the_rounding(Op):
+    """x = (0, 1) at gamma = 0.1 solves exactly to (0.1, 0.9), gap 0, and
+    zerr was 0, but the float32 array returned is 2.4e-8 from it (math audit
+    M7). zerr adds the dtype's unit roundoff u (1 + r)."""
+    for dt, u in ((np.float32, 2.0**-24), (np.float64, 2.0**-53)):
+        x = np.array([[0.0, 1.0]], dt)
+        z, info = Op(2).solve(x, 0.1)
+        assert info.gap == 0.0 and info.zerr >= u
+        assert _exact_err(z, [[0.1, 0.9]], x) <= info.zerr
+        # The conjugate's output rounds twice.
+        _, ctx = Op(2).prox_conj(x, 1.0 / 0.1, keep=True)
+        assert ctx.info.zerr >= 2 * u
+
+
+@pytest.mark.parametrize("dt", [np.float32, np.float64])
+def test_zerr_bounds_the_returned_array(dt):
+    """On random images, in each dtype: the distance of the array returned
+    to a float64 reference solved to 1e-20 is within zerr
+    plus the reference's own certificate, for the prox, its conjugate, a
+    refine and graph and tree TV."""
+    rng = np.random.default_rng(8)
+    n = 12
+    chain = np.stack([np.arange(n * n - 1), np.arange(1, n * n)], 1)
+    for trial in range(6):
+        x = (rng.normal(size=(3, n, n)) * 10.0 ** rng.uniform(-3, 3)).astype(dt)
+        x64 = x.astype(np.float64)
+        gamma = 0.3 * float(np.abs(x64).max())
+        for op in (fp.TVIso(2), fp.TVAniso(2)):
+            ref, ri = op.solve(x64, gamma, tol=1e-20, max_iter=50000, warn=False)
+            for ztol in (1e-3, 1e-6):
+                z, info = op.solve(x, gamma, ztol=ztol, max_iter=100000)
+                for i in range(3):
+                    assert _exact_err(z[i], ref[i], x[i]) <= (info.zerr + ri.zerr) * (1 + 1e-6)
+            _, ctx = op.prox(x, gamma, ztol=1e-2, keep=True, max_iter=100000)
+            zr = ctx.refine(1e-7 if dt == np.float64 else 1e-6)
+            assert _exact_err(zr, ref, x) <= (ctx.info.zerr + ri.zerr) * (1 + 1e-6)
+            # At sigma = 1 the conjugate's output is x - prox_g(x), relative to |x|.
+            xs = (x64 / gamma).astype(dt)
+            ref1, r1 = op.solve(xs.astype(np.float64), 1.0, tol=1e-20, max_iter=50000, warn=False)
+            y, cctx = op.prox_conj(xs, 1.0, ztol=1e-6, keep=True, max_iter=100000)
+            assert _exact_err(y, xs.astype(np.float64) - ref1, xs) <= (cctx.info.zerr + r1.zerr) * (1 + 1e-6)
+        flat = x.reshape(3, n * n)
+        for op in (fp.GraphTV(n * n, _grid(n)), fp.TreeTV(n * n, chain)):
+            ref, _ = op.solve(flat.astype(np.float64), gamma)
+            z, info = op.solve(flat, gamma)
+            assert _exact_err(z, ref, flat) <= info.zerr * (1 + 1e-6) + 1e-15
+
+
+def test_ztol_below_the_rounding_warns():
+    """A ztol below the dtype's unit roundoff cannot be certified: float32
+    warns at 1e-12, float64 does not; inner_accuracy's ztol counts, an own
+    tol does not, and ztol = 0 (no tolerance) does not. On an image solved
+    exactly, so that no ConvergenceWarning comes with it."""
+    import warnings
+    e = np.array([[0.0, 1.0]])
+    e32 = e.astype(np.float32)
+    op = fp.TVIso(2)
+    with pytest.warns(fp.AccuracyWarning, match="5.96e-08 of float32"):
+        op.prox(e32, 0.1, ztol=1e-12)
+    with pytest.warns(fp.AccuracyWarning, match="unit roundoff"):
+        with fp.inner_accuracy(1e-11):
+            op.prox(e32, 0.1)
+    _, ctx = op.prox(e32, 0.1, keep=True)
+    with pytest.warns(fp.AccuracyWarning, match="unit roundoff"):
+        ctx.refine(1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        op.prox(e, 0.1, ztol=1e-12)
+        op.prox(e32, 0.1, tol=1e-24)
+        op.solve(e32, 0.1, ztol=1e-12, warn=False)
+        ctx.refine(1e-12, warn=False)
+        fp.TVAniso(2).solve(e32, 0.1, ztol=1e-7)
+        op.prox(e32, 0.1, ztol=0.0)
+        with fp.inner_accuracy(1e-11):
+            op.prox(e, 0.1)
+
+
+def test_zerr_rounding_frameworks():
+    """The device solves of PyTorch and JAX report the same bound."""
+    torch = pytest.importorskip("torch")
+    import fastprox.torch as fpt
+    x = torch.tensor([[[0.0, 1.0]]], dtype=torch.float32)
+    _, info = fpt.tv_iso(x, 0.1, return_info=True)
+    assert info.zerr >= 2.0**-24
+    with pytest.warns(fp.AccuracyWarning, match="unit roundoff"):
+        fpt.tv_aniso(x, 0.1, ztol=1e-12)
+    jax = pytest.importorskip("jax")
+    import fastprox.jax as fpj
+    _, info = fpj.tv_iso(np.array([[[0.0, 1.0]]], np.float32), 0.1, return_info=True)
+    assert float(info.zerr) >= 2.0**-24
+    with pytest.warns(fp.AccuracyWarning, match="unit roundoff"):
+        fpj.tv_aniso(np.array([[[0.0, 1.0]]], np.float32), 0.1, ztol=1e-12)

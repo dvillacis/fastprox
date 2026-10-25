@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace fp {
@@ -812,24 +813,36 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
     return count;
 }
 
-// sqrt(2 gap) / |x| for the image the kernel solved, x(i, o) its entry i
-// (offset o in the input): the relative error of z that the gap certifies,
-// since |z - z*|^2 <= 2 gap (feedback U1). 0 for an image of zeros, NaN for
-// one holding a NaN (its gap is NaN). The norm is summed in double, in eight
-// partial sums by position (a fixed order, not the adder's latency chain);
-// when its square leaves the normal range it is summed again scaled by the
-// largest entry.
+// The relative error of the image the kernel solved, x(i, o) its entry i
+// (offset o in the input), that the gap certifies (feedback U1): r =
+// sqrt(2 gap) / |x|, since |z - z*|^2 <= 2 gap, plus the rounding of the
+// returned array (math audit M7). Rounding an iterate z to the output dtype
+// moves it by at most u |z| + eta sqrt(n), with u the dtype's unit roundoff
+// and eta half its smallest subnormal, and |z| <= (1 + r) |x|, since the
+// prox is nonexpansive and maps 0 to 0. A conjugate's output rounds twice
+// (y - sigma z from z in the dtype), each by the same bound relative to |y|:
+// round is 1 or 2, the number of roundings (eta relative to |y| holds as
+// image operators run conjugates at sigma = 1). 0 for an image of zeros (its z
+// is 0 exactly), NaN for one holding a NaN (its gap is NaN). The norm is
+// summed in double, in eight partial sums by position (a fixed order, not
+// the adder's latency chain); when its square leaves the normal range it is
+// summed again scaled by the largest entry. eta is at the scale of x(i, o).
 template <class X>
-double certified_error(double gap, const ImagePlan &p, X x) noexcept {
+double certified_error(double gap, const ImagePlan &p, double u, double eta, int round, X x) noexcept {
     if (std::isnan(gap)) return gap;
     const double e = std::sqrt(2.0 * std::max(gap, 0.0));
+    const double a = eta * std::sqrt(static_cast<double>(p.numel));  // absolute: subnormal outputs
+    const auto bound = [&](double r, double a_rel) { return r + round * (u * (1.0 + r) + a_rel); };
     double acc[8] = {};
     p.for_each(0, [&](int64_t i, int64_t o) {
         const double v = x(i, o);
         acc[i & 7] += v * v;
     });
     const double s = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    if (s >= 1e-280 && s <= 1e280) return e / std::sqrt(s);
+    if (s >= 1e-280 && s <= 1e280) {
+        const double n = std::sqrt(s);
+        return bound(e / n, a / n);
+    }
     double m = 0.0;
     p.for_each(0, [&](int64_t i, int64_t o) { m = std::max(m, std::fabs(x(i, o))); });
     if (!(m > 0.0)) return std::isnan(m) ? m : 0.0;
@@ -838,7 +851,8 @@ double certified_error(double gap, const ImagePlan &p, X x) noexcept {
         const double v = x(i, o) / m;
         t += v * v;
     });
-    return e / m / std::sqrt(t);
+    const double rt = std::sqrt(t);
+    return bound(e / m / rt, a / m / rt);
 }
 
 // An image's results in the workspace: its gap (of the conjugate's output
@@ -853,12 +867,16 @@ inline void record_image(fp_workspace &ws, int64_t r, const ImageCall &c, bool c
 }
 
 // The certified error of an image from the kernel's input in(i), entry i in
-// C order, at the scale the image was solved at (c.scale_exp).
-template <class In>
-double image_zerr(const ImageCall &c, const ImagePlan &p, In in) noexcept {
-    const int se = c.scale_exp;
-    if (!se) return certified_error(c.gap, p, in);
-    return certified_error(c.scaled_gap, p, [&](int64_t i, int64_t o) { return std::ldexp(in(i, o), -se); });
+// C order, at the scale the image was solved at (c.scale_exp), for an
+// output in T (after a conjugate when conj).
+template <class T, class In>
+double image_zerr(const ImageCall &c, const ImagePlan &p, bool conj, In in) noexcept {
+    const double u = 0.5 * static_cast<double>(std::numeric_limits<T>::epsilon());
+    const double eta = 0.5 * static_cast<double>(std::numeric_limits<T>::denorm_min());
+    const int se = c.scale_exp, round = conj ? 2 : 1;
+    if (!se) return certified_error(c.gap, p, u, eta, round, in);
+    return certified_error(c.scaled_gap, p, u, std::ldexp(eta, -se), round,
+                           [&](int64_t i, int64_t o) { return std::ldexp(in(i, o), -se); });
 }
 
 template <class T>
@@ -925,8 +943,8 @@ fp_status image_prox_driver(const fp_op &op, const Arr &x, const Arr &out, doubl
         // The certified error from the kernel's input: out may be x itself,
         // and holds z by now. After a conjugate, c.gap and y / sigma give the
         // error relative to y.
-        const double ze = in == xr ? image_zerr(c, p, [&](int64_t, int64_t o) { return static_cast<double>(xr[o]); })
-                                   : image_zerr(c, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); });
+        const double ze = in == xr ? image_zerr<T>(c, p, conj, [&](int64_t, int64_t o) { return static_cast<double>(xr[o]); })
+                                   : image_zerr<T>(c, p, conj, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); });
         record_image(ws, r, c, conj, sigma, ze);
         if (conj) {
             // out = x - sigma z, reading x through its own strides.
@@ -1011,7 +1029,7 @@ fp_status image_refine_driver(const fp_op &op, fp_workspace &ws, int nt, double 
         if (int e = op.prox_image(in, res, c)) err.fetch_or(e, std::memory_order_relaxed);
         if (!c.converged) notconv.store(1, std::memory_order_relaxed);
         record_image(ws, r, c, conj, sigma,
-                     image_zerr(c, p, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); }));
+                     image_zerr<T>(c, p, conj, [&](int64_t i, int64_t) { return static_cast<double>(in[i]); }));
         if (od) {
             int64_t off[2];
             p.offsets(r, off);

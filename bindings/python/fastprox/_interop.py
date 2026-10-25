@@ -39,6 +39,8 @@ class Spec:
                                 "max_iter are not accepted")
             if cls is Spectral and not isinstance(op, Spectral):
                 raise TypeError("pass Spectral(op, kind) built, or a subclass such as NuclearNorm")
+        if conj and isinstance(op, Operator):
+            op._check_conj()  # before a JAX callback would wrap the error
         self.op = op
         self.static = dict(static)
         self.names = tuple(names)

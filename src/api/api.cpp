@@ -337,6 +337,7 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
                     const fp_options *opt, fp_workspace *ws, fp_info *info, bool conj,
                     const fp_array *sa = nullptr) {
     if (!op || !xa || !oa) return FP_EINVAL;
+    if (conj && !op->conj_supported()) return FP_EINVAL;
     if (!finite(step) || step < 0) return FP_EPARAM;
     const fp_options o = opt ? *opt : defaults();
     if (o.tie != FP_TIE_NONZERO && o.tie != FP_TIE_ZERO) return FP_EINVAL;

@@ -249,6 +249,16 @@ def test_spectral_float32_and_eigh_input():
     assert x.grad.dtype == torch.float32
 
 
+def test_weighted_isotonic_has_no_conj():
+    # Math audit M2: the weighted fit projects in the metric W.
+    w = np.array([1.0, 3.0, 2.0])
+    y = torch.tensor([2.0, 0.0, 1.0], dtype=torch.float64)
+    for f in (lambda: fpt.prox_conj(fp.Isotonic(w), y),
+              lambda: fpt.prox_conj(fp.Isotonic, y, weights=_t(w))):
+        with pytest.raises(ValueError, match="no Euclidean conjugate"):
+            f()
+
+
 def test_spectral_errors():
     x = torch.randn(4, 4, dtype=torch.float64)
     with pytest.raises(TypeError, match="prox_conj"):

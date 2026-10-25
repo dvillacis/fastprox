@@ -32,13 +32,15 @@ derivative run in callbacks on the CPU.
 from __future__ import annotations
 
 import functools
+import math
 from collections import OrderedDict
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import _ACCURACY, _MAX_ITER, IterInfo, Operator, Spectral, _call_tol, _sq_tol, _warn_unconverged
+from . import (_ACCURACY, _MAX_ITER, IterInfo, Operator, Spectral, _call_tol, _check_floor, _sq_tol,
+               _warn_unconverged)
 from . import _tv_jax as _tvj
 from ._interop import Spec, check_dtype, check_step, is_float, spectral_step_grad, steps
 
@@ -269,6 +271,13 @@ def _spectral(spec, want_gamma=True):
 # ---------------------------------------------------------------------------
 
 
+def _floor(x, tol, ztol, warn):
+    """The ztol floor of x's dtype (math audit M7), for tv_iso and tv_aniso."""
+    dt = jnp.result_type(x)
+    if jnp.issubdtype(dt, jnp.floating):
+        _check_floor(tol, ztol, jnp.finfo(dt).eps, jnp.dtype(dt).name, warn, stacklevel=4)
+
+
 def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, ztol=None,
            max_iter=1000, warm_start=None, return_info=False, deriv_tol=None,
            deriv_max_iter=10000, warn=True):
@@ -292,7 +301,9 @@ def tv_iso(x, gamma=1.0, *, ndim=2, weights=None, pixel_weights=None, tol=None, 
     $\max(10^{-10}, 100\,\varepsilon)$ at the tightest. ``pixel_weights`` (since
     0.3), as in :func:`fastprox.torch.tv_iso`: $\alpha \ge 0$ broadcasting to x.shape,
     differentiable."""
-    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    t = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    _floor(x, tol, ztol, warn)
+    tol = t
     return _device_tv(True, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, pixel_weights, warn and "fastprox.jax.tv_iso")
 
@@ -305,7 +316,9 @@ def tv_aniso(x, gamma=1.0, *, ndim=2, weights=None, edge_weights=None, tol=None,
     are exact region averages. ``edge_weights`` (since 0.3), as in
     :func:`fastprox.torch.tv_aniso`: $\beta \ge 0$ of shape (ndim, ...)
     broadcasting to (ndim, *x.shape), differentiable."""
-    tol = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    t = _call_tol(tol, ztol, 1e-6, _sq_tol, warn, stacklevel=3)
+    _floor(x, tol, ztol, warn)
+    tol = t
     return _device_tv(False, x, gamma, ndim, weights, tol, max_iter, warm_start, return_info,
                       deriv_tol, deriv_max_iter, edge_weights, warn and "fastprox.jax.tv_aniso")
 
@@ -380,7 +393,12 @@ def _device_tv(iso, x, gamma, ndim, weights, tol, max_iter, warm_start, return_i
     # A report, not a differentiable output: no gradients through it.
     xx = jnp.sum(jnp.square(jax.lax.stop_gradient(xb)).reshape(xb.shape[0], -1), axis=1)
     g = jax.lax.stop_gradient(gap)
-    zerr = jnp.max(jnp.sqrt(2 * jnp.maximum(g, 0) / jnp.where(xx > 0, xx, 1)))  # NaN for a NaN image
+    # sqrt(2 gap) / |x| and the rounding of the result (math audit M7); NaN for a NaN image.
+    f = jnp.finfo(x.dtype)
+    nx = jnp.sqrt(xx)
+    r = jnp.sqrt(2 * jnp.maximum(g, 0)) / jnp.where(nx > 0, nx, 1)
+    eta = 0.5 * float(f.tiny) * float(f.eps) * math.sqrt(math.prod(xb.shape[1:]))
+    zerr = jnp.max(jnp.where(nx > 0, r + 0.5 * float(f.eps) * (1 + r) + eta / jnp.where(nx > 0, nx, 1), r))
     if warn:  # conv is traced: the host reduces it and warns, under jit too
         jax.debug.callback(functools.partial(_unconverged, warn, int(max_iter), _ACCURACY.get()),
                            conv, zerr)
