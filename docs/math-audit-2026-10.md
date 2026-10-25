@@ -460,7 +460,7 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 2. **Revalidation.** Before the tag:
    - the full Python and C suites;
    - the sanitizer build;
-   - a 24-hour fuzz run (with the extreme-range targets of M3–M6 seeded);
+   - a fuzz run with the extreme-range targets of M3–M6 seeded: as decided below (item 6), an hour of the standalone driver on 6 workers locally, and one dispatch of the coverage-guided fuzz workflow on the branch;
    - the frameworks' conjugate paths for M2.
 3. **Release.** As in `CLAUDE.md`: version 1.0.1 in `project()` and in the `fastprox.h` macros, the CHANGELOG section, a TestPyPI dry run, then the tag `v1.0.1`.
 
@@ -475,3 +475,4 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 3. **M7: a bound.** `zerr` adds the term u_T rather than computing ‖fl(z) − z‖ per image. The bound needs no pass over the output, and costs nothing visible in float64 (2⁻⁵³). In float32 it can exceed the actual rounding: 6.0e-8 against the 2.4e-8 measured in the audit's case, and more for images whose z is small against x.
 4. **C5's representation-independent test** goes to the 1.x candidates, not to 1.0.1.
 5. **Target.** Every item gates 1.0.1.
+6. **R1: no 24-hour fuzz run** (revised the same day). The M and C items have targeted tests at scales up to 2^±1000, and the nightly CI job fuzzes master with libFuzzer for 20 minutes. The seeded harness found four extreme-scale defects in its first 1.2 million inputs, all fixed. A day of compute would look for more of the same in the same operators. 1.0.1 instead takes an hour of the standalone driver on 6 local workers and one dispatch of the fuzz workflow on the branch.

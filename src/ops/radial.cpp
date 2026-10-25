@@ -59,7 +59,10 @@ struct GroupRadial final : RowOp<GroupRadial> {
     }
 
     const char *name() const noexcept override { return nm; }
-    double step_scale() const noexcept override { return h->step_scale() * cmax; }
+    // The kernel forms the scalar map's step gamma c_g, which h multiplies by
+    // its own factors: both c and h's scale times c are factors (since 1.0.1;
+    // group Huber at lambda = 1e-200 had gamma c_g overflow, a NaN group).
+    double step_scale() const noexcept override { return std::max(h->step_scale(), 1.0) * cmax; }
     int64_t nparams() const noexcept override { return Ph + static_cast<int64_t>(c.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;

@@ -458,10 +458,12 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
     }
     // The linear piece ((a - 1) x - c a lambda) / (a - 1 - c) as x + c (x / D
     // - lambda r), D = a - 1 - c, r = a / D, so that no product with a
-    // overflows (M6); bitwise it can differ from the quotient by an ulp.
+    // overflows (M6); bitwise it can differ from the quotient by an ulp. It is
+    // at most x on its piece (x <= a lambda), and taken so: rounding put it an
+    // ulp above (since 1.0.1, as for MCP).
     static double ratio(double c, double a) noexcept { return 1.0 / (1.0 - (1.0 + c) / a); }
     double linear(double ax, double c, double a) const noexcept {
-        return ax + c * (ax / (a - 1.0 - c) - lambda * ratio(c, a));
+        return std::fmin(ax + c * (ax / (a - 1.0 - c) - lambda * ratio(c, a)), ax);
     }
     // Pieces (in |x|, with the sign s): 0 thresholded, 1 soft, 2 linear, 3
     // identity. Kinks: 1 at |x| = c lambda, 2 at (1 + c) lambda, 3 at a lambda.
@@ -538,14 +540,17 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
     T prox1(T x, double gamma, int64_t i) const noexcept {
         const double xd = static_cast<double>(x), ax = std::fabs(xd), c = step(gamma, i), b = p;
         double m;  // as in Scad::prox1
+        // The linear piece is at most x where it applies (x <= b lambda), and
+        // taken so: x = -2.98828125 at gamma = 1.296875 came back an ulp
+        // above |x| (fuzz, 2026-10-25), moving an entry away from 0.
         if constexpr (Weighted) {
-            const double m2 = (ax - c * lambda) / (1.0 - c / b);
+            const double m2 = std::fmin((ax - c * lambda) / (1.0 - c / b), ax);
             m = ax <= b * lambda ? m2 : ax;
             m = ax <= c * lambda ? 0.0 : m;
         } else {
             // b (x - c lambda) / (b - c), without the product b x (M6).
             if (ax <= c * lambda) m = 0.0;
-            else if (ax <= b * lambda) m = (ax - c * lambda) / (1.0 - c / b);
+            else if (ax <= b * lambda) m = std::fmin((ax - c * lambda) / (1.0 - c / b), ax);
             else m = ax;
         }
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly (b x / b is not)

@@ -1325,7 +1325,7 @@ Since 1.0 the computation depends on the operator (audit A1).
 | `FP_EDTYPE` | dtype other than float32/float64, or mismatched dtypes |
 | `FP_ESHAPE` | mismatched shapes or parameter lengths |
 | `FP_ENOMEM` | out of memory, or a requested size too large to allocate |
-| `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), a step beyond the operator's range ($\gamma$ times its largest parameter above $2^{960}$, since 1.0), a $\sigma$ too small for the conjugate's formula, or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
+| `FP_EPARAM` | invalid parameter or step (negative $\gamma$, negative radius, …), a step beyond the operator's range ($\gamma$ times its largest parameter above $2^{960}$, since 1.0; for group Huber, SCAD and MCP the parameter is $\max(\lambda, 1)$ times the largest group weight, since 1.0.1), a $\sigma$ too small for the conjugate's formula, or a constraint set that is empty for the axis length (hyperplane ∩ box, the sum of $k > n$ largest entries) |
 | `FP_EINTERNAL` | any other internal error |
 | `FP_EDEVICE` | (*since 1.0*) a device error, from the call or from earlier work on its stream |
 

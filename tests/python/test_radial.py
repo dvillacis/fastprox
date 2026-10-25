@@ -233,3 +233,20 @@ def test_errors():
         with pytest.raises(ValueError):
             bad()
     fp.GroupSCAD(1.0, 3.0, None, [2.0]).prox(x, 0.9)
+
+
+def test_group_step_in_range():
+    """The scalar map's step is gamma c_g, which h then multiplies by its own
+    factors (since 1.0.1). Group Huber's step range counted only gamma lambda
+    c_g: at lambda = 1e-280, gamma lambda c_g = 1.1e273 but gamma c_g
+    overflowed, and the group came out NaN (fuzz, 2026-10-25). The range is
+    now gamma max(lambda, 1) c_max <= 2^960."""
+    x = np.array([-84.0, 3.0, 1e-30])
+    op = fp.GroupHuber(1e-280, 1.0, None, np.array([2.4e275]))
+    with pytest.raises(ValueError):
+        op.prox(x, 4.6e277)
+    z = op.prox(x, 1e10)  # gamma c = 2.4e285, gamma lambda c = 2.4e5
+    assert np.all(np.isfinite(z)) and np.all(np.abs(z) <= np.abs(x))
+    # lambda >= 1: the range as before.
+    op = fp.GroupHuber(1e10, 1.0, None, np.array([1.0]))
+    assert np.all(np.isfinite(op.prox(x, 2.0**920)))

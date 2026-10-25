@@ -239,12 +239,11 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
         case 21: return fp_op_sum_largest(b.param(), static_cast<int64_t>(b.u8() % 40) - 2, b.u8() % 2, &c.op);
         case 22: {  // hyperplane or half-space with a box; b often infeasible
             fill(c.params[0], pick);
+            double ainv = 0.0;  // the largest 1 / |a_i|
             for (auto &v : c.params[0]) {
                 if (b.u8() % 4 == 0) v = -v;
                 else if (b.u8() % 8 == 0) v = 0.0;
-                // The projection scales like |b| / |a_i|: count 1 / |a_i| as a
-                // parameter size for the finite-output check.
-                if (v != 0.0) b.raise(1.0 / std::fabs(v));
+                if (v != 0.0) ainv = std::fmax(ainv, 1.0 / std::fabs(v));
             }
             fill(c.params[1], b.u8() % 2 ? n : 1);
             s0[0] = static_cast<int64_t>(c.params[0].size());
@@ -254,6 +253,11 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             const double lo = b.u8() % 3 ? -b.param() : -INFINITY, hi = b.u8() % 3 ? b.param() : INFINITY;
             const bool upper = b.u8() % 2;  // per-entry upper bounds from params[1]
             const double rhs = (b.u8() % 2 ? -1.0 : 1.0) * b.param();
+            // The projection scales like |b| / |a_i| and the bounds: count
+            // both as parameter sizes for the finite-output check (|b| / |a|
+            // = 1.5e69 |b| at sigma = 5.2e205 overflows the conjugate; fuzz).
+            b.raise(ainv);
+            b.raise(std::fabs(rhs) * ainv);
             return fp_op_hyperplane(b.u8() % 4 ? &a0 : nullptr, rhs, lo, hi, nullptr,
                                     upper ? &a1 : nullptr, b.u8() % 2, &c.op);
         }
@@ -562,6 +566,17 @@ void run(const uint8_t *data, size_t size) {
             return f32 ? static_cast<double>(reinterpret_cast<float *>(z1.data())[i])
                        : reinterpret_cast<double *>(z1.data())[i];
         };
+        auto dump = [&] {
+            std::fprintf(stderr, "x:");
+            for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", xat(i));
+            std::fprintf(stderr, "\nz:");
+            for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", zat(i));
+            std::fprintf(stderr, "\nparams:");
+            for (auto p : c.params[0]) std::fprintf(stderr, " %.17g", p);
+            std::fprintf(stderr, "\ngroups:");
+            for (auto g : c.groups) std::fprintf(stderr, " %lld", static_cast<long long>(g));
+            std::fprintf(stderr, "\n");
+        };
         bool finite = true;
         for (int64_t i = 0; i < numel && finite; ++i) finite = std::isfinite(xat(i));
         auto is = [&](std::initializer_list<const char *> names) {
@@ -600,15 +615,12 @@ void run(const uint8_t *data, size_t size) {
                     sx += (xat(i) / m) * (xat(i) / m);
                     sz += (zat(i) / m) * (zat(i) / m);
                 }
-                if (!(sz <= sx * (1.0 + 1e-5) + 1e-280)) fail("a norm-like prox grew |z| beyond |x|");
+                if (!(sz <= sx * (1.0 + 1e-5) + 1e-280)) {
+                    dump();
+                    fail("a norm-like prox grew |z| beyond |x|");
+                }
             } else if (!(m == 0.0)) {
-                std::fprintf(stderr, "x:");
-                for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", xat(i));
-                std::fprintf(stderr, "\nz:");
-                for (int64_t i = 0; i < numel; ++i) std::fprintf(stderr, " %.17g", zat(i));
-                std::fprintf(stderr, "\nparams:");
-                for (auto p : c.params[0]) std::fprintf(stderr, " %.17g", p);
-                std::fprintf(stderr, "\n");
+                dump();
                 fail("non-finite output from finite input at any scale");
             }
         }

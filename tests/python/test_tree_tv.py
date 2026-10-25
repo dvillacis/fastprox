@@ -235,3 +235,41 @@ def test_errors():
     assert isinstance(op, fp.GraphTV)
     with pytest.raises(ValueError):
         op.prox(np.zeros(4), 1.0)
+
+
+def test_capacities_far_above_the_data():
+    """Edges with gamma w_e far above the data (fuzz, 2026-10-25): the clip
+    points were differences of numbers of that size, a child came out an
+    ulp apart from its parent, and the region means took gamma w_e as a
+    boundary flow (z = 1.7e34 for entries of 100 at gamma w = 8e34; at gamma w
+    near 2^960 the sums of capacities overflowed). Since 1.0.1 capacities are
+    capped at 2 n (max x - min x), above any flow, which leaves the prox
+    unchanged: any weight above the cap gives the same z, bit for bit."""
+    rng = np.random.default_rng(11)
+    for seed in range(20):
+        n = 40
+        e, w = random_forest(n, seed, kind="path" if seed % 3 == 0 else "random")
+        x = rng.normal(size=n) * 3
+        big = rng.random(len(e)) < 0.4
+        z = {}
+        for W in (1e4, 1e35, 1e250):
+            ww = np.where(big, W, w)
+            z[W] = fp.TreeTV(n, e, ww).prox(x, 0.7)
+            assert ref.graph_tv_kkt_residual(x, z[W], 0.7, e, ww) <= 1e-9
+        np.testing.assert_array_equal(z[1e35], z[1e4])
+        np.testing.assert_array_equal(z[1e250], z[1e4])
+    # The fuzz case.
+    x = np.array([2.2776809231982845e-62, 0, -91.6328125, -37.0234375, -5.9825007841162405e-21, -9.56640625,
+                  93.37109375, -36.078125, -117.86328125, 0, -42.59765625, -70.01953125, -66.89453125, 70.56640625,
+                  -1.977890006966999e-213, 86.28125, 0, 62.58203125, 0, 3.6144868151668865e-30, -52.76953125,
+                  -103.46484375, -61, -120.0078125])
+    w = np.array([1.109375, 0.859375, 1.436651058841912e+239, 8.7605406936220043e-176, 3.9023356077425814e+34,
+                  1.1590881888694063e-110, 6.3282122845634795e+50, 2.390625, 9.8426799854374305e+131, 3,
+                  3.2891726211610814e-113, 0.125, 1.0625, 0, 3.84375, 9.6539449568811997e+149,
+                  9.8327529087970972e-123, 2.921875, 7.3272264664950917e-38, 0, 3.375, 2.8340192412003822e+122,
+                  3.984375])
+    e = np.array([0, 1, 2, 0, 1, 3, 0, 4, 5, 1, 1, 6, 3, 7, 8, 2, 9, 0, 9, 10, 11, 3, 12, 5, 12, 13, 12, 14, 15, 11,
+                  6, 16, 17, 5, 18, 16, 19, 3, 0, 20, 1, 21, 22, 5, 23, 0]).reshape(-1, 2)
+    z = fp.TreeTV(24, e, w).prox(x, 2.125)
+    assert np.all(z >= x.min()) and np.all(z <= x.max())
+    assert ref.graph_tv_kkt_residual(x, z, 2.125, e, w) <= 1e-9

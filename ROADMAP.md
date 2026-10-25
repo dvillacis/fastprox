@@ -261,7 +261,7 @@ Two audits of 1.0.0's mathematics are [docs/mathematical-audit-2026-10-25.md](do
 - [x] C5: Graph TV kinks describe the saved flow, a superset of the prox's kinks on graphs with cycles — [spec](docs/math-audit-2026-10.md#c5)
 - [x] C6: Outer-method statements. Hypotheses and "sufficient" for forward–backward, FISTA, nonconvex descent and error summability, each checked in its source — [spec](docs/math-audit-2026-10.md#c6)
 - [x] A1: Commit both audits with errata (Ky Fan index in T9, T3's equality, T5's scaling, T7's strict complementarity, T8's prox-bound), the scripts under `reports/`, and the three pages in `mkdocs.yml` — [spec](docs/math-audit-2026-10.md#a1)
-- [ ] R1: Every M item's counterexample as an assertion in the suite (fixtures, no CVXPY or mpmath at test time); full suites, the sanitizer build and a 24-hour fuzz run; then 1.0.1 on PyPI — [spec](docs/math-audit-2026-10.md#r1)
+- [ ] R1: Every M item's counterexample as an assertion in the suite (fixtures, no CVXPY or mpmath at test time); full suites, the sanitizer build and a fuzz run with the extreme ranges seeded (an hour locally, one CI dispatch on the branch; decision of 2026-10-25); then 1.0.1 on PyPI — [spec](docs/math-audit-2026-10.md#r1)
 
 ## 1.x — GPU backend
 

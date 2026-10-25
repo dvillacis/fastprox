@@ -367,3 +367,21 @@ def test_shrinkage_at_any_scale():
         for lam in (1e-200, 1e-150, 1e-120):
             z = fp.LogPenalty(lam, eps).prox(x, 3.578125)
             assert np.all(z <= x)
+
+
+@pytest.mark.parametrize("make", [lambda lam, p, w: fp.MCP(lam, p, w), lambda lam, p, w: fp.SCAD(lam, 1.0 + p, w)])
+def test_linear_piece_at_most_x(make):
+    """SCAD's and MCP's linear piece is at most |x| where it applies, but
+    rounded an ulp above near its end (MCP at x = -2.98828125, gamma =
+    1.296875; fuzz, 2026-10-25). Since 1.0.1 it is taken as at most |x|."""
+    rng = np.random.default_rng(8)
+    for _ in range(300):
+        lam, gamma = 10.0 ** rng.uniform(-3, 3), rng.uniform(0.1, 2.0)
+        p = gamma * rng.uniform(1.01, 3.0)
+        w = rng.uniform(0.0, 1.0, 64)
+        op = make(lam, p, w)
+        hi = (1.0 + p) * lam  # past the end of either linear piece
+        x = rng.uniform(0.0, hi, 64) * rng.choice([-1.0, 1.0], 64)
+        x[:8] = np.nextafter(p * lam, 0) * np.sign(x[:8] + 0.5)  # MCP's end, b lambda
+        z = op.prox(x, gamma)
+        assert np.all(np.abs(z) <= np.abs(x)) and np.all(np.sign(z) * np.sign(x) >= 0)

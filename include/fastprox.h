@@ -506,8 +506,9 @@ FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side,
  * hold for dx and dout in fp_jvp, g and gx in fp_vjp, and x and out in
  * fp_value (since 1.0; before, such overlaps were undefined). gamma must be
  * finite, >= 0, and at most 2^960 (about 2.4e289) divided by the operator's
- * largest parameter (lambda, a weight, ...; projections ignore gamma):
- * FP_EPARAM otherwise (since 1.0). On error the contents of out are
+ * largest parameter (lambda, a weight, ...; projections ignore gamma;
+ * for group Huber, SCAD and MCP, max(lambda, 1) times the largest group
+ * weight, since 1.0.1): FP_EPARAM otherwise (since 1.0). On error the contents of out are
  * unspecified. The step is checked even on an empty batch, and an empty
  * batch with keep_structure saves an empty point: derivatives return FP_OK
  * and write nothing, gradients 0 (since 1.0).
