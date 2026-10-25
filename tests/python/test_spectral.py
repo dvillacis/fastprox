@@ -371,8 +371,9 @@ def test_chained_near_ties(s, lam):
     """Values 5e-6 apart, under the band eps^(1/3) max|s|, chain into one
     cluster 1e-3 wide; only pairs within the band take the averaged limit
     (audit T7). The averaged limit gave 0.23 and 0.06 relative error. The
-    thresholds sit midway between two values: a breakpoint of the scalar
-    map within the band of a pair still takes the average there."""
+    thresholds sit midway between two values, where the average of the two
+    pieces' slopes equals the quotient; test_near_ties_across_a_breakpoint
+    puts them elsewhere (math audit M1)."""
     s = np.sort(s)[::-1]
     rng = np.random.default_rng(7)
     U, _ = np.linalg.qr(rng.standard_normal((200, 200)))
@@ -382,3 +383,45 @@ def test_chained_near_ties(s, lam):
     _, ctx = op.prox_from(U, s, V.T, keep=True)
     ref = _nuclear_jvp_exact(U, s, V, lam, H)
     assert np.linalg.norm(op.jvp(ctx, H) - ref) <= 1e-8 * np.linalg.norm(ref)
+
+
+@pytest.mark.parametrize("kind", ["svd", "eigh"])
+@pytest.mark.parametrize("dtype,top,bottom,tol", [
+    (np.float64, 1 + 1e-7, 1 - 2e-7, 1e-7),
+    (np.float64, 1 + 1e-5, 1 - 2e-5, 1e-9),
+    (np.float64, 1 + 1e-3, 1 - 2e-3, 1e-12),
+    (np.float32, 1.001, 0.998, 1e-4),
+])
+def test_near_ties_across_a_breakpoint(kind, dtype, top, bottom, tol):
+    """Two values within the band with the threshold 1 between them, not
+    midway (math audit M1). The map is differentiable there, and its
+    coefficient on a symmetric off-diagonal direction is the divided
+    difference ((top - 1) - 0) / (top - bottom), 1/3 here, where the average
+    of the two pieces' slopes gave 1/2 in both dtypes."""
+    X = np.diag([top, bottom]).astype(dtype)
+    H = np.array([[0.0, 1.0], [1.0, 0.0]], dtype)
+    op = fp.NuclearNorm(1.0) if kind == "svd" else fp.Spectral(fp.Soft(1.0), kind="eigh")
+    _, ctx = op.prox(X, 1.0, keep=True)
+    s = np.sort(ctx.s.astype(np.float64))[::-1]
+    exact = (s[0] - 1.0) / (s[0] - s[1])  # the value below the threshold maps to 0
+    for d in (op.jvp(ctx, H), op.vjp(ctx, H)[0]):
+        np.testing.assert_allclose(d[[0, 1], [1, 0]], [exact, exact], rtol=tol)
+        np.testing.assert_allclose(np.diag(d), [0.0, 0.0], atol=0)
+    assert ctx.deriv.exact
+
+
+@pytest.mark.parametrize("gap", [1e-12, 1e-9, 1e-6, 1e-3])
+def test_near_ties_smooth(gap):
+    """Where f is smooth between two close values, the average of the limits
+    is still used, and matches the divided difference: for -lam log det on
+    eigenvalues, f(s) = (s + sqrt(s^2 + c)) / 2 with c = 4 gamma lam, whose
+    quotient (1 + (a + b) / (sqrt(a^2 + c) + sqrt(b^2 + c))) / 2 has no
+    cancellation."""
+    a, b, c = 0.7 + gap, 0.7, 4 * 0.3
+    op = fp.Spectral(fp.LogBarrier(0.3), kind="eigh")
+    _, ctx = op.prox(np.diag([a, b]), 1.0, keep=True)
+    a, b = np.sort(ctx.s)[::-1]
+    exact = 0.5 * (1 + (a + b) / (np.sqrt(a * a + c) + np.sqrt(b * b + c)))
+    H = np.array([[0.0, 1.0], [1.0, 0.0]])
+    d = op.jvp(ctx, H)
+    np.testing.assert_allclose(d[[0, 1], [1, 0]], [exact, exact], rtol=1e-8)

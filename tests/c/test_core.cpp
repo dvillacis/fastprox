@@ -1674,6 +1674,19 @@ static void test_spectral() {
         CHECK(out.b[0] == -0.5 && out.b[6] == -0.5 && out.b[18] == 0.0 && out.b[24] == 0.0);
         CHECK(out.b[1] == 0.0);
     }
+    // Near ties across a breakpoint (math audit M1): soft thresholding at 0.5
+    // between 0.5 + d and 0.5 - 2d. The quotient d / (3 d) = 1/3 is the
+    // derivative; the average of the two pieces' slopes, 1/2, was returned.
+    {
+        const double d = 1e-7;
+        const Vec s = {0.5 + d, 0.5 - 2 * d}, a = {0.0, 1.0, 1.0, 0.0};
+        const double q = ((0.5 + d) - 0.5) / ((0.5 + d) - (0.5 - 2 * d));
+        for (fp_spectral_kind kind : {FP_SPECTRAL_SVD, FP_SPECTRAL_EIG}) {
+            Spec out = spectral(soft, kind, {}, 2, s, a);
+            CHECK_OK(out.st);
+            CHECK(std::fabs(out.b[1] - q) < 1e-8 && std::fabs(out.b[2] - q) < 1e-8);
+        }
+    }
     // Near ties of a nonlinear map (-log det): the average of the two
     // derivatives, against the divided difference at the midpoint.
     {

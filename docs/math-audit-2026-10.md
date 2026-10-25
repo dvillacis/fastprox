@@ -79,7 +79,7 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 2. **Choose.** Use m if |q − m| ≤ e, and q otherwise.
    - Either way, the result is within 2e of the true divided difference of the computed spectrum, whether or not f is smooth between the values. If m is used, |q* − m| ≤ |q* − q| + |q − m| ≤ 2e.
    - Where f is smooth, m is the more accurate of the two, and it is still chosen whenever it agrees with q.
-3. **The antisymmetric quotient.** The SVD's (zᵢ + zⱼ)/(sᵢ + sⱼ) gets the same rule when sᵢ + sⱼ ≤ band, with the mean of the odd extension's derivatives.
+3. **The antisymmetric quotient needs no rule.** The SVD's (zᵢ + zⱼ)/(sᵢ + sⱼ) has sᵢ, sⱼ ≥ 0, and zᵢ, zⱼ ≥ 0 for an absolutely symmetric prox, so its sums do not cancel and it is accurate at any gap. (Found while implementing; the first draft gave it the same rule.)
 4. **Exact ties are unchanged.** For sᵢ = sⱼ the code keeps the limit computed from the direction d (the existing cluster rule). It is the Jacobian of a piece wherever f is differentiable at the tie. A tie that sits on a breakpoint is a kink, and joins the kink rules (C1).
 5. **Exactness and the docs.**
    - `ctx.deriv.exact` stays True: the result is now the divided difference to the stated bound.

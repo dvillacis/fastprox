@@ -14,12 +14,19 @@
 //
 // Where a quotient has no value, its limit comes from J: G+_ij -> J_ii - J_ij
 // at s_i = s_j, and G-_ij, r_i -> J_ii at zero, since J_ij = 0 there (Ding et
-// al., Lemma 3.2). Pairs closer than eps^(1/3) max |s| count as tied and take
-// the average of their two limits: a quotient there would lose eps |z| / gap
-// to rounding, while the average is off by O(gap^2) and exact at a tie. The
-// rule is per pair: values whose adjacent gaps are within that band chain
-// into clusters, which can be much wider than the band, and a pair of the
-// same cluster farther apart takes its quotient (audit T7).
+// al., Lemma 3.2). For a pair closer than eps^(1/3) max |s| the quotient
+// loses about eps |z| / gap to rounding, and the average of the two limits
+// is more accurate, off by O(gap^2), but only where f is smooth between the
+// values: across a breakpoint it stays off by O(1) as the gap closes (math
+// audit M1: (s - 1)+ at 1 + d and 1 - 2d has quotient 1/3, the average 1/2).
+// So such a pair takes the average only where it agrees with the quotient
+// within the quotient's rounding bound e, and the quotient otherwise; either
+// way the result is within 2 e of the exact quotient of the computed values.
+// G-'s quotient needs no such rule: z and s are nonnegative there, so its
+// sums do not cancel. The rule is per pair: values whose adjacent gaps are
+// within the band chain into clusters, which can be much wider than the
+// band, and a pair of the same cluster farther apart takes its quotient
+// (audit T7).
 //
 // The limits come from one JVP per row, in a direction d that is nonzero on
 // every member of each cluster (the chained one) and sums to zero over it. On a
@@ -161,8 +168,17 @@ fp_status spectral_driver(const fp_op &op, const fp_workspace &ws, bool svd, con
                     // The limit only for a pair within the band: a run of close
                     // values chains into a cluster much wider (audit T7), and
                     // the quotient over a gap above the band loses only eps^(2/3).
-                    const bool tied = cid[i] == cid[j] && std::fabs(sv[i] - sv[j]) <= band;
-                    const double gp = tied ? 0.5 * (lam[i] + lam[j]) : (zv[i] - zv[j]) / (sv[i] - sv[j]);
+                    const double gap = std::fabs(sv[i] - sv[j]);
+                    const bool tied = cid[i] == cid[j] && gap <= band;
+                    double gp = tied ? 0.5 * (lam[i] + lam[j]) : (zv[i] - zv[j]) / (sv[i] - sv[j]);
+                    if (tied && gap > 0.0) {
+                        // The quotient's rounding bound: a few ulps of z and
+                        // of the prox's own scale |s|, over the gap (M1).
+                        const double q = (zv[i] - zv[j]) / (sv[i] - sv[j]);
+                        const double sc = std::fabs(zv[i]) + std::fabs(zv[j]) +
+                                          (1.0 + std::fabs(q)) * (std::fabs(sv[i]) + std::fabs(sv[j]));
+                        if (!(std::fabs(q - gp) <= 2.0 * eps * sc / gap)) gp = q;
+                    }
                     const double aij = static_cast<double>(arow[i * ai + j * aj]);
                     double v;
                     if (svd) {

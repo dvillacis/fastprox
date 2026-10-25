@@ -244,7 +244,7 @@ Two audits of 1.0.0's mathematics are [docs/mathematical-audit-2026-10-25.md](do
 
 **Wrong results**
 
-- [ ] M1: Spectral near ties across a breakpoint. Use the mean of the branch derivatives only where it agrees with the divided difference within the quotient's rounding bound; X = diag(1 + δ, 1 − 2δ) gives 1/3, not 1/2 — [spec](docs/math-audit-2026-10.md#m1)
+- [x] M1: Spectral near ties across a breakpoint. Use the mean of the branch derivatives only where it agrees with the divided difference within the quotient's rounding bound; X = diag(1 + δ, 1 − 2δ) gives 1/3, not 1/2 — [spec](docs/math-audit-2026-10.md#m1)
 - [x] M2: Weighted isotonic regression has no Euclidean conjugate. `fp_prox_conj` returns `FP_EINVAL` for unequal weights (decided 2026-10-25), in C, Python and the framework wrappers — [spec](docs/math-audit-2026-10.md#m2)
 - [ ] M3: ℓ0 threshold overflow. √2·√γ·√λ·√w, and the same rule for every scalar threshold (ℓq, log); reciprocal-scaling tests against mpmath — [spec](docs/math-audit-2026-10.md#m3)
 - [ ] M4: Log barrier leaves its domain. Bounded scale s = √γ·√λ; an underflowing root returns the dtype's smallest positive value — [spec](docs/math-audit-2026-10.md#m4)

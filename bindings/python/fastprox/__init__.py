@@ -1644,9 +1644,11 @@ class Spectral:
     low-rank penalties) and permutation invariant for eigenvalues (also
     ``NonNeg``: the PSD cone, ``Simplex``: the spectraplex, ``LogBarrier``:
     $-\lambda \log\det$). The decomposition and the matrix products are NumPy's
-    (``numpy.linalg.svd``, ``eigh``); the derivatives come from the C core, exact
+    (``numpy.linalg.svd``, ``eigh``); the derivatives come from the C core, also
     where singular values repeat or sit on a threshold, where autograd through
-    an SVD fails. An ``eigh`` input that is not symmetric is replaced by
+    an SVD fails. Between two distinct values the derivative holds their
+    divided difference, to rounding that grows as one over their gap (since
+    1.0.1 also across a breakpoint of the scalar map between them). An ``eigh`` input that is not symmetric is replaced by
     $(X + X^\top)/2$.
     """
 
