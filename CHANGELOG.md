@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - The conda recipe's `libfastprox` exports a pin on the major version (`upper_bound='x'`), instead of the minor, as the ABI now holds for every 1.x.
+- `docs/api.md`, "Conjugates": at large σ the conjugate of a non-homogeneous operator can itself exceed the range (about −σr/n for the simplex of radius r), and is then ±inf; nothing bounds σ, so the call succeeds. The fuzz harness now accepts ±inf there, but not NaN, as it does for float32 (found by a fuzz run, 2026-10-24: r = 1.1e45 at σ = 9.7e272).
 
 ### Fixed
 
