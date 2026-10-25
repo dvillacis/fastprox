@@ -7,7 +7,7 @@
 # conda-forge provides libstdc++, so it is not linked statically
 # (FASTPROX_STATIC_LIBSTDCXX=OFF).
 context:
-  version: "1.0.0"
+  version: "1.0.1"
   python_min: "3.12"
 
 recipe:
