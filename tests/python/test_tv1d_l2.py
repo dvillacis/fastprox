@@ -210,7 +210,8 @@ def test_gradient_in_gamma_large_n():
 
 
 def test_errors():
-    for bad in (lambda: fp.TV1DL2(-1.0), lambda: fp.TV1DL2(np.nan), lambda: fp.TV1DL2(1e200),
+    for bad in (lambda: fp.TV1DL2(-1.0), lambda: fp.TV1DL2(np.nan),
+                lambda: fp.TV1DL2(np.array([1.0, 2.0**-512])),  # its square, scaled, not normal (M5)
                 lambda: fp.TV1DL2(np.ones(3)).prox(np.ones(5))):
         with pytest.raises(ValueError):
             bad()
@@ -244,3 +245,55 @@ def test_derivative_scale_invariance(k):
         np.testing.assert_allclose(rs.params / sigma, r1.params, rtol=1e-12, atol=1e-13)
         lhs = v @ op.jvp(cs, u)
         assert abs(lhs - gs @ u) <= 1e-12 * (1 + abs(lhs))
+
+
+def test_weight_scale():
+    """A weight whose square underflowed dropped its edge, where gamma made
+    its effect of order one: TV1DL2(1e-180) at gamma = 1e180 is two-node TV
+    with gamma w = 1, whose solution at (1, -1) is 0, and the input came back
+    (math audit M5). The weights are stored over a power of two and the step
+    scaled by it: prox(gamma, w) = prox(gamma / c, c w)."""
+    np.testing.assert_array_equal(fp.TV1DL2(1e-180).prox(np.array([1.0, -1.0]), 1e180), [0.0, 0.0])
+    # 1e200, whose square overflowed, is a valid weight now.
+    np.testing.assert_allclose(fp.TV1DL2(1e200).prox(np.array([1.0, -1.0]), 0.25e-200), [0.75, -0.75],
+                               rtol=1e-15)
+    # The smallest ratio accepted, 2^-511.
+    fp.TV1DL2(np.array([1.0, 2.0**-511]))
+    rng = np.random.default_rng(11)
+    for trial in range(60):
+        n = int(rng.integers(2, 30))
+        # Weights over 100 orders for the prox; for the derivatives, whose
+        # conditioning grows with the weights' ratio (to 1e80 here), within
+        # one order, at a common scale far from 1.
+        wide = trial % 2 == 0
+        w = 10.0 ** rng.uniform(-100, 2, n - 1) if wide else rng.uniform(0.3, 3.0, n - 1) * 10.0 ** rng.uniform(-150, 150)
+        w[rng.random(n - 1) < 0.15] = 0.0
+        x = rng.normal(size=n).cumsum()
+        g = rho0(x, w) * 10.0 ** rng.uniform(-2, 0)
+        if not (np.isfinite(g) and g > 0):
+            continue
+        op = fp.TV1DL2(w)
+        z, ctx = op.prox(x, g, keep=True)
+        u, v = rng.normal(size=n), rng.normal(size=n)
+        dw = rng.normal(size=op.nparams)
+        _, r1 = op.vjp(ctx, v)
+        for k in (-1000, -600, -200, 200, 600, 900):
+            c = 2.0**k
+            pos = w[w > 0] * c
+            if not (pos.size and np.log2(g) - k < 1023 and pos.min() >= 2.0**-1022
+                    and np.isfinite(pos.max())):
+                continue  # the scaled problem itself is not representable
+            opc = fp.TV1DL2(w * c)
+            zc, cc = opc.prox(x, g / c, keep=True)
+            np.testing.assert_array_equal(zc, z)
+            if wide:
+                continue
+            # The same Jacobian in x; d/dgamma scales by c, d/dw by 1 / c.
+            np.testing.assert_allclose(opc.jvp(cc, u), op.jvp(ctx, u), rtol=1e-13, atol=1e-14)
+            dg, dzw = op.jvp(ctx, None, 1.0), op.jvp(ctx, None, 0.0, dw)
+            np.testing.assert_allclose(opc.jvp(cc, None, 1.0) / c, dg, rtol=1e-13, atol=1e-14 * np.abs(dg).max())
+            np.testing.assert_allclose(opc.jvp(cc, None, 0.0, dw) * c, dzw, rtol=1e-13,
+                                       atol=1e-14 * np.abs(dzw).max())
+            _, rc = opc.vjp(cc, v)
+            assert rc.gamma / c == pytest.approx(r1.gamma, rel=1e-13, abs=1e-14 * np.abs(dg).max())
+            np.testing.assert_allclose(rc.params * c, r1.params, rtol=1e-13, atol=1e-14 * np.abs(r1.params).max())

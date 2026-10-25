@@ -401,14 +401,34 @@ struct LogBarrier final : ElemOp<LogBarrier> {
     int64_t nparams() const noexcept override { return 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
 
-    // r = sqrt(x^2 + 4 gamma lambda), through hypot where the square overflows.
-    static double root(double x, double gl) noexcept {
-        const double r = std::sqrt(x * x + 4.0 * gl);
-        return r == HUGE_VAL ? std::hypot(x, 2.0 * std::sqrt(gl)) : r;
+    // The step's two scales: gl = gamma lambda, and sg = sqrt(gamma) sqrt(lambda),
+    // which neither overflows nor underflows where the answer is in range
+    // (math audit M4; gamma lambda alone underflows at 1e-200 each).
+    struct Scales {
+        double gl, sg;
+    };
+    Scales scales(double gamma) const noexcept { return {gamma * lambda, std::sqrt(gamma) * std::sqrt(lambda)}; }
+    // r = sqrt(x^2 + 4 gamma lambda); through hypot(x, 2 sg) where the squares
+    // overflow or lose to underflow.
+    static double root(double x, Scales k) noexcept {
+        const double r = std::sqrt(x * x + 4.0 * k.gl);
+        return r < 0x1p500 && r > 0x1p-400 ? r : std::hypot(x, 2.0 * k.sg);
     }
-    static double value(double x, double r, double gl) noexcept {
+    // z = (x + r) / 2, for x < 0 as gl / ((r - x) / 2) without its cancellation.
+    // The halves first: r - x overflowed for x = -1e308, and 0 left the domain
+    // where the answer is 1e-28 (M4). sg (sg / d) where gl underflows.
+    static double value(double x, double r, Scales k) noexcept {
         // NaN fails x < 0 and stays NaN; -inf gives 0, +inf stays inf.
-        return x < 0.0 ? gl / (0.5 * (r - x)) : 0.5 * x + 0.5 * r;
+        if (!(x < 0.0)) return 0.5 * x + 0.5 * r;
+        const double d = 0.5 * r - 0.5 * x;
+        return k.gl >= 0x1p-1000 ? k.gl / d : k.sg * (k.sg / d);
+    }
+    // The result in T, kept in the domain: an answer below T's smallest
+    // positive value is that value rather than 0 (gamma lambda > 0, x finite).
+    template <class T>
+    static T in_domain(double v, double x, Scales k) noexcept {
+        const T z = static_cast<T>(v);
+        return z == T(0) && k.sg > 0.0 && std::isfinite(x) ? std::numeric_limits<T>::denorm_min() : z;
     }
 
     // -lambda log x; INFINITY at x <= 0, outside the domain.
@@ -418,27 +438,29 @@ struct LogBarrier final : ElemOp<LogBarrier> {
 
     template <class T>
     T prox1(T x, double gamma, int64_t) const noexcept {
-        const double xd = static_cast<double>(x), gl = gamma * lambda;
-        return static_cast<T>(value(xd, root(xd, gl), gl));
+        const double xd = static_cast<double>(x);
+        const Scales k = scales(gamma);
+        return in_domain<T>(value(xd, root(xd, k), k), xd, k);
     }
     static constexpr bool kUniformKernel = true;
     template <class T>
     struct UK {
-        double gl;
+        Scales k;
         T operator()(T x) const noexcept {
             const double xd = static_cast<double>(x);
-            return static_cast<T>(value(xd, root(xd, gl), gl));
+            return in_domain<T>(value(xd, root(xd, k), k), xd, k);
         }
     };
     template <class T>
-    UK<T> uniform_kernel(double gamma) const noexcept { return {gamma * lambda}; }
+    UK<T> uniform_kernel(double gamma) const noexcept { return {scales(gamma)}; }
     ElemDeriv deriv1(double x, double gamma, int64_t) const noexcept {
         ElemDeriv e;
-        const double gl = gamma * lambda, r = root(x, gl);
+        const Scales k = scales(gamma);
+        const double r = root(x, k);
         e.np = 1;
         e.pi[0] = 0;
         if (r > 0.0) {
-            e.j = value(x, r, gl) / r;
+            e.j = value(x, r, k) / r;
             e.dg = lambda / r;
             e.pv[0] = gamma / r;
         } else {

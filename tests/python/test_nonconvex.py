@@ -270,3 +270,79 @@ def test_log_derivative_at_tiny_eps():
     h = 1e-165  # 1e-6 relative: the spacing of z near 1e-159 is ~1e-175
     fd = (op.prox(x + h) - op.prox(x - h)) / (2 * h)
     np.testing.assert_allclose(op.jvp(ctx, np.ones(1)), fd, rtol=1e-6)
+
+
+# ---------------------------------------------------------------- extreme parameters (math audit)
+
+def _fr(v):
+    from fractions import Fraction
+    return Fraction(float(v))
+
+
+@pytest.mark.parametrize("p", [3.5, 10.0, 1e10, 1e300, 1e308])
+@pytest.mark.parametrize("gamma,lam,x", [(1.0, 1.0, 3.0), (0.5, 2.0, 3.5), (0.25, 1e-3, 2e-3)])
+def test_scad_mcp_far_concavity(p, gamma, lam, x):
+    """SCAD's and MCP's middle pieces multiplied x by a or b before dividing:
+    at a = b = 1e308 both returned inf where (2a - 3) / (a - 2) and
+    2b / (b - 1) round to 2, with the gap 0, and so did their group forms
+    (math audit M6). Against the formulas in exact rational arithmetic, with
+    the derivatives in x, gamma, lambda and a or b."""
+    g, l, X, P = _fr(gamma), _fr(lam), _fr(x), _fr(p)
+    D = P - 1 - g  # SCAD, on (1 + gamma) lambda < x <= a lambda
+    assert (1 + g) * l < X <= P * l
+    z = ((P - 1) * X - g * P * l) / D
+    scad = {"z": z, "j": (P - 1) / D, "gamma": (z - P * l) / D, "lam": -g * P / D,
+            "a": -g * (X - (1 + g) * l) / D**2}
+    D = P - g  # MCP, on gamma lambda < x <= b lambda
+    z = P * (X - g * l) / D
+    mcp = {"z": z, "j": P / D, "gamma": (z - P * l) / D, "lam": -g * P / D, "b": -g * (X - g * l) / D**2}
+    for op, ref_, name in ((fp.SCAD(lam, p), scad, "a"), (fp.MCP(lam, p), mcp, "b")):
+        z, ctx = op.prox(np.array([x]), gamma, keep=True)
+        gx, grads = op.vjp(ctx, np.array([1.0]))
+        np.testing.assert_allclose(z, [float(ref_["z"])], rtol=4e-16)
+        np.testing.assert_allclose(gx, [float(ref_["j"])], rtol=4e-16)
+        assert grads.gamma == pytest.approx(float(ref_["gamma"]), rel=1e-14, abs=1e-300)
+        assert grads.lam == pytest.approx(float(ref_["lam"]), rel=1e-14, abs=1e-300)
+        assert getattr(grads, name) == pytest.approx(float(ref_[name]), rel=1e-14, abs=1e-300)
+    for op, ref_ in ((fp.GroupSCAD(lam, p), scad), (fp.GroupMCP(lam, p), mcp)):
+        np.testing.assert_allclose(op.prox(np.array([x]), gamma), [float(ref_["z"])], rtol=4e-16)
+
+
+@pytest.mark.parametrize("k,j", [(1010, 20), (600, -300), (-1000, -23), (-600, 300), (0, 0)])
+def test_reciprocal_scaling(k, j):
+    """prox(x; gamma 2^k, lambda 2^j, w 2^-(k+j)) is prox(x; gamma, lambda, w):
+    the scaled penalty gamma lambda w is the same. Formed as (gamma lambda) w,
+    its first product overflowed (k + j = 1030) or became subnormal (-1023):
+    l0 at gamma = 1e308, lambda = 1e-308 zeroed an entry whose minimiser is
+    itself (math audit M3). The products are now rounded as written from the
+    mantissas, so the results are identical, ties included. The weights have
+    short mantissas, so that w 2^-(k+j) is exact even where subnormal."""
+    rng = np.random.default_rng(k + 2000)
+    w = rng.integers(2, 8, 40) / 4.0  # 0.5 to 1.75
+    x = rng.normal(scale=2.0, size=40)
+    gamma, lam = 0.7, 0.9
+    tg, tl, tw = 2.0**k, 2.0**j, 2.0 ** -(k + j)
+    for build in (lambda l, v: fp.L0(l, v), lambda l, v: fp.Lq(l, 0.5, v), lambda l, v: fp.Lq(l, 2.0 / 3.0, v),
+                  lambda l, v: fp.Lq(l, 0.3, v), lambda l, v: fp.Lq(l, 0.8, v)):
+        base, scaled = build(lam, w), build(lam * tl, w * tw)
+        z1, c1 = base.prox(x, gamma, keep=True)
+        zt, ct = scaled.prox(x, gamma * tg, keep=True)
+        np.testing.assert_array_equal(zt, z1)
+        assert ct.info.ties == c1.info.ties
+        np.testing.assert_array_equal(scaled.vjp(ct, np.ones(40))[0], base.vjp(c1, np.ones(40))[0])
+    # The log penalty forms gamma lambda only.
+    if abs(k) <= 1000:
+        z1 = fp.LogPenalty(lam, 0.5).prox(x, gamma)
+        np.testing.assert_array_equal(fp.LogPenalty(lam / tg, 0.5).prox(x, gamma * tg), z1)
+    # The audit's case, and its l0 threshold sqrt(2) against the objective:
+    # F(0) = 2 > F(2) = 1 (gamma lambda = 1).
+    np.testing.assert_array_equal(fp.L0(1e-308).prox(np.array([2.0, 1.4, -1.5]), 1e308), [2.0, 0.0, -1.5])
+
+
+def test_l0_threshold_below_the_normal_range():
+    """sqrt(2 gamma lambda w) = 1.4e-160 has gamma lambda w = 1e-320,
+    subnormal: the threshold is taken from the mantissas, not from that
+    rounded product."""
+    t = np.sqrt(2.0) * 1e-160
+    x = np.array([1.0001 * t, 0.9999 * t])
+    np.testing.assert_array_equal(fp.L0(1e-160).prox(x, 1e-160), [x[0], 0.0])

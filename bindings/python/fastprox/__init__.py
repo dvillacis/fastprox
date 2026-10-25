@@ -1176,7 +1176,9 @@ class TV1DL2(Operator):
     r"""$g(z) = \lVert W D z \rVert_2 = \sqrt{\sum_i w_i^2 (z_{i+1} - z_i)^2}$ along
     the axis:
     1D TV with the l2 norm of the differences (Newton on the dual trust-region
-    problem, to rounding). Weights as in TV1D. Parameters: weights."""
+    problem, to rounding). Weights as in TV1D; a positive weight below
+    2^-511 times the largest raises ValueError (since 1.0.1). Parameters:
+    weights."""
 
     def __init__(self, weights=None):
         w = _vec(weights)

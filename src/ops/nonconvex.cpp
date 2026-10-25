@@ -38,6 +38,11 @@
 // with gamma = 1 this is Fan and Li's rule. MCP (b > gamma): z = 0 for
 // x <= lam, b (x - lam) / (b - gamma) up to b lambda, x beyond. In both the
 // objective is convex when the condition holds, so the map is continuous.
+// The middle pieces are evaluated as bounded ratios, SCAD's as
+// x + gamma (x / D - lambda a / D) with D = a - 1 - gamma and
+// a / D = 1 / (1 - (1 + gamma) / a), MCP's as (x - lam) / (1 - gamma / b):
+// the products with a or b overflowed at a = b = 1e308, where both answers
+// round to 2 at x = 3, gamma = lambda = 1 (math audit M6).
 //
 // log. The nonzero candidate solves z - x + lam / (eps + z) = 0,
 //   r = (x - eps + sqrt((x + eps)^2 - 4 lam)) / 2,
@@ -54,6 +59,7 @@
 #include "ops/ops.hpp"
 
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -67,6 +73,38 @@ fp_status emit(fp_op **out, A &&...a) {
 }
 
 inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
+
+// (a b) c for a, b, c >= 0 finite, rounded as written where a b is normal,
+// and otherwise from the mantissas, so that a b cannot overflow or underflow
+// when the product is in range: gamma = 1e308 with lambda w = 1e-308 made
+// the l0 threshold inf, and zeroed an entry whose minimiser is itself (math
+// audit M3). Scaling by powers of 2 commutes with rounding, so the two paths
+// agree wherever both are in range.
+inline double prod3(double a, double b, double c) noexcept {
+    const double ab = a * b;
+    if (ab <= std::numeric_limits<double>::max() && (ab >= std::numeric_limits<double>::min() || (ab == 0.0 && (a == 0.0 || b == 0.0))))
+        return ab * c;
+    int ea, eb, ec;
+    const double ma = std::frexp(a, &ea), mb = std::frexp(b, &eb), mc = std::frexp(c, &ec);
+    return std::ldexp(ma * mb * mc, ea + eb + ec);
+}
+
+// sqrt(2 a b c) without the underflow of a b c where the root is normal: an
+// l0 threshold sqrt(2 gamma lambda w) of 1e-160 has gamma lambda w = 1e-320.
+inline double sqrt2prod3(double a, double b, double c) noexcept {
+    const double p = prod3(a, b, c);
+    if (p >= std::numeric_limits<double>::min() || (p == 0.0 && (a == 0.0 || b == 0.0 || c == 0.0)))
+        return std::sqrt(2.0 * p);
+    int ea, eb, ec;
+    const double ma = std::frexp(a, &ea), mb = std::frexp(b, &eb), mc = std::frexp(c, &ec);
+    int e = ea + eb + ec;  // 2 a b c = (2 m) 2^e, m = ma mb mc in [1/8, 1)
+    double m = 2.0 * ma * mb * mc;
+    if (e & 1) {
+        m *= 2.0;
+        --e;
+    }
+    return std::ldexp(std::sqrt(m), e / 2);
+}
 
 // of 0; 0 if none.
 inline int nearest_kink(double x, const double *t, int m, double tol, Kink &k) noexcept {
@@ -102,7 +140,7 @@ struct L0 final : ElemOp<L0> {
         return (w.size() == 1 || static_cast<int64_t>(w.size()) == n) ? FP_OK : FP_ESHAPE;
     }
     int64_t wi(int64_t i) const noexcept { return w.size() == 1 ? 0 : i; }
-    double thr(double gamma, int64_t i) const noexcept { return std::sqrt(2.0 * gamma * lambda * w[wi(i)]); }
+    double thr(double gamma, int64_t i) const noexcept { return sqrt2prod3(gamma, lambda, w[wi(i)]); }
 
     double value1(double x, int64_t i, double) const noexcept { return x != 0.0 ? lambda * w[wi(i)] : 0.0; }
 
@@ -281,12 +319,12 @@ struct Lq final : ElemOp<Lq> {
             return x;
         }
         bool on;
-        const double m = mag(std::fabs(xd), gamma * lambda * w[wi(i)], tie, tied, on);
+        const double m = mag(std::fabs(xd), prod3(gamma, lambda, w[wi(i)]), tie, tied, on);
         return static_cast<T>(std::copysign(m, xd));
     }
     ElemDeriv deriv1(double x, double gamma, int64_t i, int tie) const noexcept {
         ElemDeriv e;
-        const double lw = lambda * w[wi(i)], lam = gamma * lw;
+        const double lam = prod3(gamma, lambda, w[wi(i)]);
         bool tied, on;
         const double m = mag(std::fabs(x), lam, tie, tied, on);
         if (lam == 0.0 && m == 0.0) {  // the identity
@@ -299,20 +337,20 @@ struct Lq final : ElemOp<Lq> {
     // The derivative on the nonzero branch at |z| = m, sign s.
     ElemDeriv branch_deriv(double m, double s, double gamma, int64_t i) const noexcept {
         ElemDeriv e;
-        const double lw = lambda * w[wi(i)], lam = gamma * lw, mq = pw(m);
+        const double lam = prod3(gamma, lambda, w[wi(i)]), mq = pw(m);
         const double den = 1.0 + lam * q * (q - 1.0) * mq / m;
         e.j = 1.0 / den;
-        e.dg = -lw * q * mq * s / den;
+        e.dg = -prod3(lambda, w[wi(i)], q * mq) * s / den;
         e.np = 1;
         e.pi[0] = wi(i);
-        e.pv[0] = -gamma * lambda * q * mq * s / den;
+        e.pv[0] = -prod3(gamma, lambda, q * mq) * s / den;
         return e;
     }
     // Pieces: 0 zero, 1 the nonzero branch, taken at max(|x|, tau) (at tau
     // its root is beta); the kink (since 0.3) is the tie |x| = tau.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double gamma, int64_t i) const noexcept {
-        const double lam = gamma * lambda * w[wi(i)];
+        const double lam = prod3(gamma, lambda, w[wi(i)]);
         if (lam == 0.0) return {1, sgn(x)};
         double beta, tau;
         thresholds(lam, beta, tau);
@@ -320,7 +358,7 @@ struct Lq final : ElemOp<Lq> {
     }
     ElemDeriv deriv_piece(double x, double gamma, int64_t i, Piece pc) const noexcept {
         ElemDeriv e;
-        const double lam = gamma * lambda * w[wi(i)];
+        const double lam = prod3(gamma, lambda, w[wi(i)]);
         if (pc.id == 0) return e;
         if (lam == 0.0) {
             e.j = 1.0;
@@ -332,7 +370,7 @@ struct Lq final : ElemOp<Lq> {
         return branch_deriv(a > tau ? root(a, lam, beta, tau) : beta, pc.s, gamma, i);
     }
     int kink1(double x, double gamma, int64_t i, double tol, Kink &k) const noexcept {
-        const double lam = gamma * lambda * w[wi(i)];
+        const double lam = prod3(gamma, lambda, w[wi(i)]);
         if (!(lam > 0.0)) return 0;
         double beta, tau;
         thresholds(lam, beta, tau);
@@ -422,16 +460,23 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
         double m;
         if constexpr (Weighted) {
             const double m1 = std::fmax(ax - c * lambda, 0.0);
-            const double m2 = ((a - 1.0) * ax - c * a * lambda) / (a - 1.0 - c);
+            const double m2 = linear(ax, c, a);
             m = ax <= a * lambda ? m2 : ax;
             m = ax <= (1.0 + c) * lambda ? m1 : m;
         } else {
             if (ax <= (1.0 + c) * lambda) m = std::fmax(ax - c * lambda, 0.0);
-            else if (ax <= a * lambda) m = ((a - 1.0) * ax - c * a * lambda) / (a - 1.0 - c);
+            else if (ax <= a * lambda) m = linear(ax, c, a);
             else m = ax;
         }
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly
         return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
+    }
+    // The linear piece ((a - 1) x - c a lambda) / (a - 1 - c) as x + c (x / D
+    // - lambda r), D = a - 1 - c, r = a / D, so that no product with a
+    // overflows (M6); bitwise it can differ from the quotient by an ulp.
+    static double ratio(double c, double a) noexcept { return 1.0 / (1.0 - (1.0 + c) / a); }
+    double linear(double ax, double c, double a) const noexcept {
+        return ax + c * (ax / (a - 1.0 - c) - lambda * ratio(c, a));
     }
     // Pieces (in |x|, with the sign s): 0 thresholded, 1 soft, 2 linear, 3
     // identity. Kinks: 1 at |x| = c lambda, 2 at (1 + c) lambda, 3 at a lambda.
@@ -457,12 +502,15 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
             dzdc = -s * lambda;
             e.pv[0] = -s * c;
         } else if (pc.id == 2) {
-            const double D = a - 1.0 - c;
-            const double z = s * ((a - 1.0) * ax - c * a * lambda) / D;
-            e.j = (a - 1.0) / D;
-            dzdc = (z - s * a * lambda) / D;
-            e.pv[0] = -s * c * a / D;
-            e.pv[1] = (s * (ax - c * lambda) - z) / D;
+            // With D = a - 1 - c and r = a / D: z = s (x + c (x / D - lambda r)),
+            // j = (a - 1) / D, dz/dc = z / D - s lambda r, dz/dlambda = -s c r,
+            // dz/da = -s (c / D) (x - (1 + c) lambda) / D (M6).
+            const double D = a - 1.0 - c, r = ratio(c, a);
+            const double z = s * linear(ax, c, a);
+            e.j = 1.0 / (1.0 - c / (a - 1.0));
+            dzdc = z / D - s * lambda * r;
+            e.pv[0] = -s * c * r;
+            e.pv[1] = -s * (c / D) * ((ax - (1.0 + c) * lambda) / D);
         } else {
             e.j = 1.0;
         }
@@ -506,12 +554,13 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
         const double xd = static_cast<double>(x), ax = std::fabs(xd), c = step(gamma, i), b = p;
         double m;  // as in Scad::prox1
         if constexpr (Weighted) {
-            const double m2 = b * (ax - c * lambda) / (b - c);
+            const double m2 = (ax - c * lambda) / (1.0 - c / b);
             m = ax <= b * lambda ? m2 : ax;
             m = ax <= c * lambda ? 0.0 : m;
         } else {
+            // b (x - c lambda) / (b - c), without the product b x (M6).
             if (ax <= c * lambda) m = 0.0;
-            else if (ax <= b * lambda) m = b * (ax - c * lambda) / (b - c);
+            else if (ax <= b * lambda) m = (ax - c * lambda) / (1.0 - c / b);
             else m = ax;
         }
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly (b x / b is not)
@@ -538,12 +587,15 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
         if (pc.id == 0) {
             // thresholded
         } else if (pc.id == 1) {
-            const double D = b - c;
-            const double z = s * b * (ax - c * lambda) / D;
-            e.j = b / D;
-            dzdc = (z - s * b * lambda) / D;
-            e.pv[0] = -s * c * b / D;
-            e.pv[1] = -s * c * (ax - c * lambda) / (D * D);
+            // With D = b - c: z = s (x - c lambda) j, j = b / D = 1 / (1 - c / b),
+            // dz/dc = z / D - s lambda j, dz/dlambda = -s c j, dz/db = -s (c / D)
+            // (x - c lambda) / D: no product with b (M6).
+            const double D = b - c, u = ax - c * lambda;
+            e.j = 1.0 / (1.0 - c / b);
+            const double z = s * u * e.j;
+            dzdc = z / D - s * lambda * e.j;
+            e.pv[0] = -s * c * e.j;
+            e.pv[1] = -s * (c / D) * (u / D);
         } else {
             e.j = 1.0;
         }

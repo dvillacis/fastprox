@@ -137,23 +137,28 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 - **Where.** `L0::thr` evaluates √(2γλw) as `sqrt(2.0 * gamma * lambda * w)`.
 - **The counterexample.** `L0(1e-308).prox([2.0], 1e308)` overflows `2γ`. The threshold becomes inf, so the call returns 0 where 2 is the global minimiser (γλ ≈ 1, F(0) = 2 > F(2) ≈ 1), and reports gap 0.
 
-**Design.**
-1. **The ℓ0 threshold.** thr = √2·√γ·√λ·√w. Each factor is finite and nonzero whenever γ, λ and w are, so thr overflows only when the threshold itself is beyond the range. The value, the tie flag and the derivative all read `thr`, so they stay consistent.
-2. **Every scalar threshold and constant.** The same rule applies to every place where a scalar map forms c = γλw or a power of it: ℓq's `thresholds` (β = (2c(1 − q))^{1/(2−q)}, τ), the log penalty's breakpoint, and the derivative terms.
-   - Products are grouped so that no intermediate overflows or underflows when the quantity itself is representable.
-   - Powers go through logarithms only where the direct product is out of range: β = exp((log 2 + log c + log(1 − q))/(2 − q)), with log c = log γ + log λ + log w. Ordinary scales keep the direct formula and its accuracy.
+**Design** (as built; the first draft's √2·√γ·√λ·√w would have moved every threshold by an ulp).
+1. **One product, rounded as written.** c = γλw is formed by `prod3` as (γλ)w where γλ is normal, and otherwise from the factors' mantissas and exponents.
+   - Scaling by powers of 2 commutes with rounding, so the two paths give the same bits wherever both are in range. Ordinary results, thresholds and tie flags are unchanged bit for bit.
+   - The step range already bounds c by 2⁹⁶⁰, so c itself never overflows. Only the first product could.
+2. **The ℓ0 threshold.** It is √(2c), taken from the mantissas where c is subnormal: a threshold of 1.4e-160 has c = 1e-320. The value, the tie flag and the derivative all read it, so they stay consistent.
+3. **ℓq** forms c and its derivative terms with `prod3`; β and τ are unchanged functions of c.
+4. **The log penalty** forms only γλ, a single product, and it already ran far from unit scale on scaled quantities (audit K3).
+5. **Remaining limit.** A c below the smallest normal number is used at its subnormal value for ℓq (β and the root lose relative accuracy there), and γλ below it for the log penalty. Both are problems whose scaled parameter cannot be represented, not intermediates.
 
 **Constraints.**
-- **Results at ordinary scales may change by an ulp.** That is within the tests' tolerances; the existing bit-identity tests compare thread counts, not releases.
+- **Results:** bit-identical wherever γλ is normal.
 - **Determinism:** unchanged.
 
-**Tests.**
+**Tests** (`tests/python/test_nonconvex.py`).
 - **The audit's reproducer.**
-- **Reciprocal scaling:** prox(x; γ, λ) = prox(x; γ·2^k, λ·2^−k) for k ∈ {±200, ±600, ±1000}, for L0, Lq (q ∈ {0.3, 0.5, 0.8}), LogPenalty, SCAD and MCP (with M6).
-  - Both sides are checked against the scalar objective minimised in mpmath, not only against each other.
-  - The tie flags must agree too.
+- **Reciprocal scaling:** prox(x; γ·2^k, λ·2^j, w·2^−(k+j)) equals prox(x; γ, λ, w) bit for bit, ties and derivatives included.
+  - The cases are (k, j) ∈ {(1010, 20), (600, −300), (−1000, −23), (−600, 300)}, for L0, and Lq at q ∈ {0.3, 0.5, 2/3, 0.8}. With k + j = 1030 or −1023, γλ overflows or becomes subnormal.
+  - The weights have short mantissas, so that w·2^−(k+j) is exact.
+  - The unit-scale results are checked against the global minimum by the existing grid tests, so the equality carries that check over.
+- **A threshold below the normal range:** L0 at c = 1e-320.
 
-**Acceptance.** Every scaling above returns the global minimiser within the existing nonconvex tolerance.
+**Acceptance.** Every scaling returns the unit-scale result exactly. 10 of the new cases failed before the change.
 
 <a id="m4"></a>
 ### M4. Log barrier leaves its domain
@@ -178,7 +183,7 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 - The audit's reproducer.
 - z > 0 for every finite input with γλ > 0, on a grid of x ∈ ±10^{±300} and γλ ∈ 10^{±300}, in both dtypes.
 - Agreement with a 700-digit mpmath root to 4 ulps where z is normal.
-- Derivatives against mpmath at the same points.
+- As built, the reference is 60-digit `decimal` arithmetic (standard library, so no new test dependency), on a grid of x ∈ ±10^{±300} and γλ ∈ [10⁻³⁰⁰, 10²⁸⁰] (the step range). The derivative z/r reads the same quantities and is covered by the existing finite-difference cases.
 
 **Acceptance.** No finite call with γλ > 0 returns z ≤ 0.
 
@@ -198,6 +203,7 @@ calls that newly fail are those that returned a wrong result (M2, M5).
    - Zero weights stay allowed: they are free edges.
    - The documented range, weights over 150 orders of magnitude, lies inside this limit (2⁵¹¹ ≈ 10¹⁵³·⁸).
 3. **Docs.** `docs/api.md` states the ratio limit and removes "underflowed squares count as zero".
+4. **The JVP's solve** (found while testing). Scaling dγ by 2ᵏ made the Sherman–Morrison solve overflow, at weights near 2⁹⁰⁰, where dz is in range. The solve is linear, so it runs on its right-hand side over a power of two, and the result is scaled back exactly.
 
 **Constraints.**
 - **ABI:** unchanged; `FP_EPARAM` is already a constructor status.
@@ -206,8 +212,8 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 
 **Tests.**
 - The audit's reproducer.
-- prox(x; γ, w) = prox(x; γ/c, c·w) for c = 2^{±k}, k up to 1000, against the CVXPY reference at the unit scale.
-- The parameter VJP in w scales as 1/c, checked against finite differences at three scales.
+- prox(x; γ, w) = prox(x; γ/c, c·w) bit for bit, for c = 2^{±k} with k up to 1000, wherever the scaled problem is representable. The unit scale is checked against CVXPY by the existing fixtures.
+- The derivatives match the unit-scale ones: in x unchanged, in γ by c and in w by 1/c, for JVP and VJP. This is checked on weights within one order of each other at a common scale up to 10^{±150}. Over 100 orders the derivatives reach 1e80, and finite differences cannot check them.
 - A ratio below the limit raises; weights over 150 orders still pass the existing test.
 
 **Acceptance.** No accepted weight vector solves a different problem from the stated one.
@@ -236,8 +242,8 @@ calls that newly fail are those that returned a wrong result (M2, M5).
 
 **Tests.**
 - **The audit's four reproducers.**
-- **Wen et al.'s formulas:** agreement in mpmath on a grid of x, γ, λ, and a, b ∈ {2 + γ, 10, 1e10, 1e300}.
-- **Finite differences** of every derivative at those parameters, with a relative step.
+- **Wen et al.'s formulas:** agreement with the formulas in exact rational arithmetic (`fractions`), on three (γ, λ, x) in the middle piece and a, b ∈ {3.5, 10, 1e10, 1e300, 1e308}, for the value to 4e-16.
+- **Every derivative** (x, γ, λ and a or b) against the same exact formulas, to 1e-14, and the group forms on a one-entry group.
 - **The M3 scaling test** for both penalties and their group forms.
 
 **Acceptance.** Every finite accepted call returns a finite result within 4 ulps of the mpmath value.

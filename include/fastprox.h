@@ -237,7 +237,9 @@ FP_API fp_status fp_op_tv1d_ball(double alpha, const fp_array *edge_weights, fp_
  * (since 0.2): 1D TV with the l2 norm of the differences. The dual is a
  * trust-region problem, solved by Newton's method on its secular equation with
  * one tridiagonal solve per step, to rounding (fp_info.gap is 0).
- * edge_weights as fp_op_tv1d, with w_i^2 finite. theta = w. */
+ * edge_weights as fp_op_tv1d; a positive weight below 2^-511 times the
+ * largest is FP_EPARAM (since 1.0.1; before, w_i^2 had to be finite).
+ * theta = w. */
 FP_API fp_status fp_op_tv1d_l2(const fp_array *edge_weights, fp_op **out);
 
 /* Nonconvex pointwise maps (elementwise). The prox can be set-valued at a

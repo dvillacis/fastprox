@@ -92,7 +92,11 @@ Notes:
 - **Log barrier** needs $\lambda > 0$. The prox
   $\bigl(x + \sqrt{x^2 + 4\gamma\lambda}\bigr)/2$ is evaluated without
   cancellation for $x < 0$ and without overflow for huge $\lvert x \rvert$ or
-  $\gamma\lambda$.
+  $\gamma\lambda$, through the scale $\sqrt\gamma\sqrt\lambda$ where
+  $\gamma\lambda$ underflows. It stays in the domain: an answer below the
+  dtype's smallest positive value returns that value, not 0 (*since 1.0.1*,
+  math audit M4: $x = -10^{308}$ at $\gamma\lambda = 10^{280}$ returned 0 for
+  $10^{-28}$).
 - **ℓ1 over a box** is
   $\operatorname{clip}(\operatorname{soft}(x, \gamma\lambda w), \mathrm{lo}, \mathrm{hi})$,
   for any interval (Beck, Example 6.23, states the box $[-\alpha, \alpha]$);
@@ -121,7 +125,7 @@ Notes:
 - **1D TV with ℓ2 of differences.** The dual is a trust-region problem in the
   differences. When its unconstrained minimiser, a cumulative sum of $x$, lies
   in the ball of radius $\gamma$, $z$ is the mean of each piece between zero
-  weights (a weight whose square underflows counts as zero). Otherwise $z$
+  weights. Otherwise $z$
   solves the tridiagonal system $(\mu I + D^\top W^2 D) z = \mu x$, with $\mu$
   the root of Moré and Sorensen's secular equation, found by Newton's method
   from $\mu = 0$ (Nocedal and Wright, Algorithm 4.4). It converges monotonically, in 2–8 steps of one
@@ -129,6 +133,11 @@ Notes:
   The steps solve for the differences $Dz$ rather than $z$, so the result stays
   exact to rounding when weights and entries span many orders of magnitude
   (tested with weights over 150 orders and rows rescaled by $2^{\pm 600}$).
+  The weights are stored over the power of two of the largest, with the step
+  scaled by it, so only their ratios limit the range (*since 1.0.1*, math
+  audit M5: a weight of $10^{-180}$ squared to 0 and dropped its edge at
+  $\gamma = 10^{180}$). A positive weight below $2^{-511}$ times the largest,
+  whose square would not be a normal number even then, is `FP_EPARAM`.
   For $n = 2$ it is 1D TV. Derivatives are in closed form: the Hessian of the
   prox problem is that tridiagonal matrix minus a rank-one term (Sherman–
   Morrison), so a JVP or VJP costs three $O(n)$ solves.
@@ -170,7 +179,12 @@ Notes:
 ℓ0, ℓq, SCAD, MCP and the log penalty act entry by entry, like soft
 thresholding. Their prox is a global minimiser of the nonconvex scalar
 problem $\tfrac12 (z - x)^2 + \gamma\psi(z)$:
-- **ℓ0** is hard thresholding at $\sqrt{2\gamma\lambda w_i}$.
+- **ℓ0** is hard thresholding at $\sqrt{2\gamma\lambda w_i}$. The products
+  $\gamma\lambda w_i$ of ℓ0 and ℓq are rounded as written, but from the
+  factors' mantissas where $\gamma\lambda$ would overflow or underflow, so
+  that only the scaled penalty itself limits the range (*since 1.0.1*, math
+  audit M3: $\gamma = 10^{308}$ with $\lambda = 10^{-308}$ made the threshold
+  infinite).
 - **ℓq.** Zero below the threshold
   $\tau = \beta + \gamma\lambda w_i q \beta^{q-1}$, with
   $\beta = \bigl(2\gamma\lambda w_i (1 - q)\bigr)^{1/(2-q)}$ the size of the
@@ -182,7 +196,10 @@ problem $\tfrac12 (z - x)^2 + \gamma\psi(z)$:
   below that the prox is not single-valued and the call returns `FP_EPARAM`
   (with `fp_prox_conj` the condition applies to its step $1/\sigma$). Both are
   continuous and piecewise linear; with $\gamma = 1$ and unit weights they are
-  Fan and Li's and Zhang's thresholding rules. With weights, entry $i$ is the
+  Fan and Li's and Zhang's thresholding rules. Their middle pieces and
+  derivatives are evaluated as bounded ratios, so that no product with $a$ or
+  $b$ overflows (*since 1.0.1*, math audit M6: $a = b = 10^{308}$ returned
+  $\infty$ where the answer is 2). With weights, entry $i$ is the
   unweighted map at the step $\gamma w_i$ (for MCP,
   $w \rho_{\lambda,b} = \rho_{w\lambda,b/w}$), and a zero weight leaves the
   entry unchanged. The weights are optional: without them $\theta$ is

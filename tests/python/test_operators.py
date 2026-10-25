@@ -607,6 +607,41 @@ def test_isotonic_weighted_conj():
                                   fp.Isotonic().prox_conj(y3))
 
 
+def _log_barrier_ref(x, gl):
+    """(x + sqrt(x^2 + 4 gl)) / 2 in 60-digit decimal arithmetic, whose
+    exponent range covers every double, with the stable form for x < 0."""
+    import decimal
+    ctx = decimal.Context(prec=60, Emax=10**6, Emin=-10**6)
+    X, G = ctx.create_decimal_from_float(float(x)), ctx.create_decimal(gl)
+    r = ctx.sqrt(X * X + 4 * G)
+    return float(ctx.divide(2 * G, r - X)) if X < 0 else float((X + r) / 2)
+
+
+def test_log_barrier_extreme_scales():
+    """r - x overflowed before the halving: x = -1e308 with gamma lambda =
+    1e280 returned 0, outside the domain, where the answer is 1e-28 (math
+    audit M4). gamma lambda itself underflowed at 1e-200 each. Against a
+    60-digit reference over 600 orders of x and gamma lambda; the result
+    stays positive, and below the dtype's range is its smallest value."""
+    import decimal
+    np.testing.assert_allclose(fp.LogBarrier(1e280).prox(np.array([-1e308]), 1.0), [1e-28], rtol=1e-15)
+    for e_x in range(-300, 301, 50):
+        for e_g in range(-300, 281, 50):  # gamma lambda <= 2^960 (the step range)
+            gamma, lam = 10.0 ** (e_g / 2), 10.0 ** (e_g / 2)
+            gl = decimal.Decimal(gamma) * decimal.Decimal(lam)
+            for x in (-(10.0**e_x), 10.0**e_x, -3.0 * 10.0**e_x):
+                z = fp.LogBarrier(lam).prox(np.array([x]), gamma)[0]
+                ref_ = _log_barrier_ref(x, gl)
+                assert z > 0.0
+                if ref_ >= 2.3e-308:
+                    assert z == pytest.approx(ref_, rel=1e-15), (x, gamma, lam)
+                else:
+                    assert z <= max(2.0 * ref_, 5e-324)
+    # float32: below its range, its smallest positive value.
+    z = fp.LogBarrier(1e-30).prox(np.array([-1e30], np.float32), 1e-30)
+    assert z[0] == np.finfo(np.float32).smallest_subnormal
+
+
 def test_version_matches_metadata():
     from importlib.metadata import version
     assert fp.__version__ == version("fastprox")
