@@ -183,6 +183,11 @@ struct fp_op {
     // and fp_prox_conj evaluates y - sigma prox_{g/sigma}(y/sigma) as
     // y - prox_g(y), the same for every sigma > 0 (audit A1).
     virtual bool conj_homogeneous() const noexcept { return false; }
+    // False when fp_prox_conj has no Euclidean meaning for this operator:
+    // a prox in another metric, whose Moreau identity holds in that metric
+    // only (weighted isotonic regression, math audit M2). fp_prox_conj then
+    // returns FP_EINVAL.
+    virtual bool conj_supported() const noexcept { return true; }
     // An upper bound on the factors the kernel multiplies its step by (lambda,
     // a weight, 1/delta, ...); 0 when it ignores the step (projections). The
     // step range of every call is gamma step_scale() <= kMaxScaledStep (audit A1).

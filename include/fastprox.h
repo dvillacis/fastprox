@@ -205,7 +205,11 @@ FP_API fp_status fp_op_soc(fp_op **out);
 /* Projection onto the monotone cone (isotonic regression by PAVA), minimising
  * sum_i w_i (z_i - x_i)^2. weights: NULL or the axis length, all > 0, with
  * min/max >= 1e-100 (since 1.0).
- * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL). */
+ * increasing: nonzero for z_1 <= ... <= z_n. theta = w (empty if NULL).
+ * With unequal weights the fit is the projection in the metric W, not the
+ * Euclidean one, and fp_prox_conj returns FP_EINVAL (since 1.0.1): its
+ * y - P(y) is not the prox of the Euclidean conjugate, though W (y - P(y))
+ * lies in the polar cone. Equal weights keep the conjugate. */
 FP_API fp_status fp_op_isotonic(const fp_array *weights, int increasing, fp_op **out);
 
 /* The sorted l1 norm (OWL, SLOPE; since 1.0): g(z) = sum_k w_k |z|_(k) along
@@ -533,7 +537,8 @@ FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_
  * and y_i / sigma must be finite in the array's dtype, else FP_EPARAM. That
  * is checked for every sigma < 1 in float32, and in float64 for sigma < 2^-64;
  * above that, only entries beyond about 1e289 can overflow, and their outputs
- * are then +-inf or NaN. */
+ * are then +-inf or NaN. FP_EINVAL for weighted isotonic regression
+ * (fp_op_isotonic, since 1.0.1). */
 FP_API fp_status fp_prox_conj(const fp_op *op, double sigma, const fp_array *y,
                               fp_array *out, const fp_options *opt,
                               fp_workspace *ws, fp_info *info);

@@ -578,6 +578,10 @@ class Operator:
         (Moreau)."""
         return self._run(y, sigma, axis, out, threads, keep, ctx, copy, conj=True)
 
+    def _check_conj(self):
+        """Raises when the operator has no Euclidean conjugate (the framework
+        wrappers call it before tracing)."""
+
     def _run(self, x, step, axis, out, threads, keep, ctx, copy, conj):
         axis, threads = _axis_threads(axis, threads)
         x = _input(x, copy)
@@ -1097,12 +1101,27 @@ class HalfSpace(Hyperplane):
 class Isotonic(Operator):
     r"""Projection onto the monotone cone along the axis (pool-adjacent-
     violators), minimising $\sum_i w_i (z_i - x_i)^2$. Parameters: weights,
-    all > 0 with min/max >= 1e-100 (since 1.0)."""
+    all > 0 with min/max >= 1e-100 (since 1.0).
+
+    With unequal weights the fit is the projection in the metric $W$, and
+    :meth:`prox_conj` raises ``ValueError`` (since 1.0.1): $y - P(y)$ is not
+    the prox of the Euclidean conjugate, though $W(y - P(y))$ lies in the
+    polar cone. Equal weights keep the conjugate."""
 
     def __init__(self, weights=None, increasing=True):
         w = _vec(weights)
         super().__init__(_C.isotonic(w, bool(increasing)))
         self._layout = [] if w is None else [("weights", w.size, False)]
+        self._metric = w is not None and bool(np.any(w != w.flat[0]))
+
+    def prox_conj(self, y, sigma=1.0, **kwargs):
+        self._check_conj()
+        return super().prox_conj(y, sigma, **kwargs)
+
+    def _check_conj(self):
+        if self._metric:
+            raise ValueError("Isotonic with unequal weights projects in the weighted metric and "
+                             "has no Euclidean conjugate; W (y - prox(y)) is its polar-cone part")
 
 
 class SortedL1(Operator):

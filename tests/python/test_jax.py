@@ -123,6 +123,14 @@ def test_float32_and_constants():
     assert gx.dtype == jnp.float32
 
 
+def test_weighted_isotonic_has_no_conj():
+    # Math audit M2: the weighted fit projects in the metric W.
+    w = np.array([1.0, 3.0, 2.0])
+    y = jnp.array([2.0, 0.0, 1.0], dtype=jnp.float64)
+    with pytest.raises(ValueError, match="no Euclidean conjugate"):
+        fpj.prox_conj(fp.Isotonic(w), y)
+
+
 def test_errors():
     x = jnp.zeros(10)
     with pytest.raises(TypeError):

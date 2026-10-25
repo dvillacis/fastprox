@@ -133,7 +133,14 @@ Notes:
   prox problem is that tridiagonal matrix minus a rank-one term (Sherman–
   Morrison), so a JVP or VJP costs three $O(n)$ solves.
 - **Isotonic regression** minimises $\sum_i w_i (z_i - x_i)^2$, which is the
-  Euclidean projection only for unit weights.
+  Euclidean projection only for unit (or equal) weights. With unequal
+  weights it is the projection $P_C^W$ in the metric $W$, and
+  `fp_prox_conj` returns `FP_EINVAL` (Python: `ValueError`; *since 1.0.1*,
+  math audit M2). Moreau's decomposition holds in the metric of the
+  projection: $W(y - P_C^W(y))$ lies in the polar cone, while
+  $y - P_C^W(y)$ need not. For weights $(1, 3)$ at $y = (2, 0)$ it is
+  $(1.5, -0.5)$, whose entries do not sum to 0, while the Euclidean
+  conjugate's prox is $(1, -1)$.
 - **The sorted ℓ1 norm** (*since 1.0*) sorts $\lvert x \rvert$ in decreasing
   order (ties by index), subtracts $\gamma w$, fits a nonincreasing sequence
   by pool-adjacent-violators, clips at 0 and puts the signs and the order
@@ -1124,7 +1131,7 @@ $\sigma = 0$ returns $y$. With `keep_structure`, the derivatives there are those
 
 Since 1.0 the computation depends on the operator (audit A1).
 
-- **Positively homogeneous $g$ and cone indicators.** This covers soft thresholding, ℓ2 and group ℓ2, the tree-structured norms, ℓ∞, the maximum, the sums of the largest entries, every TV operator, the nonnegative orthant, the second-order cone and isotonic regression. There $g^\ast$ is the indicator of a set $C$, and the result, $y - \operatorname{prox}_g(y)$, is the projection onto $C$. It is the same for every $\sigma > 0$, computed without scaling, so it is exact even at $\sigma = 10^{-320}$. Its derivative in $\sigma$ is 0. After the call, an image operator's dual is that of $\operatorname{prox}_g(y)$ at unit step, and $\sum_a q_a$ is the output; this is the same dual for every $\sigma$.
+- **Positively homogeneous $g$ and cone indicators.** This covers soft thresholding, ℓ2 and group ℓ2, the tree-structured norms, ℓ∞, the maximum, the sums of the largest entries, every TV operator, the nonnegative orthant, the second-order cone and isotonic regression with unit or equal weights (with unequal weights there is no Euclidean conjugate, and the call returns `FP_EINVAL`; *since 1.0.1*). There $g^\ast$ is the indicator of a set $C$, and the result, $y - \operatorname{prox}_g(y)$, is the projection onto $C$. It is the same for every $\sigma > 0$, computed without scaling, so it is exact even at $\sigma = 10^{-320}$. Its derivative in $\sigma$ is 0. After the call, an image operator's dual is that of $\operatorname{prox}_g(y)$ at unit step, and $\sum_a q_a$ is the output; this is the same dual for every $\sigma$.
 - **The other operators** evaluate the formula as written. $1/\sigma$ must lie in `fp_prox`'s step range, and every $y_i/\sigma$ must be finite in the array's dtype; otherwise the call returns `FP_EPARAM`. The quotients are checked for every $\sigma < 1$ in float32, and in float64 for $\sigma < 2^{-64}$. Above that, a float64 quotient can overflow only for $\lvert y_i \rvert$ beyond about $10^{289}$, and its output is then $\pm\infty$ or NaN. A check for every $\sigma < 1$ cost 15–30% on the cheapest conjugates. At large $\sigma$ the result itself can leave the range: it is about $-\sigma$ times a parameter, near $-\sigma r / n$ for the simplex of radius $r$, and $\pm\infty$ once that exceeds the largest finite value (for example $r = 10^{45}$ at $\sigma = 10^{273}$). There is no step range in $\sigma$, so the call succeeds.
 
 ### Errors

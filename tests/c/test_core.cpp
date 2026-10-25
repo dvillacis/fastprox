@@ -320,6 +320,7 @@ struct OpCase {
     double gamma;
     bool smooth_away_from_kinks = true;
     int64_t zero_entry = -1;  // set this entry of every row to exactly 0
+    bool has_conj = true;  // false: fp_prox_conj returns FP_EINVAL (math audit M2)
 };
 
 static std::vector<OpCase> derivative_cases(int64_t n) {
@@ -417,7 +418,7 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"tv1d_l2", [](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, 0.6},
         {"tv1d_l2_w", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
-        {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0},
+        {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0, true, -1, false},
         {"sorted_l1", [=](fp_op **o) { return fp_op_sorted_l1(wdec, o); }, 0.4},
         {"tv1d", [](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, 0.6},
         {"tv1d_w", [=](fp_op **o) { return fp_op_tv1d(wm, FP_TV1D_AUTO, o); }, 0.6},
@@ -455,6 +456,12 @@ static void check_derivatives(const OpCase &c, bool conj) {
     fp_workspace *ws;
     CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
     auto run = conj ? fp_prox_conj : fp_prox;
+    if (conj && !c.has_conj) {
+        CHECK(run(op, c.gamma, &x.a, &z.a, &o, ws, nullptr) == FP_EINVAL);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        return;
+    }
     CHECK_OK(run(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
 
     Arr dx({rows, n}, randn(rows * n)), dz({rows, n}), g({rows, n}, randn(rows * n)),
@@ -493,6 +500,40 @@ static void check_derivatives(const OpCase &c, bool conj) {
     if (!fd_ok) std::fprintf(stderr, "  fd %s conj=%d: err %.3g\n", c.name.c_str(), conj, err);
     fp_workspace_free(ws);
     fp_op_free(op);
+}
+
+// Weighted isotonic regression projects in the metric W, so it has no
+// Euclidean conjugate (math audit M2): weights (1, 3) at y = (2, 0) gave
+// y - P^W(y) = (1.5, -0.5), outside the polar cone {(a, -a) : a >= 0}.
+// Equal weights are the Euclidean projection and keep it.
+static void test_isotonic_conj() {
+    Arr w({2}, {1.0, 3.0}), we({3}, {2.0, 2.0, 2.0});
+    fp_op *wiso, *eiso, *iso;
+    CHECK_OK(fp_op_isotonic(&w.a, 1, &wiso));
+    CHECK_OK(fp_op_isotonic(&we.a, 1, &eiso));
+    CHECK_OK(fp_op_isotonic(nullptr, 1, &iso));
+    Arr y({2}, {2.0, 0.0}), z({2});
+    CHECK_OK(fp_prox(wiso, 1.0, &y.a, &z.a, nullptr, nullptr, nullptr));
+    CHECK(std::fabs(z.data[0] - 0.5) < 1e-15 && std::fabs(z.data[1] - 0.5) < 1e-15);
+    for (double sigma : {0.0, 0.5, 1.0, 4.0})
+        CHECK(fp_prox_conj(wiso, sigma, &y.a, &z.a, nullptr, nullptr, nullptr) == FP_EINVAL);
+    // A rejected call leaves a kept structure as it was (audit A4).
+    fp_options o = opts(-1, 0, 1);
+    fp_workspace *ws;
+    CHECK_OK(fp_workspace_create(wiso, &y.a, &o, &ws));
+    CHECK_OK(fp_prox(wiso, 1.0, &y.a, &z.a, &o, ws, nullptr));
+    CHECK(fp_prox_conj(wiso, 1.0, &y.a, &z.a, &o, ws, nullptr) == FP_EINVAL);
+    Arr dx({2}, {1.0, 0.0}), dz({2});
+    CHECK_OK(fp_jvp(wiso, ws, &dx.a, 0.0, nullptr, &dz.a));
+    CHECK(std::fabs(dz.data[0] - 0.25) < 1e-15 && std::fabs(dz.data[1] - 0.25) < 1e-15);
+    fp_workspace_free(ws);
+    Arr y3({3}, {2.0, 0.0, -1.0}), a({3}), b({3});
+    CHECK_OK(fp_prox_conj(eiso, 1.0, &y3.a, &a.a, nullptr, nullptr, nullptr));
+    CHECK_OK(fp_prox_conj(iso, 1.0, &y3.a, &b.a, nullptr, nullptr, nullptr));
+    CHECK(a.data == b.data);
+    fp_op_free(wiso);
+    fp_op_free(eiso);
+    fp_op_free(iso);
 }
 
 static void test_derivatives() {
@@ -3411,7 +3452,7 @@ static void test_strided_tiles() {
                     return out;
                 };
                 for (int t : {1, 8})
-                    for (int conj = 0; conj < 2; ++conj)
+                    for (int conj = 0; conj < 1 + c.has_conj; ++conj)
                         for (int cout = 0; cout < 2; ++cout) {
                             // Contiguous reference.
                             Arr xc(sc, base), zc(sc), gc(sc, gb), dc(sc, db), gxc(sc), dzc(sc);
@@ -4156,6 +4197,7 @@ int main() {
     test_tv1d();
     test_projections();
     test_derivatives();
+    test_isotonic_conj();
     test_batching();
     test_tv_aniso();
     test_tv_iso();

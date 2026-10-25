@@ -331,11 +331,20 @@ def test_edge_cases():
 # ---------------------------------------------------------------- derivatives
 
 
+# Cases with no Euclidean conjugate: weighted isotonic regression projects in
+# the metric W (math audit M2), and its prox_conj raises.
+NO_CONJ = {"isotonic_w"}
+
+
 def _derivative_setup(name, conj, seed):
     build, theta, _, gamma = CASES[name][:4]
     rng = np.random.default_rng(seed)
     op = build(theta)
     x = rng.normal(scale=1.5, size=(3, N))
+    if conj and name in NO_CONJ:
+        with pytest.raises(ValueError, match="no Euclidean conjugate"):
+            op.prox_conj(x, gamma, keep=True)
+        pytest.skip("no Euclidean conjugate")
     prox = op.prox_conj if conj else op.prox
     z, ctx = prox(x, gamma, keep=True)
     return build, theta, gamma, op, x, z, ctx, rng
@@ -574,6 +583,28 @@ def test_errors():
             v[pos] = np.inf
             with pytest.raises(ValueError):
                 f(v)
+
+
+def test_isotonic_weighted_conj():
+    """Weighted isotonic regression projects in the metric W, so y - P^W(y)
+    is not the Euclidean conjugate's prox (math audit M2): weights (1, 3) at
+    y = (2, 0) gave (1.5, -0.5), outside the polar cone {(a, -a) : a >= 0},
+    where the Euclidean answer is (1, -1). It now raises; W (y - P^W(y))
+    lies in the polar cone."""
+    op, y = fp.Isotonic(np.array([1.0, 3.0])), np.array([2.0, 0.0])
+    z = op.prox(y)
+    np.testing.assert_allclose(z, [0.5, 0.5], rtol=1e-15)
+    w_res = np.array([1.0, 3.0]) * (y - z)
+    assert w_res.sum() == 0.0 and w_res[0] >= 0.0
+    for sigma in (0.0, 0.5, 1.0, 4.0):
+        with pytest.raises(ValueError, match="no Euclidean conjugate"):
+            op.prox_conj(y, sigma)
+    # The unweighted conjugate is the projection onto the polar cone.
+    np.testing.assert_allclose(fp.Isotonic().prox_conj(y), [1.0, -1.0], rtol=1e-15)
+    # Equal weights are the Euclidean projection and keep the conjugate.
+    y3 = np.array([2.0, 0.0, -1.0])
+    np.testing.assert_array_equal(fp.Isotonic(np.full(3, 2.0)).prox_conj(y3),
+                                  fp.Isotonic().prox_conj(y3))
 
 
 def test_version_matches_metadata():
