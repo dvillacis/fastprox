@@ -281,7 +281,9 @@ def test_weight_scale():
             c = 2.0**k
             with np.errstate(over="ignore"):
                 pos = w[w > 0] * c
-            if not (pos.size and np.log2(g) - k < 1023 and pos.min() >= 2.0**-1022
+            # g / c subnormal is rounded, a different problem (k = 900 at g =
+            # 1.2e-37, where NumPy's pow on Linux drew it).
+            if not (pos.size and -1022 <= np.log2(g) - k < 1023 and pos.min() >= 2.0**-1022
                     and np.isfinite(pos.max())):
                 continue  # the scaled problem itself is not representable
             opc = fp.TV1DL2(w * c)
