@@ -6,7 +6,9 @@
 // The stack keeps block sums and weights; if a sum overflows (audit K8), the
 // row is pooled again on block means, which cannot. Weights are stored over 2^k with their
 // maximum in [1/2, 1), an exact scaling, so block weights stay below n; the
-// derivative terms in the weights carry the 2^-k back. Weight ratios below
+// derivative terms in the weights carry the 2^-k back. k is kept as an
+// exponent: 2^-k overflowed for weights below 2^-1023 (nightly fuzz, NaN from
+// weights of 1e-315), so the terms scale their weight factor with ldexp. Weight ratios below
 // 1e-100 are rejected, as for the weighted l1 ball, so none underflows.
 //
 // Saved structure (code): 1 at the first entry of every pooled block.
@@ -27,14 +29,12 @@ namespace {
 
 struct Isotonic final : RowOp<Isotonic> {
     Vec w;  // empty: unit weights; else the weights over 2^k
-    double wscale = 1.0;  // 2^-k
+    int wk = 0;  // k
     bool increasing;
     Isotonic(Vec ww, bool inc) : w(std::move(ww)), increasing(inc) {
         if (w.empty()) return;
-        int k;
-        std::frexp(vmax(w), &k);
-        wscale = std::ldexp(1.0, -k);
-        for (double &v : w) v *= wscale;
+        std::frexp(vmax(w), &wk);
+        for (double &v : w) v = std::ldexp(v, -wk);
     }
 
     const char *name() const noexcept override { return "isotonic"; }
@@ -137,7 +137,7 @@ struct Isotonic final : RowOp<Isotonic> {
             for (int64_t i = s; i < e; ++i) {
                 W += wi(i);
                 num += wi(i) * static_cast<double>(dx[i]);
-                if (dp) num += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * (dp[i] * wscale);
+                if (dp) num += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * std::ldexp(dp[i], -wk);
             }
             const T v = static_cast<T>(num / W);
             for (int64_t i = s; i < e; ++i) dz[i] = v;
@@ -157,7 +157,7 @@ struct Isotonic final : RowOp<Isotonic> {
             for (int64_t i = s; i < e; ++i) {
                 gx[i] = static_cast<T>(wi(i) * m);
                 if (!w.empty())
-                    acc[i] += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * (m * wscale);
+                    acc[i] += (static_cast<double>(x[i]) - static_cast<double>(z[s])) * std::ldexp(m, -wk);
             }
         });
     }
