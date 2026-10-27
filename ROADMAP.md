@@ -44,9 +44,9 @@ Queries for the structure behind each operator's Jacobian at the kept point: a s
 
 **Documentation and examples**
 
-- [ ] `docs/api.md`, "Structure of the derivative (*since 1.0.2*)": the definition of L, the guarantees, the per-operator table, the SCD (P, W) form with W = I − P for PROJECTOR operators, and the edge cases; the "ABI stability" section says to check the patch version too for additions made in a patch release
-- [ ] `examples/bilevel_deblurring.py`: 1D TV deblurring, where the fixed-point adjoint from `vjp`, the reduced system through `s.reduce`/`s.expand` and finite differences agree (the check of 2026-10-26: 2·10⁻¹⁴ and 6·10⁻¹¹)
-- [ ] `examples/scd_newton_lasso.py`: Algorithm 3.8 of Gfrerer, Hubmer and Ramlau on a Lasso problem, with P from the structure and W = I − P, converging in a few steps once the support is identified
+- [x] `docs/api.md`, "Structure of the derivative (*since 1.0.2*)": the definition of L, the guarantees, the per-operator table, the SCD (P, W) form with W = I − P for PROJECTOR operators, and the edge cases; the "ABI stability" section says to check the patch version too for additions made in a patch release — Done (2026-10-27), with the C and Python calls; the `fp_array` dtype comment names the integer dtypes
+- [x] `examples/bilevel_deblurring.py`: 1D TV deblurring, where the fixed-point adjoint from `vjp`, the reduced system through `s.reduce`/`s.expand` and finite differences agree (the check of 2026-10-26: 2·10⁻¹⁴ and 6·10⁻¹¹) — Done (2026-10-27): n = 120, 31 segments, agreeing to 2·10⁻¹³ and 2·10⁻¹¹; `test_examples.py` holds 10⁻¹² and 10⁻⁹
+- [x] `examples/scd_newton_lasso.py`: Algorithm 3.8 of Gfrerer, Hubmer and Ramlau on a Lasso problem, with P from the structure and W = I − P, converging in a few steps once the support is identified — Done (2026-10-27): in its composite form, Algorithm 4.2 (Lemma 4.1's sum rule), with a forward-backward AS and a descent safeguard in place of the paper's globalisation; the lasso and 1D TV deblurring each converge in 8 steps, the last Newton step landing on the solution to 10⁻¹⁶ (FISTA: 106 and 161 iterations to 10⁻¹⁰). The lasso needs A of full column rank: from 0 the first supports exceed the 80 rows of an underdetermined A, PHP is singular on rng P, and every Newton step is rejected
 - [x] Spec Section 7's derivative table, which still described image and graph TV by "the dual variables": anisotropic, graph and tree TV average over their regions; isotropic TV solves in region space by CG — Done (2026-10-27), with this design
 
 **Release**
