@@ -614,6 +614,8 @@ so that L = {M c : c ∈ ℝᴷ, (Mᵀa)ᵀc = 0 when active}, with M the size �
 
 **Operator by operator.** "Stored" means the derivative already saves it (inventory of `src/ops/*.cpp`, 2026-10-27), so the query is a copy and a scatter. "Recomputed" means O(1) per entry from the saved x and the operator's parameters, by the same function the derivative uses (`piece_of`, the group norms), so the two cannot disagree.
 
+The constraint is reported scaled so that each unit's largest |a\_i| is 1: the same constraint, and in float32 no coefficient underflows by its scale alone (the l1 ball's weights of 1e-50 were all 0). The table gives a up to that factor.
+
 | Operator | States | Regions and signs | Constraint a (when active) | Kind | Source |
 | --- | --- | --- | --- | --- | --- |
 | Soft thresholding (weighted) | ZERO thresholded, FREE | singletons | — | PROJECTOR | recomputed |
@@ -706,8 +708,8 @@ FP_API fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, 
 /* Per unit, whether its linear constraint is active (active, a contiguous
  * int8 array of count entries) and, per entry, its coefficient (coef, x's
  * dtype and shape; 0 where not FREE and in units without an active
- * constraint). Either may be NULL. Operators that never have a constraint
- * write zeros. */
+ * constraint), scaled so that each unit's largest |a_i| is 1. Either may
+ * be NULL. Operators that never have a constraint write zeros. */
 FP_API fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef,
                                          int8_t *active, int64_t count);
 ```

@@ -262,6 +262,25 @@ def test_tv_ball_large_weight_inside_a_segment():
         np.testing.assert_allclose(s.project(J), J, rtol=0, atol=1e-13 * np.abs(dx).max())
 
 
+def test_tv_ball_jump_rounded_away():
+    # The conjugate at sigma = 1.2e205 projects y / sigma onto a ball of
+    # radius 7e-275: the jump of z at the edge of weight 2.5e-14 rounds away
+    # (z_4 == z_5 across two segments), and q, its sign from z, dropped the
+    # edge while z_gamma kept it (fuzzing guarantee 1, 1.0.2). The sign now
+    # comes from the jump codes.
+    w = np.array([1.796875, 3.3125, 1.6066882464696133e-223, 2.0625, 2.4591439995447217e-14, 3.859375])
+    op = fp.TV1DBall(6.974893819279629e-275, w)
+    y = np.array([123.09375, 47.5, 38.515625, 48.2421875, -28.4375, -93.4140625, 56.69921875])
+    dx = np.array([-3.625, 99.70703125, 111.11328125, -36.40625, 18.3125, -45.6015625, 24.140625])
+    _, ctx = op.prox_conj(y, 1.1772386042778602e205, keep=True)
+    s = ctx.structure()
+    assert s.active.all() and s.labels.tolist() == [0, 0, 0, 1, 1, 2, 2]
+    assert s.coef[4] != 0 and s.coef[5] != 0
+    J = dx - op.jvp(ctx, dx)  # the inner prox's J dx (Moreau)
+    assert abs(s.coef @ J) <= 1e-13 * np.abs(s.coef).sum() * np.abs(dx).max()
+    np.testing.assert_allclose(s.project(J), J, rtol=0, atol=1e-13 * np.abs(dx).max())
+
+
 def test_tv_ball_errors():
     for bad in (lambda: fp.TV1DBall(-1.0), lambda: fp.TV1DBall(np.nan),
                 lambda: fp.TV1DBall(1.0, [-1.0]), lambda: fp.TV1DBall(1.0, np.ones(3)).prox(np.ones(5))):

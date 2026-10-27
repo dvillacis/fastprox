@@ -89,9 +89,12 @@ struct TVBall final : RowOp<TVBall> {
         return reinterpret_cast<T *>(p + static_cast<size_t>(k * n) * sizeof(double));
     }
 
-    template <class T>
-    static int sgn_diff(const T *z, int64_t e) noexcept {
-        return z[e + 1] > z[e] ? 1 : (z[e + 1] < z[e] ? -1 : 0);
+    // sign(z_{e+1} - z_e) from the 1D TV code of edge e, as z_gamma is built:
+    // z rounds a small jump away (the conjugate at sigma ~ 1e152 with a
+    // weight of 1e-14 at the jump), and q then dropped the edge.
+    static int sgn_diff(const uint8_t *code, int64_t e) noexcept {
+        const uint8_t c = code[e + 1];
+        return c == kUp ? 1 : (c == kDown ? -1 : 0);
     }
     template <class T>
     double tv_value(const T *z, int64_t n) const noexcept {
@@ -102,19 +105,18 @@ struct TVBall final : RowOp<TVBall> {
     }
     // The derivatives' scale of w (Scale above): pow2_scale of the largest w_e
     // where z jumps.
-    template <class T>
-    double jump_scale(const T *z, int64_t n) const noexcept {
+    double jump_scale(const uint8_t *code, int64_t n) const noexcept {
         double m = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e)
-            if (sgn_diff(z, e)) m = std::max(m, we(e));
+            if (sgn_diff(code, e)) m = std::max(m, we(e));
         return pow2_scale(m);
     }
     // <q, v> = sum_e w_e sign(Dz_e) (v_{e+1} - v_e), on sw w and sv v.
-    template <class T, class V>
-    double tv_lin(const T *z, const V *v, int64_t n, double sw = 1.0, double sv = 1.0) const noexcept {
+    template <class V>
+    double tv_lin(const uint8_t *code, const V *v, int64_t n, double sw = 1.0, double sv = 1.0) const noexcept {
         double s = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) {
-            const int sg = sgn_diff(z, e);
+            const int sg = sgn_diff(code, e);
             if (sg)
                 s += sg * (sw * we(e)) * (sv * static_cast<double>(v[e + 1]) - sv * static_cast<double>(v[e]));
         }
@@ -215,7 +217,7 @@ struct TVBall final : RowOp<TVBall> {
         // fall back to bisection over many orders of magnitude.
         const double phi0 = eval(0.0);
         tv->jvp_row(x, z, c, zero, zg, n, 0.0, 1.0, nullptr, tscr);
-        const double slope0 = tv_lin(z, zg, n);
+        const double slope0 = tv_lin(c, zg, n);
         double g = slope0 < 0.0 ? -phi0 / slope0 : 0.5 * R;
         if (!(g > L && g < R)) g = 0.5 * (L + R);
         for (int it = 0; it < kMaxEvals; ++it) {
@@ -224,7 +226,7 @@ struct TVBall final : RowOp<TVBall> {
             if (ph > 0.0) L = g; else R = g;
             // Slope of phi on the current structure: <q, z_gamma>.
             tv->jvp_row(x, z, c, zero, zg, n, g, 1.0, nullptr, tscr);
-            const double slope = tv_lin(z, zg, n);
+            const double slope = tv_lin(c, zg, n);
             // Far above alpha, TV(z) behaves like a power of gamma: a Newton
             // step on log TV against log gamma (exact for a power law) takes
             // 7-8 solves where plain Newton took 15-17 at alpha = 1e-4 TV(x).
@@ -273,12 +275,12 @@ struct TVBall final : RowOp<TVBall> {
         T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
         tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr);
-        const double omega = jump_scale(z, n);
-        if (tv_lin(z, zg, n, omega, omega) == 0.0) return k;
+        const double omega = jump_scale(code, n);
+        if (tv_lin(code, zg, n, omega, omega) == 0.0) return k;
         for (int64_t i = 0; s.coef && i < n; ++i) {
             double q = 0.0;
-            if (i > 0) q += we(i - 1) * sgn_diff(z, i - 1);
-            if (i + 1 < n) q -= we(i) * sgn_diff(z, i);
+            if (i > 0) q += we(i - 1) * sgn_diff(code, i - 1);
+            if (i + 1 < n) q -= we(i) * sgn_diff(code, i);
             s.coef[i] = q;
         }
         s.active = true;
@@ -299,8 +301,8 @@ struct TVBall final : RowOp<TVBall> {
         tv->jvp_row(x, z, code, zero, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
         // omega^2 <q, z_gamma>, omega (dalpha - ... - <q, dz0>), and the step
         // dgamma z_gamma as their ratio times omega z_gamma.
-        const double omega = jump_scale(z, n);
-        const double kappa = tv_lin(z, zg, n, omega, omega);
+        const double omega = jump_scale(code, n);
+        const double kappa = tv_lin(code, zg, n, omega, omega);
         if (kappa == 0.0) return;
         double rhs = dp ? dp[0] * omega : 0.0;
         if (dp)
@@ -310,7 +312,7 @@ struct TVBall final : RowOp<TVBall> {
         double dmax = 0.0;
         for (int64_t i = 0; i < n; ++i) dmax = std::fmax(dmax, std::fabs(static_cast<double>(dz[i])));
         const double sd = pow2_scale(dmax);
-        const double dg = rhs / kappa - tv_lin(z, dz, n, omega, sd) / kappa / sd;
+        const double dg = rhs / kappa - tv_lin(code, dz, n, omega, sd) / kappa / sd;
         for (int64_t i = 0; i < n; ++i)
             dz[i] = static_cast<T>(static_cast<double>(dz[i]) + dg * (omega * static_cast<double>(zg[i])));
     }
@@ -330,8 +332,8 @@ struct TVBall final : RowOp<TVBall> {
         for (int64_t i = 0; i < n; ++i) h[i] = T(0);
         tv->jvp_row(x, z, code, h, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
         // bs = beta / omega from omega z_gamma and omega^2 <q, z_gamma> (Scale).
-        const double omega = jump_scale(z, n);
-        const double kappa = tv_lin(z, zg, n, omega, omega);
+        const double omega = jump_scale(code, n);
+        const double kappa = tv_lin(code, zg, n, omega, omega);
         double bs = 0.0;
         if (kappa != 0.0) {
             double gmax = 0.0;
@@ -346,8 +348,8 @@ struct TVBall final : RowOp<TVBall> {
         // h = g - beta q, q_i = v_{i-1} - v_i with v_e = w_e sign(Dz_e).
         for (int64_t i = 0; i < n; ++i) {
             double q = 0.0;
-            if (i > 0) q += (omega * we(i - 1)) * sgn_diff(z, i - 1);
-            if (i + 1 < n) q -= (omega * we(i)) * sgn_diff(z, i);
+            if (i > 0) q += (omega * we(i - 1)) * sgn_diff(code, i - 1);
+            if (i + 1 < n) q -= (omega * we(i)) * sgn_diff(code, i);
             h[i] = static_cast<T>(static_cast<double>(gv[i]) - bs * q);
         }
         for (int64_t k = 0; k < nw + 1; ++k) ia[k] = 0.0;

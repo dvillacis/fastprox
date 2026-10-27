@@ -578,7 +578,15 @@ int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr 
             if (ld && l64) put_row(reinterpret_cast<int64_t *>(ld) + off[1], p.astride[1], s.label, n);
             else if (ld) put_row(reinterpret_cast<int32_t *>(ld) + off[1], p.astride[1], s.label, n);
             if (gd) put_row(gd + off[2], p.astride[2], s.sign, n);
-            if (cd) put_row(cd + off[3], p.astride[3], s.coef, n);
+            if (cd) {
+                // Scaled so the largest |a_i| is 1: the same constraint, and
+                // in float no coefficient underflows by its scale alone.
+                double am = 0.0;
+                for (int64_t i = 0; i < n; ++i) am = std::fmax(am, std::fabs(s.coef[i]));
+                if (am > 0.0 && am != 1.0)
+                    for (int64_t i = 0; i < n; ++i) s.coef[i] /= am;
+                put_row(cd + off[3], p.astride[3], s.coef, n);
+            }
         }
         fixed.fetch_add(local, std::memory_order_relaxed);
     });
