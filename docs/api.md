@@ -876,7 +876,8 @@ $W$'s block on $L$ needs $J$, through `fp_jvp` (CG on $J_L y = s$). After
 Jacobian $J$ gives the conjugate's $I - J$: for a PROJECTOR operator the
 conjugate's subspace is $L^\perp$.
 
-**Operator by operator.** Constraint: $a$ when active.
+**Operator by operator.** Constraint: $a$ when active, up to the factor that
+makes each unit's largest $|a_i|$ equal to 1.
 
 | Operator | States | Regions, signs | Constraint | Kind |
 | --- | --- | --- | --- | --- |
@@ -956,8 +957,8 @@ fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef,
   dimensions for images and graphs).
 - `fp_workspace_constraint`: per unit the active flag (`count` contiguous
   int8) and per entry the coefficient (the dtype and shape of $x$; 0 where not
-  FREE and in units without an active constraint). Operators that never have
-  a constraint write zeros.
+  FREE and in units without an active constraint), scaled so that each unit's
+  largest $|a_i|$ is 1. Operators that never have a constraint write zeros.
 - Any output may be NULL. **Errors:** `FP_EINVAL` without a kept point, for
   kind NONE and on a device workspace; `FP_EDTYPE` for states or signs not
   `FP_I8`, labels not `FP_I32` or `FP_I64`, or coefficients not of $x$'s dtype;

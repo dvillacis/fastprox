@@ -328,8 +328,8 @@ class Structure:
     ``sign`` (int8, x's shape; $\sigma_i = \pm 1$, 0 where not free),
     ``nregions`` (int64, the batch shape, ``()`` for elementwise operators;
     -1 for a unit holding a NaN), ``coef`` and ``active`` (the constraint
-    $a$, x's dtype and shape, and a bool per unit; ``None`` for operators
-    that never have one), ``nfixed`` (the entries not free) and ``conj``.
+    $a$, x's dtype and shape, scaled so that each unit's largest $|a_i|$
+    is 1, and a bool per unit; ``None`` for operators that never have one), ``nfixed`` (the entries not free) and ``conj``.
     See docs/spec.md, Section 7, "Structure of the derivative"."""
 
     __slots__ = ("kind", "state", "labels", "sign", "nregions", "coef", "active", "nfixed", "conj",

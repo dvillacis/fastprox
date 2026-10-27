@@ -145,6 +145,29 @@ def test_by_hand():
         assert np.vdot(w * (v - p), s.expand(c)) == pytest.approx(0.0, abs=1e-14)
 
 
+def test_coefficient_scale():
+    # Each unit's coefficients come scaled so the largest |a_i| is 1. In
+    # float32 the hyperplane's a_F at 5e-45 of max |a| (an entry at its
+    # bound) were 4, 5 and 7 subnormals, and a^T (J dx) lost the constraint
+    # (fuzzing guarantee 1, 1.0.2); the l1 ball's weights of 1e-50 were 0.
+    a = np.array([0.765625, 1.109375, -1.5625, 1.5227227580871691e44])
+    lo, hi = np.r_[-np.inf, -np.inf, -np.inf, 0.0], np.r_[np.inf, np.inf, np.inf, 0.0]
+    x = np.array([[2.0, -1.0, 0.5, 3.0], [0.25, 4.0, -2.0, -1.0]], np.float32)
+    dx = np.array([[1.0, -2.0, 3.0, 0.5], [-1.0, 0.5, 2.0, 1.0]], np.float32)
+    _, ctx = fp.Hyperplane(a, b=0.0, lower=lo, upper=hi).prox(x, keep=True)
+    s = ctx.structure()
+    assert s.active.all() and s.coef.dtype == np.float32
+    np.testing.assert_allclose(s.coef[:, :3], np.broadcast_to(a[:3] / 1.5625, (2, 3)), rtol=1e-7)
+    assert (s.coef[:, 3] == 0).all()
+    J = ctx.op.jvp(ctx, dx)
+    assert (np.abs(np.sum(s.coef * J, axis=1)) <= 1e-5 * np.abs(dx).max(axis=1)).all()
+    w = np.array([1e-50, 2e-50, 4e-50])
+    _, ctx = fp.L1Ball(1e-50, w).prox(np.array([3.0, -1.0, 2.0], np.float32), keep=True)
+    s = ctx.structure()
+    assert s.active.all() and np.abs(s.coef).max() == 1.0
+    np.testing.assert_array_equal(s.coef != 0, s.state == FREE)
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_threads_axis_strides(name):
     build, theta, _, gamma = CASES[name][:4]

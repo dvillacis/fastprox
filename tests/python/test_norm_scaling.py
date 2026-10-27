@@ -97,6 +97,24 @@ def test_l1_ball_tangent_scales(k):
     np.testing.assert_allclose(op.vjp(ctx, dx * c)[0] / c, op.vjp(ctx, dx)[0], rtol=1e-13, atol=1e-15)
 
 
+@pytest.mark.parametrize("cls", ["Hyperplane", "HalfSpace"])
+@pytest.mark.parametrize("k", [-960, 900])
+def test_hyperplane_tangent_scales(cls, k):
+    # The largest |a_i| sits at a bound, so the free entries' a_i are near
+    # 1e-75 of it: a_i dx_i was subnormal or 0 for dx near 1e-289, and the
+    # jvp lost the constraint (fuzzing guarantee 1, 1.0.2, after prox_conj
+    # at sigma near 1e263). J is linear in the tangent: J (c dx) / c = J dx.
+    rng = np.random.default_rng(14)
+    a = np.r_[1.0, 1e-75 * rng.uniform(1, 3, 7)]
+    op = getattr(fp, cls)(a, b=1e-75, lower=np.r_[0.0, np.full(7, -np.inf)], upper=np.r_[0.0, np.full(7, np.inf)])
+    _, ctx = op.prox(rng.normal(size=8), keep=True)
+    s = ctx.structure()
+    assert s.active and s.state[0] != 0 and (s.state[1:] == 0).all()
+    dx, c = rng.normal(size=8), 2.0**k
+    np.testing.assert_allclose(op.jvp(ctx, dx * c) / c, op.jvp(ctx, dx), rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(op.vjp(ctx, dx * c)[0] / c, op.vjp(ctx, dx)[0], rtol=1e-13, atol=1e-15)
+
+
 def test_reproducers():
     s2 = np.sqrt(2.0)
     np.testing.assert_allclose(fp.project_l2_ball(np.array([1e200, 1e200]), 1.0), [1 / s2] * 2, rtol=1e-15)

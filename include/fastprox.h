@@ -24,7 +24,7 @@
 
 #define FP_VERSION_MAJOR 1
 #define FP_VERSION_MINOR 0
-#define FP_VERSION_PATCH 1
+#define FP_VERSION_PATCH 2
 #define FP_ABI_VERSION 1 /* bumped only when the ABI breaks */
 
 #define FP_MAX_NDIM 32
@@ -558,7 +558,8 @@ FP_API fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, 
 /* Per unit, whether its linear constraint is active (active, a contiguous
  * int8 array of count entries) and, per entry, its coefficient (coef, x's
  * dtype and shape; 0 where not FREE and in units without an active
- * constraint). Either may be NULL; count as for fp_workspace_regions.
+ * constraint), scaled so that each unit's largest |a_i| is 1. Either may
+ * be NULL; count as for fp_workspace_regions.
  * Operators that never have a constraint write zeros. */
 FP_API fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef, int8_t *active,
                                          int64_t count);

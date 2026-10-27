@@ -403,6 +403,26 @@ struct HyperBox final : RowOp<HyperBox> {
         return k;
     }
 
+    // The tangent's step along a_F, <a_F, v_F> / |a_F|^2, is at most
+    // max_F |v_i| (vm) times |a_F|^-1 <= 1e100 times sqrt(n). The plain
+    // formulas hold while vm is in [2^-600, 2^600], where every nonzero
+    // a_i v_i is normal (|a_i| in [1e-100, 1]) and the step finite; else the
+    // step is c / sv, with c computed on v scaled by sv, a power of two, and
+    // applied as (c a_i) / sv. Found by fuzzing guarantee 1 in 1.0.2: after
+    // fp_prox_conj at sigma near 1e263 the inner tangent dx / sigma made
+    // a_i dx_i subnormal or 0, and the jvp lost the constraint.
+    static bool dot_in_range(double vm) noexcept { return vm == 0.0 || (0x1p-600 <= vm && vm <= 0x1p600); }
+    template <class T>
+    double free_step_scaled(const T *v, const uint8_t *code, int64_t n, double vm, double den,
+                            double &sv) const noexcept {
+        const Plane p = plane();
+        sv = pow2_scale(vm);
+        double d = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            if ((code[i] & kStateMask) == kFreeE) d += p.A(i) * (static_cast<double>(v[i]) * sv);
+        return d / den;
+    }
+
     template <class T>
     void jvp(const T *x, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n, double,
              double, const double *dp, void *) const noexcept {
@@ -413,23 +433,39 @@ struct HyperBox final : RowOp<HyperBox> {
         auto dh = [&](int64_t i) { return dp ? dp[1 + na + nl + (nh == 1 ? 0 : i)] : 0.0; };
         double mu, den;
         saved_mu(x, code, n, mu, den);
-        double dmu = 0.0;
+        double dmu = 0.0, c = 0.0, sv = 1.0;  // the tangent's step c / sv apart (scaled)
         if (den > 0.0) {
-            double num = -(dp ? inv_s * dp[0] : 0.0);
+            double num = -(dp ? inv_s * dp[0] : 0.0), vm = 0.0;
             for (int64_t i = 0; i < n; ++i) {
                 const double ai = p.A(i);
                 const uint8_t st = code[i] & kStateMask;
-                if (st == kFreeE) num += ai * (static_cast<double>(dx[i]) - mu * da(i));
-                else num += ai * (st == kLoE ? dl(i) : dh(i));
+                if (st == kFreeE) {
+                    num += ai * (static_cast<double>(dx[i]) - mu * da(i));
+                    vm = std::fmax(vm, std::fabs(static_cast<double>(dx[i])));
+                } else {
+                    num += ai * (st == kLoE ? dl(i) : dh(i));
+                }
                 num += da(i) * static_cast<double>(z[i]);
             }
             dmu = num / den;
+            if (!dot_in_range(vm)) {  // the tangent's term apart, scaled
+                double rest = -(dp ? inv_s * dp[0] : 0.0);
+                for (int64_t i = 0; i < n; ++i) {
+                    const double ai = p.A(i);
+                    const uint8_t st = code[i] & kStateMask;
+                    rest += st == kFreeE ? ai * (-mu * da(i)) : ai * (st == kLoE ? dl(i) : dh(i));
+                    rest += da(i) * static_cast<double>(z[i]);
+                }
+                dmu = rest / den;
+                c = free_step_scaled(dx, code, n, vm, den, sv);
+            }
         }
         for (int64_t i = 0; i < n; ++i) {
             const uint8_t st = code[i] & kStateMask;
             if (st == kLoE) dz[i] = static_cast<T>(dl(i));
             else if (st == kHiE) dz[i] = static_cast<T>(dh(i));
-            else dz[i] = static_cast<T>(static_cast<double>(dx[i]) - dmu * p.A(i) - mu * da(i));
+            else if (c == 0.0) dz[i] = static_cast<T>(static_cast<double>(dx[i]) - dmu * p.A(i) - mu * da(i));
+            else dz[i] = static_cast<T>(static_cast<double>(dx[i]) - (c * p.A(i)) / sv - dmu * p.A(i) - mu * da(i));
         }
     }
 
@@ -440,17 +476,24 @@ struct HyperBox final : RowOp<HyperBox> {
         const size_t na = a.size(), nl = lo.size(), nh = hi.size();
         double mu, den;
         saved_mu(x, code, n, mu, den);
-        double s = 0.0;  // <a_F, g_F> / |a_F|^2
+        double s = 0.0, c = 0.0, sv = 1.0;  // <a_F, g_F> / |a_F|^2 = s, or c / sv (scaled)
         if (den > 0.0) {
-            double ag = 0.0;
+            double ag = 0.0, vm = 0.0;
             for (int64_t i = 0; i < n; ++i)
-                if ((code[i] & kStateMask) == kFreeE) ag += p.A(i) * static_cast<double>(g[i]);
+                if ((code[i] & kStateMask) == kFreeE) {
+                    ag += p.A(i) * static_cast<double>(g[i]);
+                    vm = std::fmax(vm, std::fabs(static_cast<double>(g[i])));
+                }
             s = ag / den;
+            if (!dot_in_range(vm)) {
+                c = free_step_scaled(g, code, n, vm, den, sv);
+                s = c / sv;  // only in the parameter gradients, which carry it
+            }
         }
         acc[0] += inv_s * s;
         for (int64_t i = 0; i < n; ++i) {
             const uint8_t st = code[i] & kStateMask;
-            const double r = static_cast<double>(g[i]) - s * p.A(i);
+            const double r = static_cast<double>(g[i]) - (c == 0.0 ? s * p.A(i) : (c * p.A(i)) / sv);
             acc[1 + (na == 1 ? 0 : i)] += inv_s * ((st == kFreeE ? -mu * r : 0.0) - s * static_cast<double>(z[i]));
             if (st == kLoE) acc[1 + na + (nl == 1 ? 0 : i)] += r;
             else if (st == kHiE) acc[1 + na + nl + (nh == 1 ? 0 : i)] += r;
