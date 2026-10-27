@@ -202,6 +202,22 @@ inline int64_t one_region(RowStruct &s, int64_t n, In in, Sg sg) noexcept {
     return k;
 }
 
+// Every entry FREE with sign +1, in contiguous regions that start where
+// starts(i) is true (entry 0 always starts one); no constraint.
+template <class St>
+inline int64_t runs(RowStruct &s, int64_t n, St starts) noexcept {
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        if (i == 0 || starts(i)) ++k;
+        s.state[i] = FP_ENTRY_FREE;
+        s.label[i] = k - 1;
+        s.sign[i] = 1;
+        s.coef[i] = 0.0;
+    }
+    s.active = false;
+    return k;
+}
+
 // Iterative derivative solves of an image operator (conjugate gradients):
 // tolerance on the relative residual and iteration cap in, the achieved
 // residual and iterations out. Operators with closed-form derivatives leave

@@ -79,6 +79,7 @@ namespace {
 constexpr uint8_t kInside = 1;  // code[0]: z is the piecewise mean
 
 struct TV1DL2 final : RowOp<TV1DL2> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     Vec w, a;  // weights over 2^wk and their squares: length 1 or n - 1
     double wmax_ = vmax(w);  // the largest weight as given, for step_scale: once, not per call (it scanned every weight on each prox call)
     int wk = 0;
@@ -470,6 +471,22 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         double pty = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) pty += ae(e) * sc.delta(z, e) * (y[e + 1] - y[e]);
         return pty / sc.sh;
+    }
+
+    // Structure (since 1.0.2), on the jvp's kind: the piecewise mean has the
+    // pieces between zero weights as regions; otherwise singletons, where
+    // J = H^{-1} is symmetric positive definite.
+    template <class T>
+    int64_t structure(const T *, const T *z, const uint8_t *code, int64_t n, double gamma, RowStruct &s,
+                      void *scr) const noexcept {
+        gamma = std::ldexp(gamma, wk);
+        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n;
+        Scale sc;
+        double c = 0.0;
+        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
+        if (kind == kMean) return runs(s, n, [this](int64_t i) { return ae(i - 1) == 0.0; });
+        for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
+        return singletons(s, n);
     }
 
     template <class T>

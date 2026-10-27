@@ -52,6 +52,7 @@ constexpr uint8_t kDown = 1, kUp = 2;
 constexpr uint8_t kInside = 8;
 
 struct TVBall final : RowOp<TVBall> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double alpha;
     Vec w;  // as for 1D TV: length 1 or n - 1
     std::unique_ptr<fp_op> tv;
@@ -236,6 +237,32 @@ struct TVBall final : RowOp<TVBall> {
         return 0.0;
     }
 
+    // Structure (since 1.0.2): inside, singletons (the identity). On the
+    // sphere, the segments of 1D TV at gamma*, with the constraint
+    // a = q = D^T (w sign(Dz)): per segment z_gamma is minus the mean of q,
+    // so dz = dz0 - z_gamma <q, dz0> / <q, z_gamma> is P_L. Active when the
+    // jvp's <q, z_gamma> is not 0.
+    template <class T>
+    int64_t structure(const T *x, const T *z, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *scr) const noexcept {
+        if (code[0] == kInside) {
+            for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
+            return singletons(s, n);
+        }
+        const int64_t k = runs(s, n, [code](int64_t i) { return code[i] != 0; });
+        T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
+        for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
+        tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr);
+        if (tv_lin(z, zg, n) == 0.0) return k;
+        for (int64_t i = 0; i < n; ++i) {
+            double q = 0.0;
+            if (i > 0) q += we(i - 1) * sgn_diff(z, i - 1);
+            if (i + 1 < n) q -= we(i) * sgn_diff(z, i);
+            s.coef[i] = q;
+        }
+        s.active = true;
+        return k;
+    }
     template <class T>
     void jvp(const T *x, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n, double,
              double, const double *dp, void *scr) const noexcept {
