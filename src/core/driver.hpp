@@ -385,11 +385,12 @@ int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const 
 // states (FP_I8), labels (FP_I32 or FP_I64) and signs (FP_I8) of the saved
 // entries into the arrays given (each may be null; x's shape, any strides).
 // The whole array is one unit, whose free entries are singleton regions,
-// labelled in C order: a count per fixed block (the vjp's blocks over chunks
-// of kChunk entries) and a prefix over the blocks, so that the labels do not
-// depend on the thread count. A NaN entry is FREE with label -1 and sign 0,
-// and counts neither as a region nor as fixed: the entries are independent,
-// so the others keep their structure (decision of 2026-10-27). Returns the
+// labelled in C order: a count per piece (the jvp's, elem_piece) and a prefix
+// over the pieces. A label is the number of free entries before it in C
+// order, so it does not depend on the partition or the thread count
+// (decision of 2026-10-27). A NaN entry is FREE with label -1 and sign 0, and
+// counts neither as a region nor as fixed: the entries are independent, so
+// the others keep their structure (decision of 2026-10-27). Returns the
 // number of regions and sets nfixed (may be null), the entries held.
 template <class T>
 int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr *state, const Arr *labels,
@@ -402,15 +403,16 @@ int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr
     const T *save = ws.xs<T>();
     const int8_t *side = ws.branch_on ? ws.branch.data() : nullptr;
     const double ktol = branch_tol(ws);
-    const int64_t nb = ws.nblocks, nch = ceil_div(p.numel, kChunk);
+    // The pieces from the workspace's thread count: block_counts holds three
+    // counts per piece (build_workspace).
+    const int64_t E = elem_piece(p.numel, ws.nthreads), nb = std::max<int64_t>(1, ceil_div(p.numel, E));
     int64_t *cnt = ws.block_counts.data(), *nnan = cnt + nb, *start = nnan + nb;
     const int nt = p.numel < kParallelMin ? 1 : ws.nthreads;
     constexpr int8_t kNan = -1;  // a NaN entry, in the states passed to f
     // f(off, i, m, s): the states s (kNan at a NaN) of the entries i .. i + m - 1
-    // of the run at offsets off, for the entries of block b.
+    // of the run at offsets off, for the entries of piece b.
     auto states = [&](int64_t b, auto &&f) {
-        const int64_t e0 = std::min(p.numel, nch * b / nb * kChunk);
-        const int64_t e1 = std::min(p.numel, nch * (b + 1) / nb * kChunk);
+        const int64_t e0 = std::min(p.numel, b * E), e1 = std::min(p.numel, (b + 1) * E);
         p.for_runs(e0, e1, [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx, int64_t wstep) {
             split_rows(rp, ws.steps_on, pos, len, [&](int64_t j0, int64_t jlen, int64_t row) {
                 int8_t buf[256];
@@ -426,15 +428,44 @@ int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr
             });
         });
     };
-    // Pass 1: the free entries of each block, and its NaNs.
+    // One pass over the states writes the states and signs and counts each
+    // piece's free entries and NaNs; labels also take piece-local labels
+    // there, and a second, light pass adds each piece's offset.
+    int8_t *sd = state ? reinterpret_cast<int8_t *>(state->data) : nullptr;
+    int8_t *gd = sign ? reinterpret_cast<int8_t *>(sign->data) : nullptr;
+    char *ld = labels ? labels->data : nullptr;
+    const bool l64 = labels && labels->dtype == FP_I64;
+    const int64_t ss = p.stride[0][p.ndim - 1], ls = p.stride[1][p.ndim - 1], gs = p.stride[2][p.ndim - 1];
     parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
         for (int64_t b = b0; b < b1; ++b) {
             int64_t c = 0, q = 0;
-            states(b, [&](const int64_t *, int64_t, int64_t m, const int8_t *s) {
-                for (int64_t i = 0; i < m; ++i) {
-                    c += s[i] == FP_ENTRY_FREE;
-                    q += s[i] == kNan;
+            states(b, [&](const int64_t *off, int64_t i0, int64_t m, const int8_t *s) {
+                if (sd) {
+                    int8_t *o = sd + off[0] + i0 * ss;
+                    for (int64_t i = 0; i < m; ++i) o[i * ss] = s[i] == kNan ? FP_ENTRY_FREE : s[i];
                 }
+                if (gd) {
+                    int8_t *o = gd + off[2] + i0 * gs;
+                    for (int64_t i = 0; i < m; ++i) o[i * gs] = s[i] == FP_ENTRY_FREE;
+                }
+                if (ld && l64) {
+                    int64_t *o = reinterpret_cast<int64_t *>(ld) + off[1] + i0 * ls;
+                    for (int64_t i = 0; i < m; ++i) {
+                        const bool free = s[i] == FP_ENTRY_FREE;
+                        o[i * ls] = free ? c : -1;
+                        c += free;
+                    }
+                } else if (ld) {
+                    int32_t *o = reinterpret_cast<int32_t *>(ld) + off[1] + i0 * ls;
+                    for (int64_t i = 0; i < m; ++i) {
+                        const bool free = s[i] == FP_ENTRY_FREE;
+                        o[i * ls] = free ? static_cast<int32_t>(c) : -1;
+                        c += free;
+                    }
+                } else {
+                    for (int64_t i = 0; i < m; ++i) c += s[i] == FP_ENTRY_FREE;
+                }
+                for (int64_t i = 0; i < m; ++i) q += s[i] == kNan;
             });
             cnt[b] = c;
             nnan[b] = q;
@@ -447,38 +478,35 @@ int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr
         nans += nnan[b];
     }
     if (nfixed) *nfixed = p.numel - total - nans;
-    if (!state && !labels && !sign) return total;
-    // Pass 2: the outputs, each block's labels from its offset.
-    int8_t *sd = state ? reinterpret_cast<int8_t *>(state->data) : nullptr;
-    int8_t *gd = sign ? reinterpret_cast<int8_t *>(sign->data) : nullptr;
-    char *ld = labels ? labels->data : nullptr;
-    const bool l64 = labels && labels->dtype == FP_I64;
-    const int64_t ss = p.stride[0][p.ndim - 1], ls = p.stride[1][p.ndim - 1], gs = p.stride[2][p.ndim - 1];
-    auto put = [&](const int64_t *off, int64_t i, int8_t s, int64_t label, int8_t sg) {
-        if (sd) sd[off[0] + i * ss] = s;
-        if (ld) {
-            if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + i * ls] = label;
-            else reinterpret_cast<int32_t *>(ld)[off[1] + i * ls] = static_cast<int32_t>(label);
-        }
-        if (gd) gd[off[2] + i * gs] = sg;
-    };
+    if (!ld || total == cnt[0]) return total;  // regions in the first piece only: the labels are final
     parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
         for (int64_t b = b0; b < b1; ++b) {
-            int64_t next = start[b];
-            states(b, [&](const int64_t *off, int64_t i0, int64_t m, const int8_t *s) {
-                for (int64_t i = 0; i < m; ++i) {
-                    if (s[i] == kNan) {
-                        put(off, i0 + i, FP_ENTRY_FREE, -1, 0);
-                        continue;
-                    }
-                    const bool free = s[i] == FP_ENTRY_FREE;
-                    put(off, i0 + i, s[i], free ? next : -1, free ? 1 : 0);
-                    next += free;
+            const int64_t add = start[b];
+            if (add == 0) continue;
+            const int64_t e0 = std::min(p.numel, b * E), e1 = std::min(p.numel, (b + 1) * E);
+            p.for_runs(e0, e1, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
+                if (l64) {
+                    int64_t *o = reinterpret_cast<int64_t *>(ld) + off[1];
+                    for (int64_t i = 0; i < len; ++i) o[i * ls] += o[i * ls] >= 0 ? add : 0;
+                } else {
+                    int32_t *o = reinterpret_cast<int32_t *>(ld) + off[1];
+                    const int32_t a32 = static_cast<int32_t>(add);
+                    for (int64_t i = 0; i < len; ++i) o[i * ls] += o[i * ls] >= 0 ? a32 : 0;
                 }
             });
         }
     });
     return total;
+}
+
+// o[i * st] = s[i] for i < n, converted; a loop of its own for st = 1, which
+// vectorises (the structure queries' outputs).
+template <class O, class S>
+inline void put_row(O *o, int64_t st, const S *s, int64_t n) noexcept {
+    if (st == 1)
+        for (int64_t i = 0; i < n; ++i) o[i] = static_cast<O>(s[i]);
+    else
+        for (int64_t i = 0; i < n; ++i) o[i * st] = static_cast<O>(s[i]);
 }
 
 // Per-thread bytes of one row's structure (fp::RowStruct): states and signs,
@@ -496,10 +524,10 @@ inline size_t row_struct_bytes(int64_t n) noexcept {
 // canonical order, its regions into nregions and its constraint's flag into
 // active (each may be null). A row whose input holds a NaN has -1 regions,
 // every entry FREE with label -1, sign 0 and coefficient 0, and no
-// constraint. Returns the entries not FREE.
+// constraint. Returns the entries not FREE when count is set (else 0).
 template <class T>
 int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr *state, const Arr *labels,
-                             const Arr *sign, const Arr *coef, int64_t *nregions, int8_t *active) {
+                             const Arr *sign, const Arr *coef, int64_t *nregions, int8_t *active, bool count) {
     const int64_t cstr[FP_MAX_NDIM] = {};
     const int64_t *st[4] = {state ? state->strides : cstr, labels ? labels->strides : cstr,
                             sign ? sign->strides : cstr, coef ? coef->strides : cstr};
@@ -515,42 +543,42 @@ int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr 
     parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
         RowBuffers<T> buf(ws, op, tid, n);
         char *base = reinterpret_cast<char *>(ws.struct_scratch.data()) + static_cast<size_t>(tid) * ws.struct_thread_bytes;
+        // Only the outputs asked for (RowStruct): the hooks skip the others.
         RowStruct s;
+        int8_t *sgn = reinterpret_cast<int8_t *>(base) + round64(static_cast<size_t>(n));
+        int64_t *lab = reinterpret_cast<int64_t *>(sgn + round64(static_cast<size_t>(n)));
         s.state = reinterpret_cast<int8_t *>(base);
-        s.sign = s.state + round64(static_cast<size_t>(n));
-        s.label = reinterpret_cast<int64_t *>(s.sign + round64(static_cast<size_t>(n)));
-        s.coef = reinterpret_cast<double *>(reinterpret_cast<char *>(s.label) + round64(8 * static_cast<size_t>(n)));
+        s.sign = gd ? sgn : nullptr;
+        s.label = ld ? lab : nullptr;
+        s.coef = cd ? reinterpret_cast<double *>(reinterpret_cast<char *>(lab) + round64(8 * static_cast<size_t>(n)))
+                    : nullptr;
+        s.constraint = cd || active;
         int64_t local = 0;
         for (int64_t r = r0; r < r1; ++r) {
             const T *x = ws.xs<T>() + r * n;
-            bool nan = false;
-            for (int64_t i = 0; i < n; ++i) nan = nan || x[i] != x[i];
+            bool nan = false;  // no early exit: the scan vectorises
+            for (int64_t i = 0; i < n; ++i) nan |= x[i] != x[i];
             int64_t k = -1;
             if (nan) {
-                for (int64_t i = 0; i < n; ++i) {
-                    s.state[i] = FP_ENTRY_FREE;
-                    s.label[i] = -1;
-                    s.sign[i] = 0;
-                    s.coef[i] = 0.0;
-                }
-                s.active = false;
+                std::fill(s.state, s.state + n, int8_t{FP_ENTRY_FREE});
+                if (s.label) std::fill(s.label, s.label + n, int64_t{-1});
+                if (s.sign) std::fill(s.sign, s.sign + n, int8_t{0});
+                no_constraint(s, n);
             } else {
                 k = op.struct_row(x, ws.zs<T>() + r * n, ws.code.data() + r * n, n, ws.step(r), s, buf.kernel);
-                for (int64_t i = 0; i < n; ++i) local += s.state[i] != FP_ENTRY_FREE;
+                if (count)
+                    for (int64_t i = 0; i < n; ++i) local += s.state[i] != FP_ENTRY_FREE;
             }
             if (nregions) nregions[r] = k;
             if (active) active[r] = s.active;
             int64_t off[4];
             p.offsets(r, off);
-            for (int64_t i = 0; i < n; ++i) {
-                if (sd) sd[off[0] + i * p.astride[0]] = s.state[i];
-                if (ld) {
-                    if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + i * p.astride[1]] = s.label[i];
-                    else reinterpret_cast<int32_t *>(ld)[off[1] + i * p.astride[1]] = static_cast<int32_t>(s.label[i]);
-                }
-                if (gd) gd[off[2] + i * p.astride[2]] = s.sign[i];
-                if (cd) cd[off[3] + i * p.astride[3]] = static_cast<T>(s.coef[i]);
-            }
+            // One loop per output asked for.
+            if (sd) put_row(sd + off[0], p.astride[0], s.state, n);
+            if (ld && l64) put_row(reinterpret_cast<int64_t *>(ld) + off[1], p.astride[1], s.label, n);
+            else if (ld) put_row(reinterpret_cast<int32_t *>(ld) + off[1], p.astride[1], s.label, n);
+            if (gd) put_row(gd + off[2], p.astride[2], s.sign, n);
+            if (cd) put_row(cd + off[3], p.astride[3], s.coef, n);
         }
         fixed.fetch_add(local, std::memory_order_relaxed);
     });
@@ -1016,27 +1044,42 @@ int64_t image_structure_driver(const fp_op &op, const fp_workspace &ws, const Ar
                                                    static_cast<size_t>(tid) * ws.struct_thread_bytes);
         for (int64_t r = r0; r < r1; ++r) {
             const T *x = ws.xs<T>() + r * N;
-            bool nan = false;
-            for (int64_t i = 0; i < N; ++i) nan = nan || x[i] != x[i];
+            bool nan = false;  // no early exit: the scan vectorises
+            for (int64_t i = 0; i < N; ++i) nan |= x[i] != x[i];
             int64_t nreg = 0;
             const int32_t *lab = nan ? nullptr : op.image_labels(ws.image_struct(r), ishape, &nreg);
             int64_t next = 0;
-            if (lab) {
-                for (int64_t C = 0; C < nreg; ++C) map[C] = -1;
-                for (int64_t i = 0; i < N; ++i)
-                    if (map[lab[i]] < 0) map[lab[i]] = static_cast<int32_t>(next++);
+            bool canon = true;  // the saved labels in first-appearance order already
+            if (lab && (ld || nregions)) {  // the canonical numbering, only when asked for
+                int64_t top = -1;
+                for (int64_t i = 0; i < N; ++i) {
+                    canon &= lab[i] <= top + 1;
+                    top = std::max<int64_t>(top, lab[i]);
+                }
+                next = top + 1;
+                if (!canon) {
+                    next = 0;
+                    for (int64_t C = 0; C < nreg; ++C) map[C] = -1;
+                    for (int64_t i = 0; i < N; ++i)
+                        if (map[lab[i]] < 0) map[lab[i]] = static_cast<int32_t>(next++);
+                }
             }
             if (nregions) nregions[r] = lab ? next : -1;
             if (active) active[r] = 0;
             int64_t off[4];
             p.offsets(r, off);
             if (sd) p.for_each(0, [&](int64_t, int64_t o) { sd[off[0] + o] = FP_ENTRY_FREE; });
-            if (ld)
-                p.for_each(1, [&](int64_t i, int64_t o) {
-                    const int64_t l = lab ? map[lab[i]] : -1;
-                    if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + o] = l;
-                    else reinterpret_cast<int32_t *>(ld)[off[1] + o] = static_cast<int32_t>(l);
-                });
+            if (ld) {
+                const int32_t *m = canon ? nullptr : map;
+                auto put = [&](auto *out) {
+                    using L = std::remove_pointer_t<decltype(out)>;
+                    if (!lab) p.for_each(1, [&](int64_t, int64_t o) { out[o] = L(-1); });
+                    else if (!m) p.for_each(1, [&](int64_t i, int64_t o) { out[o] = static_cast<L>(lab[i]); });
+                    else p.for_each(1, [&](int64_t i, int64_t o) { out[o] = static_cast<L>(m[lab[i]]); });
+                };
+                if (l64) put(reinterpret_cast<int64_t *>(ld) + off[1]);
+                else put(reinterpret_cast<int32_t *>(ld) + off[1]);
+            }
             if (gd) p.for_each(2, [&](int64_t, int64_t o) { gd[off[2] + o] = lab ? 1 : 0; });
             if (cd) p.for_each(3, [&](int64_t, int64_t o) { cd[off[3] + o] = T(0); });
         }

@@ -218,6 +218,50 @@ def test_tv_ball_extreme_scales():
     np.testing.assert_array_equal(fp.project_tv1d_ball(x, 1e308), x)
 
 
+def test_tv_ball_derivatives_at_extreme_weights():
+    # <q, z_gamma> grows as w^2: it overflowed from w ~ 1e155 and underflowed
+    # below 1e-155, and the derivatives lost the constraint's term (fuzzing
+    # guarantee 1, 1.0.2). Scaling w and alpha by c leaves the projection.
+    rng = np.random.default_rng(10)
+    x, w = np.cumsum(rng.normal(size=30)), rng.uniform(0.5, 2.0, 29)
+    a = 0.3 * np.sum(w * np.abs(np.diff(x)))
+    dx = rng.normal(size=30)
+    op1 = fp.TV1DBall(a, w)
+    z1, c1 = op1.prox(x, keep=True)
+    for c in (2.0**600, 2.0**-600):
+        op = fp.TV1DBall(a * c, w * c)
+        z, cc = op.prox(x, keep=True)
+        np.testing.assert_allclose(z, z1, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(op.jvp(cc, dx), op1.jvp(c1, dx), rtol=1e-10, atol=1e-10)
+        np.testing.assert_allclose(op.vjp(cc, dx)[0], op1.vjp(c1, dx)[0], rtol=1e-10, atol=1e-10)
+    # The fuzz reproducer: the conjugate at sigma = 1.1e298 works on
+    # dx / sigma, whose products with the small weight's q underflowed.
+    w = np.array([4.0582731154107899e147, 0, 0, 1.2105675798371893e20, 0])
+    op = fp.TV1DBall(1e-200, w)
+    y, dx = np.array([-44.0, 99, -61, -70, 54, 31]), np.arange(1.0, 7.0)
+    _, ctx = op.prox_conj(y, 1.1444946670995897e298, keep=True)
+    s = ctx.structure()
+    assert s.conj and s.active.all()
+    J = dx - op.jvp(ctx, dx)  # the inner prox's J dx (Moreau)
+    np.testing.assert_allclose(s.project(J), J, rtol=0, atol=1e-12 * np.abs(dx).max())
+
+
+def test_tv_ball_large_weight_inside_a_segment():
+    # The derivatives' scale was taken from max w, here an edge inside a
+    # segment (7e157), which left the jump's terms subnormal and <q, z_gamma>
+    # with 8 digits (fuzzing guarantee 1, 1.0.2): now from the jumps' weights.
+    rng = np.random.default_rng(12)
+    w = np.array([0.36, 3.08, 0.47, 2.34, 1.14, 7.27e157, 0.5, 2.66])
+    x = 10 * rng.normal(size=9)
+    op = fp.TV1DBall(1.0, w)
+    _, ctx = op.prox(x, keep=True)
+    s = ctx.structure()
+    assert s.active.all()
+    for dx in rng.normal(size=(4, 9)):
+        J = op.jvp(ctx, dx)
+        np.testing.assert_allclose(s.project(J), J, rtol=0, atol=1e-13 * np.abs(dx).max())
+
+
 def test_tv_ball_errors():
     for bad in (lambda: fp.TV1DBall(-1.0), lambda: fp.TV1DBall(np.nan),
                 lambda: fp.TV1DBall(1.0, [-1.0]), lambda: fp.TV1DBall(1.0, np.ones(3)).prox(np.ones(5))):

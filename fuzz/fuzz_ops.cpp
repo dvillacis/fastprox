@@ -22,7 +22,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cfloat>
 #include <initializer_list>
+#include <map>
 #include <vector>
 
 namespace {
@@ -379,6 +381,130 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
     }
 }
 
+// Guarantee 1 of the structure of the derivative (since 1.0.2; docs/spec.md,
+// "Structure of the derivative"): for a dx drawn from the input, J dx is 0 on
+// the fixed entries, sign_i (J dx)_i is equal within each region, and
+// a^T (J dx) = 0 under an active constraint, to rounding relative to the
+// unit's scale. Units: trailing blocks for the image and graph operators,
+// rows along the axis for the others (one for the elementwise maps). After
+// fp_prox_conj the queries describe the inner prox, whose J dx is dx minus
+// fp_jvp's; its absolute floor is sigma times the dtype's, since the inner
+// tangent dx / sigma can be subnormal.
+void check_structure(const fp_op *op, fp_workspace *ws, const char *opname, fp_dtype dt, int ndim,
+                     const int64_t *shape, int axis, int64_t numel, bool conj, double sigma,
+                     const std::vector<double> &params,
+                     Bytes &b) {
+    auto dump = [&] {
+        std::fprintf(stderr, "params:");
+        for (double p : params) std::fprintf(stderr, " %.17g", p);
+        std::fprintf(stderr, "\n");
+    };
+    int kind = 0;
+    if (fp_op_struct_kind(op, &kind) != FP_OK || kind == FP_STRUCT_NONE || numel == 0) return;
+    const bool f32 = dt == FP_F32;
+    const size_t m = static_cast<size_t>(numel), item = f32 ? 4 : 8;
+    std::vector<unsigned char> dx(m * item), v(m * item), coef(m * item);
+    auto get = [f32](const std::vector<unsigned char> &a, int64_t i) {
+        return f32 ? static_cast<double>(reinterpret_cast<const float *>(a.data())[i])
+                   : reinterpret_cast<const double *>(a.data())[i];
+    };
+    auto jdx = [&](int64_t i) { return conj ? get(dx, i) - get(v, i) : get(v, i); };
+    for (int64_t i = 0; i < numel; ++i) {
+        const double d = b.value();
+        if (f32) reinterpret_cast<float *>(dx.data())[i] = static_cast<float>(d);
+        else reinterpret_cast<double *>(dx.data())[i] = d;
+    }
+    fp_array dxa{dx.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array va{v.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    if (fp_jvp(op, ws, &dxa, 0.0, nullptr, &va) != FP_OK) return;
+    int64_t count = 0, size = 0, nfixed = 0;
+    if (fp_workspace_units(ws, &count, &size) != FP_OK) fail("units status");
+    const size_t cu = static_cast<size_t>(std::max<int64_t>(count, 1));
+    std::vector<int8_t> st(m), sg(m), active(cu);
+    std::vector<int64_t> lab(m), nreg(cu);
+    fp_array sa{st.data(), FP_I8, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array ga{sg.data(), FP_I8, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array la{lab.data(), FP_I64, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array ca{coef.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    const fp_status s1 = fp_workspace_states(ws, &sa, &nfixed);
+    const fp_status s2 = fp_workspace_regions(ws, &la, &ga, nreg.data(), count);
+    const fp_status s3 = fp_workspace_constraint(ws, &ca, active.data(), count);
+    if (!valid_status(s1) || !valid_status(s2) || !valid_status(s3)) fail("structure status");
+    if (s1 != s2 || s2 != s3) fail("structure queries disagree on their status");
+    if (s1 != FP_OK) return;
+    const bool image = std::strcmp(opname, "tv_aniso") == 0 || std::strcmp(opname, "tv_iso") == 0 ||
+                       std::strcmp(opname, "graph_tv") == 0 || std::strcmp(opname, "tree_tv") == 0;
+    const int a = ndim ? (axis + ndim) % ndim : 0;
+    int64_t inner = 1;
+    for (int d = a + 1; d < ndim; ++d) inner *= shape[d];
+    const int64_t n = ndim ? shape[a] : 1;
+    auto unit = [&](int64_t i) -> int64_t {
+        if (count <= 1) return 0;
+        if (image) return i / size;
+        return i / (n * inner) * inner + i % inner;
+    };
+    std::vector<double> scale(cu), amax(cu), dot(cu), asum(cu);
+    for (int64_t i = 0; i < numel; ++i) {
+        const double vi = jdx(i), di = get(dx, i);
+        if (!std::isfinite(vi) || !std::isfinite(di)) return;  // overflow at the extreme ranges
+        const int64_t u = unit(i);
+        if (u < 0 || u >= count) fail("structure: entry outside the units");
+        scale[u] = std::fmax(scale[u], std::fmax(std::fabs(vi), std::fabs(di)));
+        if (st[i] == FP_ENTRY_FREE) amax[u] = std::fmax(amax[u], std::fabs(get(coef, i)));
+    }
+    // Relative rounding, and an absolute floor of a few subnormals (the
+    // extreme ranges reach them).
+    const double tol = 64.0 * (f32 ? FLT_EPSILON : DBL_EPSILON) * static_cast<double>(std::max<int64_t>(size, 1));
+    const double tiny = 4.0 * (f32 ? static_cast<double>(FLT_TRUE_MIN) : DBL_TRUE_MIN) * (conj ? std::fmax(sigma, 1.0) : 1.0);
+    std::map<std::pair<int64_t, int64_t>, double> first;  // sign * (J dx) of each region's first entry
+    int64_t fixed = 0;
+    for (int64_t i = 0; i < numel; ++i) {
+        const int64_t u = unit(i);
+        const double vi = jdx(i);
+        if (st[i] != FP_ENTRY_FREE) {
+            ++fixed;
+            if (lab[i] != -1 || sg[i] != 0) fail("structure: a fixed entry with a label or sign");
+            if (std::fabs(vi) > tol * scale[u] + tiny) {
+                std::fprintf(stderr, "entry %lld: state %d, (J dx) %.17g, dx %.17g, scale %.17g\n",
+                             static_cast<long long>(i), st[i], vi, get(dx, i), scale[u]);
+                dump();
+                fail("guarantee 1: J dx moves a fixed entry");
+            }
+            continue;
+        }
+        if (lab[i] < 0) continue;  // a NaN unit
+        if (lab[i] >= nreg[u] || (sg[i] != 1 && sg[i] != -1)) fail("structure: a label or sign out of range");
+        const auto it = first.emplace(std::make_pair(u, lab[i]), sg[i] * vi);
+        if (!it.second && std::fabs(sg[i] * vi - it.first->second) > tol * scale[u] + tiny) {
+            std::fprintf(stderr, "entry %lld: label %lld, sign (J dx) %.17g, region's first %.17g, scale %.17g\n",
+                         static_cast<long long>(i), static_cast<long long>(lab[i]), sg[i] * vi,
+                         it.first->second, scale[u]);
+            dump();
+            fail("guarantee 1: J dx differs within a region");
+        }
+        if (active[u] && amax[u] > 0.0 && scale[u] > 0.0) {  // on a / max|a| and J dx / scale: no overflow
+            const double ai = get(coef, i) / amax[u];
+            dot[u] += ai * (vi / scale[u]);
+            asum[u] += std::fabs(ai);
+        }
+    }
+    if (fixed != nfixed) fail("structure: nfixed is not the count of fixed entries");
+    for (size_t u = 0; u < cu; ++u)
+        // Rounding anywhere in the unit reaches a^T (J dx) (the conjugate's
+        // dx - fp_jvp, region means): relative to the unit's scale.
+        if (active[u] && std::fabs(dot[u]) > (tol + tiny / scale[u]) * asum[u]) {
+            std::fprintf(stderr, "unit %zu: a^T (J dx) / (max|a| scale) %.17g, sum |a| / max|a| %.17g, scale %.17g\n",
+                         u, dot[u], asum[u], scale[u]);
+            for (int64_t i = 0; i < numel; ++i)
+                if (unit(i) == static_cast<int64_t>(u))
+                    std::fprintf(stderr, "  entry %lld: state %d label %lld sign %d dx %.17g jvp %.17g a %.17g\n",
+                                 static_cast<long long>(i), st[i], static_cast<long long>(lab[i]), sg[i], get(dx, i),
+                                 get(v, i), get(coef, i));
+            dump();
+            fail("guarantee 1: J dx leaves the constraint");
+        }
+}
+
 void run(const uint8_t *data, size_t size) {
     Bytes b{data, size};
 
@@ -669,6 +795,7 @@ void run(const uint8_t *data, size_t size) {
             if (!valid_status(js) || !valid_status(vs)) fail("derivative status");
             if (ps != FP_OK && ps != FP_ENOTCONV && (js == FP_OK || vs == FP_OK))
                 fail("derivative without structure");
+            if (js == FP_OK) check_structure(c.op, ws, opname, dt, ndim, shape, axis, numel, conj, gamma, c.params[0], b);
         }
         fp_workspace_free(ws);
     }

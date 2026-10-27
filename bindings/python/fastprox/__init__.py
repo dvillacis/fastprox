@@ -35,7 +35,7 @@ from . import _fastprox as _C
 __version__ = _C.version()
 
 __all__ = [
-    "Info", "IterInfo", "DerivInfo", "Grads", "Context", "Operator",
+    "Info", "IterInfo", "DerivInfo", "Grads", "Context", "Structure", "Operator",
     "Soft", "ElasticNet", "Huber", "GroupL2", "Box", "NonNeg", "L2Ball", "Simplex",
     "L1Ball", "LInf", "Isotonic", "TV1D", "TVAniso", "TVIso", "tv_aniso", "tv_iso", "GraphTV", "graph_tv", "TreeTV", "tree_tv",
     "L0", "Lq", "SCAD", "MCP", "LogPenalty", "hard_threshold", "lq", "scad", "mcp", "prox_log",
@@ -254,6 +254,202 @@ class Context:
         with self.lock:
             _C.kinks(self.ws, float(tol), mask)
         return mask
+
+    def structure(self, branch=None, kink_tol=0.0) -> Structure:
+        r"""The structure of the derivative at the saved point (since 1.0.2): a
+        :class:`Structure` with the subspace $L = \operatorname{range} J$ of
+        the Jacobian in $x$ that :meth:`Operator.jvp` applies, read under
+        the context's lock. ``branch`` and ``kink_tol`` as in ``jvp``: the
+        structure of that piece. Every operator except :class:`Spectral`
+        has one (``op.struct_kind``)."""
+        op = self.op
+        kind = op.struct_kind
+        if kind is None:
+            raise TypeError(f"{type(op).__name__} has no structure query")
+        side = _branch(self, branch, kink_tol) if branch is not None else _no_branch
+        if kink_tol and branch is None:
+            _kink_tol(kink_tol)  # still checked without a branch
+        state = np.empty(self.shape, np.int8)
+        sign = np.empty(self.shape, np.int8)
+        coef = active = None
+        with self.lock, side:
+            count, size = _C.ws_units(self.ws)
+            labels = np.empty(self.shape, np.int64 if size > 2**31 - 1 else np.int32)
+            nreg = np.empty(count, np.int64)
+            nfixed = _C.ws_states(self.ws, state)
+            _C.ws_regions(self.ws, labels, sign, nreg)
+            if op._constraint:
+                coef = np.empty(self.shape, self.dtype)
+                active = np.empty(count, np.int8)
+                _C.ws_constraint(self.ws, coef, active)
+        if op._elementwise:  # one unit (none for an empty array), never a constraint
+            axis = None
+            nregions = np.array(nreg[0] if count else 0, np.int64)
+        else:
+            batch = op._batch_shape(self.shape, self.axis)
+            axis = None if isinstance(op, _ImageOperator) else self.axis % len(self.shape)
+            nregions = nreg.reshape(batch)
+            if active is not None:
+                active = active.astype(bool).reshape(batch)
+        w = None
+        if kind == "weighted":
+            n = self.shape[axis]
+            w = np.broadcast_to(op._weights.reshape([n if d == axis else 1 for d in range(len(self.shape))]),
+                                self.shape)
+        return Structure(kind, state, labels, sign, nregions, coef, active, int(nfixed), self.conj, axis,
+                         int(count), int(size), w)
+
+
+_STRUCT_KINDS = {0: None, 1: "projector", 2: "weighted", 3: "curved"}
+
+
+class Structure:
+    r"""The structure of the derivative at a kept point (since 1.0.2), from
+    :meth:`Context.structure`: the subspace $L = \operatorname{range} J$ of
+    the Jacobian $J = \partial z / \partial x$ that ``jvp`` and ``vjp``
+    apply there, per unit (the whole array for elementwise operators, each
+    row along the axis, each image or graph instance),
+
+    $$L = \{ d : d_i = 0 \text{ where not free},\ d_i = \sigma_i c_{\ell_i},\
+    a^\top d = 0 \text{ under an active constraint} \},$$
+
+    and what $J$ is on it (``kind``): ``"projector"``, $J = P_L$;
+    ``"weighted"``, the projector onto $L$ orthogonal in $\operatorname{diag}(w)$
+    (isotonic regression with unequal weights); ``"curved"``, $J$ maps onto
+    $L$ and is positive definite there (or a positive diagonal, for the
+    nonconvex maps). After ``prox_conj`` (``conj``) it describes the inner
+    prox at $y / \sigma$, whose Jacobian is $I - J$.
+
+    Fields, NumPy arrays: ``state`` (int8, x's shape: 0 free, 1 held at 0,
+    2 at a lower bound, 3 at an upper bound), ``labels`` (int32, or int64
+    when a unit has more than $2^{31} - 1$ entries; x's shape; regions numbered
+    0, 1, ... within each unit in the order of their first entries, -1
+    where not free, and -1 throughout a unit whose input holds a NaN),
+    ``sign`` (int8, x's shape; $\sigma_i = \pm 1$, 0 where not free),
+    ``nregions`` (int64, the batch shape, ``()`` for elementwise operators;
+    -1 for a unit holding a NaN), ``coef`` and ``active`` (the constraint
+    $a$, x's dtype and shape, and a bool per unit; ``None`` for operators
+    that never have one), ``nfixed`` (the entries not free) and ``conj``.
+    See docs/spec.md, Section 7, "Structure of the derivative"."""
+
+    __slots__ = ("kind", "state", "labels", "sign", "nregions", "coef", "active", "nfixed", "conj",
+                 "_axis", "_count", "_size", "_w", "_gl")
+
+    def __init__(self, kind, state, labels, sign, nregions, coef, active, nfixed, conj, axis, count,
+                 size, w):
+        self.kind, self.state, self.labels, self.sign = kind, state, labels, sign
+        self.nregions, self.coef, self.active = nregions, coef, active
+        self.nfixed, self.conj = nfixed, conj
+        self._axis, self._count, self._size, self._w = axis, count, size, w
+        self._gl = None
+
+    def __repr__(self) -> str:
+        return (f"Structure(kind={self.kind!r}, units={self._count}, size={self._size}, "
+                f"regions={int(self.offsets[-1])}, nfixed={self.nfixed}, conj={self.conj})")
+
+    # -- units: (count, size) views in each unit's own order ----------------
+    def _units(self, a):
+        if self._axis is not None:
+            a = np.moveaxis(a, self._axis, -1)
+        return a.reshape(self._count, self._size)
+
+    def _back(self, u):
+        shape, a = self.state.shape, self._axis
+        if a is None:
+            return u.reshape(shape)
+        return np.moveaxis(u.reshape(shape[:a] + shape[a + 1:] + (shape[a],)), -1, a)
+
+    @property
+    def offsets(self) -> np.ndarray:
+        """int64, count + 1: where each unit's regions start in the global
+        numbering (a unit holding a NaN has none)."""
+        # count units: an empty elementwise array has none, with nregions 0
+        k = np.maximum(np.asarray(self.nregions, np.int64).reshape(-1)[:self._count], 0)
+        out = np.zeros(k.size + 1, np.int64)
+        np.cumsum(k, out=out[1:])
+        return out
+
+    def global_labels(self) -> np.ndarray:
+        """int64, x's shape: ``offsets[unit] + label``, -1 where not free."""
+        if self._gl is None:
+            lab = self._units(self.labels).astype(np.int64)
+            gl = np.where(lab >= 0, lab + self.offsets[:-1, None], -1)
+            self._gl = self._back(gl)
+        return self._gl
+
+    def _free(self):
+        gl = self.global_labels()
+        free = gl >= 0
+        return gl, free
+
+    def reduce(self, v) -> np.ndarray:
+        r"""$M^\top v$: the signed sum of $v$ over each region, of length
+        ``offsets[-1]`` (float64)."""
+        v = np.asarray(v)
+        gl, free = self._free()
+        return np.bincount(gl[free], weights=(self.sign[free] * v[free]).astype(np.float64),
+                           minlength=int(self.offsets[-1]))
+
+    def expand(self, c) -> np.ndarray:
+        r"""$M c$: x's shape, $\sigma_i c_{\ell_i}$ on the free entries and 0
+        elsewhere (float64)."""
+        c = np.asarray(c, np.float64)
+        gl, free = self._free()
+        out = np.zeros(self.state.shape, np.float64)
+        out[free] = self.sign[free] * c[gl[free]]
+        return out
+
+    def project(self, v) -> np.ndarray:
+        r"""$P_L v$ (float64, x's shape), the orthogonal projector onto $L$, in
+        the metric $\operatorname{diag}(w)$ for ``"weighted"``: the signed
+        (weighted) region means, then, under an active constraint, the
+        component along $b = Q a$ removed, $Q v - (\langle b, Q v \rangle /
+        \langle b, b \rangle)\, b$ with $Q$ the projector onto
+        $\operatorname{span} M$. For a ``"projector"`` it is ``jvp`` itself."""
+        v = np.asarray(v, np.float64)
+        gl, free = self._free()
+        K = int(self.offsets[-1])
+        w = np.ones(self.state.shape) if self._w is None else self._w
+        cnt = np.bincount(gl[free], weights=w[free], minlength=K)
+        cnt[cnt == 0] = 1.0
+        q = self.expand(self.reduce(w * v) / cnt)
+        if self.active is None or not np.any(self.active):
+            return q
+        b = self._units(self.expand(self.reduce(self.coef) / cnt))
+        qu = self._units(q)
+        bb = np.einsum("ij,ij->i", b, b)
+        on = self.active.reshape(-1) & (bb > 0)
+        t = np.where(on, np.einsum("ij,ij->i", b, qu) / np.where(bb > 0, bb, 1.0), 0.0)
+        return self._back(qu - t[:, None] * b)
+
+    @property
+    def dim(self) -> np.ndarray:
+        r"""$\dim L$ per unit (int64, the batch shape): $K - 1$ under an
+        active constraint with $M^\top a \ne 0$, $K$ otherwise; -1 for a unit
+        holding a NaN."""
+        k = np.asarray(self.nregions, np.int64).copy()
+        if self.active is not None and np.any(self.active):
+            ma = self.reduce(self.coef)
+            off = self.offsets
+            nz = np.array([np.any(ma[off[u]:off[u + 1]] != 0) for u in range(self._count)])
+            k.reshape(-1)[self.active.reshape(-1) & nz] -= 1
+        return k
+
+    def matrix(self, unit=0) -> np.ndarray:
+        r"""$M$ of one unit (a flat index over the batch, in C order): dense,
+        size x K, $M_{i, \ell_i} = \sigma_i$ with the unit's entries in its
+        own order (along the axis for rows); for small problems and tests."""
+        unit = operator.index(unit)
+        if not -self._count <= unit < self._count:
+            raise IndexError(f"unit {unit} out of range for {self._count} units")
+        unit %= self._count
+        lab = self._units(self.labels)[unit]
+        sg = self._units(self.sign)[unit]
+        K = max(int(np.asarray(self.nregions).reshape(-1)[unit]), 0)
+        M = np.zeros((self._size, K))
+        i = np.nonzero(lab >= 0)[0]
+        M[i, lab[i]] = sg[i]
+        return M
 
 
 class _branch:
@@ -553,9 +749,16 @@ class Operator:
     _elementwise = False  # the C operator acts entry by entry (diagonal Jacobian)
     _iterative_deriv = False  # derivatives solve a linear system (isotropic TV)
     _image = False  # an iterative image operator: refine, and the exactness of its derivative
+    _constraint = False  # its structure can have a linear constraint (coef and active)
 
     def __init__(self, handle):
         self._op = handle
+
+    @property
+    def struct_kind(self):
+        """The kind of the structure of its derivative (since 1.0.2):
+        ``"projector"``, ``"weighted"`` or ``"curved"``; see :class:`Structure`."""
+        return _STRUCT_KINDS[_C.struct_kind(self._op)]
 
     @property
     def name(self) -> str:
@@ -987,6 +1190,8 @@ class SOC(Operator):
     $\{(t, y) : \lVert y \rVert_2 \le t\}$ along the axis, with $t$ the first entry
     (Beck, Example 6.37)."""
 
+    _constraint = True
+
     def __init__(self):
         super().__init__(_C.soc())
 
@@ -1052,6 +1257,8 @@ class L2Ball(Operator):
     r"""Projection onto $\lVert z \rVert_2 \le \mathrm{radius}$ along the axis.
     Parameters: radius."""
 
+    _constraint = True
+
     _layout = [("radius", 1, True)]
 
     def __init__(self, radius=1.0):
@@ -1063,6 +1270,8 @@ class Simplex(Operator):
     (Condat 2016).
     Parameters: radius."""
 
+    _constraint = True
+
     _layout = [("radius", 1, True)]
 
     def __init__(self, radius=1.0):
@@ -1072,6 +1281,8 @@ class Simplex(Operator):
 class L1Ball(Operator):
     r"""Projection onto $\sum_i w_i \lvert z_i \rvert \le \mathrm{radius}$ along the
     axis. Parameters: radius."""
+
+    _constraint = True
 
     _layout = [("radius", 1, True)]
 
@@ -1115,6 +1326,8 @@ class Hyperplane(Operator):
     the box as in Box (unbounded by default). Raises ValueError when the set
     is empty for the axis length. Parameters: b, a, lower, upper."""
 
+    _constraint = True
+
     _inequality = False
 
     def __init__(self, a=None, b=0.0, lower=-np.inf, upper=np.inf):
@@ -1151,6 +1364,7 @@ class Isotonic(Operator):
         super().__init__(_C.isotonic(w, bool(increasing)))
         self._layout = [] if w is None else [("weights", w.size, False)]
         self._metric = w is not None and bool(np.any(w != w.flat[0]))
+        self._weights = w  # the metric of its structure ("weighted")
 
     def prox_conj(self, y, sigma=1.0, **kwargs):
         self._check_conj()
@@ -1202,6 +1416,8 @@ class TV1DBall(Operator):
     r"""Projection onto $\{z : \sum_i w_i \lvert z_{i+1} - z_i \rvert \le \alpha\}$
     along the axis (Beck, Theorem 6.30): $x$ when inside, else the 1D TV prox at
     the step where the TV equals $\alpha$. Weights as in TV1D. Parameters: alpha, weights."""
+
+    _constraint = True
 
     def __init__(self, alpha=1.0, weights=None):
         w = _vec(weights)
@@ -1686,6 +1902,13 @@ class SpectralContext:
         """The inner prox call's certificate (ties on the spectrum)."""
         return self.inner.info
 
+    def structure(self, branch=None, kink_tol=0.0):
+        """Spectral operators have no structure query (since 1.0.2): their
+        structure lives in the clusters of the spectrum, which the
+        decomposition determines. Raises TypeError."""
+        raise TypeError(f"{type(self.op).__name__} has no structure query: use ctx.inner.structure() "
+                        "for the structure on the spectrum")
+
 
 class Spectral:
     r"""An operator on the singular values (``kind="svd"``) or the eigenvalues
@@ -1710,6 +1933,12 @@ class Spectral:
     """
 
     kind = "svd"  # the class's kind, read by the framework wrappers before building
+
+    @property
+    def struct_kind(self):
+        """None (since 1.0.2): spectral operators have no structure query
+        (:meth:`SpectralContext.structure`)."""
+        return None
 
     def __init__(self, op: Operator, kind="svd"):
         if kind not in _SPECTRAL_KINDS:

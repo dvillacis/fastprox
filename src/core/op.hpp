@@ -157,25 +157,41 @@ struct ImageCall {
 // regions' first entries; -1 where not FREE), its sign (0 where not FREE) and
 // its coefficient in the row's linear constraint (0 where not FREE, and in a
 // row without an active constraint); and whether the constraint is active.
+// state is always given; label, sign and coef are null when the query does
+// not ask for them, and constraint is false when it asks for neither coef nor
+// active, so that a hook skips what nobody reads (the performance gate: a
+// query costs at most one jvp).
 struct RowStruct {
     int8_t *state = nullptr;
     int64_t *label = nullptr;
     int8_t *sign = nullptr;
     double *coef = nullptr;
+    bool constraint = true;  // coef or active asked for
     bool active = false;
 };
+
+// Zero coefficients and no constraint.
+inline void no_constraint(RowStruct &s, int64_t n) noexcept {
+    if (s.coef) std::fill(s.coef, s.coef + n, 0.0);
+    s.active = false;
+}
 
 // Labels, signs and coefficients of a row whose regions are singletons, from
 // its states; no constraint. Returns the number of regions.
 inline int64_t singletons(RowStruct &s, int64_t n) noexcept {
     int64_t k = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        const bool free = s.state[i] == FP_ENTRY_FREE;
-        s.label[i] = free ? k++ : -1;
-        s.sign[i] = free;
-        s.coef[i] = 0.0;
+    if (s.label) {
+        for (int64_t i = 0; i < n; ++i) {
+            const bool free = s.state[i] == FP_ENTRY_FREE;
+            s.label[i] = free ? k : -1;
+            k += free;
+        }
+    } else {
+        for (int64_t i = 0; i < n; ++i) k += s.state[i] == FP_ENTRY_FREE;
     }
-    s.active = false;
+    if (s.sign)
+        for (int64_t i = 0; i < n; ++i) s.sign[i] = s.state[i] == FP_ENTRY_FREE;
+    no_constraint(s, n);
     return k;
 }
 
@@ -185,20 +201,21 @@ template <class In, class Sg>
 inline int64_t one_region(RowStruct &s, int64_t n, In in, Sg sg) noexcept {
     int64_t k = 0, shared = -1;
     for (int64_t i = 0; i < n; ++i) {
-        s.coef[i] = 0.0;
+        int64_t l = -1;
+        int8_t g = 0;
         if (s.state[i] != FP_ENTRY_FREE) {
-            s.label[i] = -1;
-            s.sign[i] = 0;
         } else if (in(i)) {
             if (shared < 0) shared = k++;
-            s.label[i] = shared;
-            s.sign[i] = static_cast<int8_t>(sg(i));
+            l = shared;
+            g = static_cast<int8_t>(sg(i));
         } else {
-            s.label[i] = k++;
-            s.sign[i] = 1;
+            l = k++;
+            g = 1;
         }
+        if (s.label) s.label[i] = l;
+        if (s.sign) s.sign[i] = g;
     }
-    s.active = false;
+    no_constraint(s, n);
     return k;
 }
 
@@ -208,13 +225,12 @@ template <class St>
 inline int64_t runs(RowStruct &s, int64_t n, St starts) noexcept {
     int64_t k = 0;
     for (int64_t i = 0; i < n; ++i) {
-        if (i == 0 || starts(i)) ++k;
-        s.state[i] = FP_ENTRY_FREE;
-        s.label[i] = k - 1;
-        s.sign[i] = 1;
-        s.coef[i] = 0.0;
+        k += i == 0 || starts(i);
+        if (s.label) s.label[i] = k - 1;
     }
-    s.active = false;
+    std::fill(s.state, s.state + n, int8_t{FP_ENTRY_FREE});
+    if (s.sign) std::fill(s.sign, s.sign + n, int8_t{1});
+    no_constraint(s, n);
     return k;
 }
 
@@ -1219,6 +1235,94 @@ template <class X>
 FP_COLD double safe_norm_slow(double S, int64_t n, X x, double &t) noexcept {
     safe_group_norms(n, 1, x, [](int64_t) { return int64_t{0}; }, &S, &t);
     return S;
+}
+
+// The power of two 2^-e that brings a > 0 to [1/2, 1) (2^1022 for a
+// subnormal a), as in safe_group_norms; 1 for 0, inf or NaN.
+inline double pow2_scale(double a) noexcept {
+    if (!(a > 0.0) || !(a <= std::numeric_limits<double>::max())) return 1.0;
+    int e;
+    std::frexp(a, &e);
+    return std::ldexp(1.0, std::min(-e, 1022));
+}
+
+// Group norms as safe_group_norms (nrm[g] = m_g, M[g] = t_g) and the dots
+// ud[g] = <u_g, v_g>, u_g = (t_g x_g) / m_g, of x(i) and v(i), i < n, in
+// group(i) < G; vm, xm and q are scratch of G each. <x_g, v_g> / m_g is used
+// where t_g = 1 and m_g max|v_i| is within 2^+-900, where no product x_i v_i
+// underflows beyond rounding or overflows; elsewhere the dot is redone on
+// x_g and v_g scaled by powers of two (found by fuzzing in 1.0.2: with x
+// and v near 1e-300, or 1e154, <x, v> left the range while ||x|| did not).
+template <class X, class V, class Gr>
+void group_unit_dots(int64_t n, int64_t G, X x, V v, Gr group, double *nrm, double *ud, double *M, double *vm,
+                     double *xm, double *q) noexcept {
+    for (int64_t g = 0; g < G; ++g) nrm[g] = ud[g] = vm[g] = xm[g] = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        const int64_t g = group(i);
+        const double xi = static_cast<double>(x(i)), vi = static_cast<double>(v(i));
+        nrm[g] += xi * xi;
+        ud[g] += xi * vi;
+        vm[g] = std::fmax(vm[g], std::fabs(vi));
+        xm[g] = std::fmax(xm[g], std::fabs(xi));
+    }
+    safe_group_norms(n, G, x, group, nrm, M);
+    bool slow = false;
+    for (int64_t g = 0; g < G; ++g) {
+        const double P = nrm[g] * vm[g];
+        if (M[g] == 1.0 && (vm[g] == 0.0 || (0x1p-900 <= P && P <= 0x1p900))) {
+            ud[g] /= nrm[g];
+            vm[g] = 0.0;  // done
+        } else {
+            xm[g] = pow2_scale(xm[g]);
+            vm[g] = pow2_scale(vm[g]);  // > 0: redo below
+            ud[g] = q[g] = 0.0;
+            slow = true;
+        }
+    }
+    if (!slow) return;
+    for (int64_t i = 0; i < n; ++i) {
+        const int64_t g = group(i);
+        if (vm[g] == 0.0) continue;
+        const double xi = static_cast<double>(x(i)) * xm[g];
+        q[g] += xi * xi;
+        ud[g] += xi * (static_cast<double>(v(i)) * vm[g]);
+    }
+    for (int64_t g = 0; g < G; ++g)
+        if (vm[g] != 0.0) ud[g] = ud[g] / std::sqrt(q[g]) / vm[g];
+}
+
+// <u, v>, u = x / ||x||, on x(k) and v(k), k < n, scaled by powers of two
+// (the slow path of unit_dot).
+template <class X, class V>
+FP_COLD double unit_dot_slow(int64_t n, X x, V v) noexcept {
+    double xm = 0.0, vm = 0.0;
+    for (int64_t k = 0; k < n; ++k) {
+        xm = std::fmax(xm, std::fabs(static_cast<double>(x(k))));
+        vm = std::fmax(vm, std::fabs(static_cast<double>(v(k))));
+    }
+    const double sx = pow2_scale(xm), sv = pow2_scale(vm);
+    double q = 0.0, d = 0.0;
+    for (int64_t k = 0; k < n; ++k) {
+        const double xi = static_cast<double>(x(k)) * sx;
+        q += xi * xi;
+        d += xi * (static_cast<double>(v(k)) * sv);
+    }
+    return d / std::sqrt(q) / sv;
+}
+
+// <u, v>, u = (t x) / m, for the norm ||x|| = m / t of safe_norm: the plain
+// <t x, v> / m unless t = 1 and m max|v_k| leaves 2^+-900, as for
+// group_unit_dots.
+template <class X, class V>
+double unit_dot(int64_t n, X x, V v, double m, double t) noexcept {
+    double d = 0.0, vm = 0.0;
+    for (int64_t k = 0; k < n; ++k) {
+        d += static_cast<double>(x(k)) * t * static_cast<double>(v(k));
+        vm = std::fmax(vm, std::fabs(static_cast<double>(v(k))));
+    }
+    const double P = m * vm;
+    if (t != 1.0 || vm == 0.0 || (0x1p-900 <= P && P <= 0x1p900)) return d / m;
+    return unit_dot_slow(n, x, v);
 }
 
 // The norm of x(k), k < n, as m / t from the plain sum of squares S, as

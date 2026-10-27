@@ -46,6 +46,57 @@ def test_homogeneous(name, k):
     np.testing.assert_allclose(opc.vjp(ctxc, dx)[0], op1.vjp(ctx1, dx)[0], rtol=1e-12, atol=1e-13)
 
 
+@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("k", [-1000, -600, 600])
+def test_tangents_at_the_scale_of_x(name, k):
+    """x and the tangent both scaled by c (fuzzing guarantee 1, 1.0.2): the
+    dots <x, dx> are of order c^2 and left the double range while ||x|| did
+    not, so the derivatives lost their term along u (by 27% at 1e-200, inf at
+    1e154). The derivatives are linear in the tangent: J(c x) (c dx) / c =
+    J(x) dx."""
+    rng = np.random.default_rng(5)
+    x = rng.standard_normal((5, 8))
+    dx = rng.standard_normal(x.shape)
+    c = 2.0 ** k
+    op1, opc = ops(1.0)[name], ops(c)[name]
+    _, ctx1 = op1.prox(x, keep=True)
+    _, ctxc = opc.prox(x * c, keep=True)
+    np.testing.assert_allclose(opc.jvp(ctxc, dx * c) / c, op1.jvp(ctx1, dx), rtol=1e-12, atol=1e-13)
+    np.testing.assert_allclose(opc.vjp(ctxc, dx * c)[0] / c, op1.vjp(ctx1, dx)[0], rtol=1e-12, atol=1e-13)
+
+
+def test_group_huber_subnormal_norm():
+    # On Huber's quadratic piece phi(s) = s / (1 + K): with a subnormal group
+    # norm phi(s) underflowed to 0 while phi'(s) did not, and the ratio
+    # phi(s) / s was taken as 0, so the derivative kept only the slope along u
+    # and the structure held the group at 0 (fuzzing guarantee 1, 1.0.2).
+    # J = I / (1 + K) there, as at a normal norm on the same piece.
+    op = fp.GroupHuber(1.0, 1e-5)
+    dx = np.array([0.7, -1.3])
+    _, ref = op.prox(np.array([3e-6, 4e-6]), keep=True)
+    _, ctx = op.prox(np.array([3e-320, 4e-320]), keep=True)
+    np.testing.assert_allclose(op.jvp(ctx, dx), op.jvp(ref, dx), rtol=1e-12)
+    np.testing.assert_allclose(op.vjp(ctx, dx)[0], op.vjp(ref, dx)[0], rtol=1e-12)
+    assert (ctx.structure().state == 0).all()  # FREE
+
+
+@pytest.mark.parametrize("k", [-960, 900])
+def test_l1_ball_tangent_scales(k):
+    # Weights down to 1e-24 of the largest: a_i dx_i was subnormal for dx near
+    # 1e-289 and the projection along a lost digits (fuzzing guarantee 1,
+    # 1.0.2). J is linear in the tangent: J (c dx) / c = J dx.
+    # The largest weight is off the support (x_0 = 0), so every a_i is near
+    # 1e-24 of it.
+    rng = np.random.default_rng(13)
+    w = np.r_[1.0, 1e-24 * rng.uniform(1, 3, 7)]
+    x = np.r_[0.0, rng.normal(size=7) / w[1:]]
+    op = fp.L1Ball(0.2 * np.sum(w * np.abs(x)), w)
+    _, ctx = op.prox(x, keep=True)
+    dx, c = rng.normal(size=8), 2.0**k
+    np.testing.assert_allclose(op.jvp(ctx, dx * c) / c, op.jvp(ctx, dx), rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(op.vjp(ctx, dx * c)[0] / c, op.vjp(ctx, dx)[0], rtol=1e-13, atol=1e-15)
+
+
 def test_reproducers():
     s2 = np.sqrt(2.0)
     np.testing.assert_allclose(fp.project_l2_ball(np.array([1e200, 1e200]), 1.0), [1 / s2] * 2, rtol=1e-15)

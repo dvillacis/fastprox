@@ -258,38 +258,61 @@ struct L2Ball final : RowOp<L2Ball> {
     static auto with_norm(const T *x, int64_t n, F f) noexcept {
         return fp::with_norm(sumsq(x, n), n, [x](int64_t i) { return x[i]; }, f);
     }
-    // f(m, t, <t x, v>) in one pass over x and v for the sums; the sum of
-    // squares has the bits of sumsq. When it is out of range the dot is
-    // redone on t x, out of line.
+    // f(m, t, <u, v>), u = x / ||x||, in one pass over x and v for the sums;
+    // the sum of squares has the bits of sumsq. The plain <x, v> / m is used
+    // when the sum of squares is in range and m max|v_i| is within 2^+-900,
+    // where no product x_i v_i underflows beyond rounding or overflows.
+    // Otherwise, out of line, the dot is redone on x and v scaled by powers of
+    // two (found by fuzzing guarantee 1 in 1.0.2: with x and v near 1e-200,
+    // or 1e154, ||x|| is a normal double, t = 1, and <x, v> left the range).
     template <class T, class F>
     static void with_norm_dot(const T *x, const T *v, int64_t n, F f) noexcept {
+        double sq[kLanes] = {}, dt[kLanes] = {}, vm[kLanes] = {};
+        int64_t i = 0;
+        for (; i + kLanes <= n; i += kLanes)
+            for (int64_t j = 0; j < kLanes; ++j) {
+                const double xi = static_cast<double>(x[i + j]), vi = static_cast<double>(v[i + j]);
+                sq[j] += xi * xi;
+                dt[j] += xi * vi;
+                vm[j] = std::fmax(vm[j], std::fabs(vi));
+            }
+        for (; i < n; ++i) {
+            const double xi = static_cast<double>(x[i]), vi = static_cast<double>(v[i]);
+            sq[0] += xi * xi;
+            dt[0] += xi * vi;
+            vm[0] = std::fmax(vm[0], std::fabs(vi));
+        }
+        const double S = fold(sq), D = fold(dt);
+        double vmax = 0.0;
+        for (double a : vm) vmax = std::fmax(vmax, a);
+        if (sumsq_in_range(S)) {
+            const double m = std::sqrt(S), P = m * vmax;
+            if (vmax == 0.0 || (0x1p-900 <= P && P <= 0x1p900)) return f(m, 1.0, D * (1.0 / m));
+        }
+        with_norm_dot_slow(x, v, n, S, vmax, f);
+    }
+    template <class T, class F>
+    FP_COLD static void with_norm_dot_slow(const T *x, const T *v, int64_t n, double S, double vmax, F f) noexcept {
+        double t;
+        const double m = safe_norm_slow(S, n, [x](int64_t i) { return x[i]; }, t);
+        double xmax = 0.0;
+        for (int64_t i = 0; i < n; ++i) xmax = std::fmax(xmax, std::fabs(static_cast<double>(x[i])));
+        const double sx = pow2_scale(xmax), sv = pow2_scale(vmax);
         double sq[kLanes] = {}, dt[kLanes] = {};
         int64_t i = 0;
         for (; i + kLanes <= n; i += kLanes)
             for (int64_t j = 0; j < kLanes; ++j) {
-                const double xi = static_cast<double>(x[i + j]);
+                const double xi = static_cast<double>(x[i + j]) * sx;
                 sq[j] += xi * xi;
-                dt[j] += xi * static_cast<double>(v[i + j]);
+                dt[j] += xi * (static_cast<double>(v[i + j]) * sv);
             }
         for (; i < n; ++i) {
-            const double xi = static_cast<double>(x[i]);
+            const double xi = static_cast<double>(x[i]) * sx;
             sq[0] += xi * xi;
-            dt[0] += xi * static_cast<double>(v[i]);
+            dt[0] += xi * (static_cast<double>(v[i]) * sv);
         }
-        const double S = fold(sq), D = fold(dt);
-        if (sumsq_in_range(S)) return f(std::sqrt(S), 1.0, D);
-        with_norm_dot_slow(x, v, n, S, f);
-    }
-    template <class T, class F>
-    FP_COLD static void with_norm_dot_slow(const T *x, const T *v, int64_t n, double S, F f) noexcept {
-        double t;
-        const double m = safe_norm_slow(S, n, [x](int64_t i) { return x[i]; }, t);
-        double acc[kLanes] = {};
-        int64_t i = 0;
-        for (; i + kLanes <= n; i += kLanes)
-            for (int64_t j = 0; j < kLanes; ++j) acc[j] += static_cast<double>(x[i + j]) * t * static_cast<double>(v[i + j]);
-        for (; i < n; ++i) acc[0] += static_cast<double>(x[i]) * t * static_cast<double>(v[i]);
-        f(m, t, fold(acc));
+        // An all-zero x gives 0 / 0: unused, since m = 0 is inside the ball.
+        f(m, t, fold(dt) / std::sqrt(fold(sq)) / sv);
     }
 
     bool has_value() const noexcept override { return true; }
@@ -319,9 +342,11 @@ struct L2Ball final : RowOp<L2Ball> {
                       void *) const noexcept {
         for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
         const int64_t k = singletons(s, n);
+        if (!s.constraint) return k;
         with_norm(x, n, [=, &s](double m, double t) {
             if (m <= r * t) return 0;
-            for (int64_t i = 0; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * t / m;
+            if (s.coef)
+                for (int64_t i = 0; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * t / m;
             s.active = true;
             return 0;
         });
@@ -336,7 +361,6 @@ struct L2Ball final : RowOp<L2Ball> {
                 return;
             }
             const double inv = 1.0 / m;
-            ud *= inv;
             const double c = r * t * inv, dr = dp ? dp[0] : 0.0;
             for (int64_t i = 0; i < n; ++i) {
                 const double ui = static_cast<double>(x[i]) * t * inv;
@@ -353,7 +377,6 @@ struct L2Ball final : RowOp<L2Ball> {
                 return;
             }
             const double inv = 1.0 / m;
-            ug *= inv;
             const double c = r * t * inv;
             for (int64_t i = 0; i < n; ++i)
                 gx[i] = static_cast<T>(c * (static_cast<double>(g[i]) - static_cast<double>(x[i]) * t * inv * ug));
@@ -423,8 +446,9 @@ struct Simplex final : RowOp<Simplex> {
                       void *) const noexcept {
         for (int64_t i = 0; i < n; ++i) s.state[i] = code[i] ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
         const int64_t k = singletons(s, n);
-        for (int64_t i = 0; i < n; ++i) s.coef[i] = code[i] ? 1.0 : 0.0;
-        s.active = k > 0;
+        if (s.coef)  // over singletons' zeros
+            for (int64_t i = 0; i < n; ++i) s.coef[i] = code[i] ? 1.0 : 0.0;
+        s.active = s.constraint && k > 0;
         return k;
     }
     // J = P_S - 1_S 1_S^T / |S|, dz/dr = 1_S / |S|.
@@ -589,13 +613,38 @@ struct L1Ball final : RowOp<L1Ball> {
         for (int64_t i = 0; i < n; ++i) s.state[i] = inside || code[i] ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
         const int64_t k = singletons(s, n);
         if (inside) return k;
-        for (int64_t i = 0; i < n; ++i)
-            s.coef[i] = code[i] ? std::copysign(wi(i) * scale, static_cast<double>(x[i])) : 0.0;
-        s.active = k > 0;
+        if (s.coef)
+            for (int64_t i = 0; i < n; ++i)
+                s.coef[i] = code[i] ? std::copysign(wi(i) * scale, static_cast<double>(x[i])) : 0.0;
+        s.active = s.constraint && k > 0;
         return k;
     }
     // Active: J = P_S - a a^T / W2 with a_i = s_i w_i, W2 = sum_S w_i^2;
     // dz/dr = a / W2.
+    // <a, v> / <a, a> over the support, a_i = sign(x_i) w_i, and <a, a> in
+    // w2: the plain sums while max |v_i| is in [2^-600, 2^900], where every
+    // a_i v_i is normal (w_i in [1e-100, 1]) and the sum finite; else on v
+    // scaled by a power of two (found by fuzzing guarantee 1 in 1.0.2: v near
+    // 1e-289 left a_i v_i subnormal). 0 without support.
+    template <class T>
+    double support_coef(const T *x, const uint8_t *code, const T *v, int64_t n, double &w2) const noexcept {
+        double dot = 0.0, vm = 0.0;
+        w2 = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            if (code[i]) {
+                const double a = std::copysign(wi(i), static_cast<double>(x[i])), vi = static_cast<double>(v[i]);
+                dot += a * vi;
+                w2 += wi(i) * wi(i);
+                vm = std::fmax(vm, std::fabs(vi));
+            }
+        if (!(w2 > 0)) return 0.0;
+        if (vm == 0.0 || (0x1p-600 <= vm && vm <= 0x1p900)) return dot / w2;
+        const double sv = pow2_scale(vm);
+        dot = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            if (code[i]) dot += std::copysign(wi(i), static_cast<double>(x[i])) * (static_cast<double>(v[i]) * sv);
+        return dot / w2 / sv;
+    }
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *code, const T *dx, T *dz, int64_t n, double,
              double, const double *dp, void *) const noexcept {
@@ -603,14 +652,9 @@ struct L1Ball final : RowOp<L1Ball> {
             for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
             return;
         }
-        double dot = 0.0, w2 = 0.0;
-        for (int64_t i = 0; i < n; ++i)
-            if (code[i]) {
-                const double a = std::copysign(wi(i), static_cast<double>(x[i]));
-                dot += a * static_cast<double>(dx[i]);
-                w2 += wi(i) * wi(i);
-            }
-        const double c = w2 > 0 ? (dot - (dp ? dp[0] / scale : 0.0)) / w2 : 0.0;
+        double w2;
+        const double cd = support_coef(x, code, dx, n, w2);
+        const double c = w2 > 0 ? cd - (dp ? dp[0] / scale : 0.0) / w2 : 0.0;
         for (int64_t i = 0; i < n; ++i) {
             if (code[i]) {
                 const double a = std::copysign(wi(i), static_cast<double>(x[i]));
@@ -627,14 +671,8 @@ struct L1Ball final : RowOp<L1Ball> {
             for (int64_t i = 0; i < n; ++i) gx[i] = g[i];
             return;
         }
-        double dot = 0.0, w2 = 0.0;
-        for (int64_t i = 0; i < n; ++i)
-            if (code[i]) {
-                const double a = std::copysign(wi(i), static_cast<double>(x[i]));
-                dot += a * static_cast<double>(g[i]);
-                w2 += wi(i) * wi(i);
-            }
-        const double c = w2 > 0 ? dot / w2 : 0.0;
+        double w2;
+        const double c = support_coef(x, code, g, n, w2);
         for (int64_t i = 0; i < n; ++i) {
             if (code[i]) {
                 const double a = std::copysign(wi(i), static_cast<double>(x[i]));

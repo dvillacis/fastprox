@@ -283,7 +283,8 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         const int64_t units = elem ? ceil_div(w.numel, kChunk) : w.rows;
         w.nblocks = reduction_blocks(units, P);
         w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
-        if (elem) w.block_counts.resize(static_cast<size_t>(3 * w.nblocks));
+        if (elem)  // the structure query's three counts per piece (elem_structure_driver)
+            w.block_counts.resize(static_cast<size_t>(3 * std::max<int64_t>(1, ceil_div(w.numel, elem_piece(w.numel, w.nthreads)))));
         if (!elem && op.struct_kind() != FP_STRUCT_NONE && w.numel > 0) {
             w.struct_thread_bytes = row_struct_bytes(w.n);
             w.struct_scratch.resize(mul_size(w.struct_thread_bytes, static_cast<size_t>(w.nthreads)) / sizeof(double) +
@@ -345,16 +346,28 @@ void copy_array(const Arr *src, const Arr &dst, double fill) noexcept {
     const int64_t i64 = integer ? static_cast<int64_t>(fill) : 0;  // fill may be NaN otherwise
     const int8_t i8 = static_cast<int8_t>(i64);
     const int32_t i32 = static_cast<int32_t>(i64);
-    const void *fv = dst.dtype == FP_F32   ? static_cast<const void *>(&f32)
-                     : dst.dtype == FP_I8  ? static_cast<const void *>(&i8)
-                     : dst.dtype == FP_I32 ? static_cast<const void *>(&i32)
-                     : dst.dtype == FP_I64 ? static_cast<const void *>(&i64)
-                                           : static_cast<const void *>(&fill);
+    if (!src) {  // a fill: one typed loop per run (since 1.0.2; the structure queries' zeros)
+        const int64_t s0 = p.stride[0][p.ndim - 1];
+        auto fill_runs = [&](auto v) {
+            using V = decltype(v);
+            p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
+                V *d = reinterpret_cast<V *>(dst.data) + off[0];
+                for (int64_t i = 0; i < len; ++i) d[i * s0] = v;
+            });
+        };
+        switch (dst.dtype) {
+        case FP_F32: fill_runs(f32); break;
+        case FP_I8: fill_runs(i8); break;
+        case FP_I32: fill_runs(i32); break;
+        case FP_I64: fill_runs(i64); break;
+        default: fill_runs(fill); break;
+        }
+        return;
+    }
     p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
         for (int64_t i = 0; i < len; ++i)
             std::memmove(dst.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item,
-                         src ? src->data + (off[1] + i * p.stride[1][p.ndim - 1]) * item : fv,
-                         static_cast<size_t>(item));
+                         src->data + (off[1] + i * p.stride[1][p.ndim - 1]) * item, static_cast<size_t>(item));
     });
 }
 
@@ -978,11 +991,12 @@ fp_status units_impl(const fp_workspace *ws, int64_t *count, int64_t *size) {
 
 // The structure of the kept point into the outputs given, each checked and
 // each may be null: per entry its state, label, sign and coefficient, per
-// unit its regions and constraint flag. Returns the entries not FREE. After
+// unit its regions and constraint flag. Returns the entries not FREE (only
+// counted with count: the other queries skip the pass). After
 // fp_prox_conj at sigma = 0 (ws.identity) the conjugate's Jacobian is I, so
 // the inner prox's, I - J, is 0: every entry ZERO, no regions.
 int64_t structure(const fp_workspace &ws, const Arr *st, const Arr *lab, const Arr *sg, const Arr *coef,
-                  int64_t *nregions, int8_t *active) {
+                  int64_t *nregions, int8_t *active, bool count = false) {
     const int64_t units = struct_units(ws);
     if (ws.numel == 0) return 0;
     if (ws.identity) {
@@ -1008,8 +1022,8 @@ int64_t structure(const fp_workspace &ws, const Arr *st, const Arr *lab, const A
     if (op.image_ndim())
         return f32 ? image_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active)
                    : image_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active);
-    return f32 ? row_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active)
-               : row_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active);
+    return f32 ? row_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active, count)
+               : row_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active, count);
 }
 
 fp_status states_impl(const fp_workspace *ws, fp_array *sa, int64_t *nfixed) {
@@ -1017,7 +1031,7 @@ fp_status states_impl(const fp_workspace *ws, fp_array *sa, int64_t *nfixed) {
     Arr st;
     if (sa)
         if (fp_status s = struct_out(*ws, sa, st, Dt::Int8)) return s;
-    const int64_t nf = structure(*ws, sa ? &st : nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    const int64_t nf = structure(*ws, sa ? &st : nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, true);
     if (nfixed) *nfixed = nf;
     return FP_OK;
 }
