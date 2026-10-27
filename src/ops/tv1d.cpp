@@ -363,6 +363,7 @@ void taut_string(const T *y, T *z, int64_t m, R edge_radius, uint8_t *code, void
 }
 
 struct TV1D final : RowOp<TV1D> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     Vec wpad;  // the weights followed by a zero: radius(m - 1) of the last piece reads it
     int64_t nw;  // number of weights (1 or n - 1)
     double wmax;
@@ -595,6 +596,12 @@ struct TV1D final : RowOp<TV1D> {
         }
     }
 
+    // Structure (since 1.0.2): every entry FREE, the segments as regions.
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        return runs(s, n, [code](int64_t i) { return code[i] != kSame; });
+    }
     template <class T>
     void jvp(const T *, const T *, const uint8_t *code, const T *dx, T *dz, int64_t n, double gamma,
              double dgamma, const double *dp, void *) const noexcept {

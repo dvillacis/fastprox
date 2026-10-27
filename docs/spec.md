@@ -638,7 +638,7 @@ so that L = {M c : c ∈ ℝᴷ, (Mᵀa)ᵀc = 0 when active}, with M the size �
 | Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights | stored (block starts) |
 | Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks with z ≠ 0, σ\_i = sign(x\_i) | — | PROJECTOR | stored; a re-sort, O(n log n) |
 | 1D TV (weighted) | FREE | the segments (an edge with a jump or a zero weight separates) | — | PROJECTOR | stored (edge codes) |
-| 1D TV ball | FREE | inside: singletons; on the sphere: the segments of the 1D TV prox at γ\* | on the sphere: a = Dᵀ(w ⊙ sign(Dz)), with sign 0 where there is no jump | PROJECTOR | stored |
+| 1D TV ball | FREE | inside: singletons; on the sphere: the segments of the 1D TV prox at γ\* | on the sphere: a = Dᵀ(w ⊙ sign(Dz)), with sign 0 where there is no jump (none when its segment means are all 0, as at α = 0) | PROJECTOR | stored |
 | 1D TV with ℓ2 of differences | FREE | dual strictly inside its ball: the pieces between zero weights; otherwise singletons | — | CURVED | stored (inside flag) |
 | Anisotropic TV (2D, 3D) | FREE | the regions of the saved structure | — | PROJECTOR | stored (`label`, `ncomp`) |
 | Isotropic TV (2D, 3D) | FREE | the flat regions of the derivative's region space | — | CURVED | stored (`label`, `ncomp`) |

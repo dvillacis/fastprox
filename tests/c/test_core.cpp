@@ -4539,7 +4539,7 @@ static void test_structure_elementwise() {
     {
         fp_op *op, *tv;
         CHECK_OK(fp_op_soft(1.0, nullptr, &op));
-        CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+        CHECK_OK(fp_op_tv_aniso(2, nullptr, &tv));
         int kind = -1;
         CHECK(fp_op_struct_kind(nullptr, &kind) == FP_EINVAL && fp_op_struct_kind(op, nullptr) == FP_EINVAL);
         Arr x({2, 3}, {0.5, 1.5, -2.5, 0.5, 1.5, -2.5}), z({2, 3});
@@ -4619,8 +4619,9 @@ static void test_structure_elementwise() {
 // The structure of a row operator at the kept point of ws (rows of n along
 // the last axis of x, R of them) against its Jacobian, guarantees 1 and 2 of
 // the spec: P_L from the structure (signed region means, then the
-// constraint's component removed); a projector's jvp is P_L, a curved map's
-// jvp maps into L and is positive definite on L. conj: after fp_prox_conj,
+// constraint's component removed); a projector's jvp is P_L, a weighted
+// one's is a projector onto L (J P_L = P_L, P_L J = J), a curved map's jvp
+// maps into L and is positive definite on L. conj: after fp_prox_conj,
 // whose jvp is I - J.
 static void check_row_structure(fp_op *op, int kind, fp_workspace *ws, const Arr &x, bool conj,
                                 const std::string &name) {
@@ -4709,6 +4710,19 @@ static void check_row_structure(fp_op *op, int kind, fp_workspace *ws, const Arr
         CHECK(ok);
         if (!ok) std::fprintf(stderr, "  %s: row %lld: J vs P_L %g, J off L %g\n", name.c_str(), static_cast<long long>(r), e1, e2);
     }
+    if (kind == FP_STRUCT_WEIGHTED) {
+        const Vec v = PL(randn(m)), Jv = J(v);
+        for (int64_t r = 0; r < R; ++r) {
+            double e = 0.0, nv = 0.0;
+            for (int64_t i = r * n; i < (r + 1) * n; ++i) {
+                e = std::max(e, std::fabs(Jv[i] - v[i]));
+                nv = std::max(nv, std::fabs(v[i]));
+            }
+            const bool ok = e <= 1e-12 * (1.0 + nv);
+            CHECK(ok);
+            if (!ok) std::fprintf(stderr, "  %s: row %lld: J P_L vs P_L %g\n", name.c_str(), static_cast<long long>(r), e);
+        }
+    }
     if (kind == FP_STRUCT_CURVED) {
         const Vec v = PL(randn(m)), Jv = J(v);
         for (int64_t r = 0; r < R; ++r) {
@@ -4722,6 +4736,14 @@ static void check_row_structure(fp_op *op, int kind, fp_workspace *ws, const Arr
             if (!ok) std::fprintf(stderr, "  %s: row %lld: v^T J v = %g, |v|^2 = %g\n", name.c_str(), static_cast<long long>(r), vjv, vv);
         }
     }
+}
+
+// Sorted l1 with n linearly decreasing weights from 0.5, so blocks pool.
+static fp_status sorted_l1_linear(int64_t n, fp_op **o) {
+    Vec w(static_cast<size_t>(n));
+    for (int64_t k = 0; k < n; ++k) w[static_cast<size_t>(k)] = 0.5 * static_cast<double>(n - k) / static_cast<double>(n);
+    fp_array a = {w.data(), FP_F64, 1, &n, nullptr, FP_DEVICE_CPU};
+    return fp_op_sorted_l1(&a, o);
 }
 
 static void test_structure_rows() {
@@ -4767,7 +4789,7 @@ static void test_structure_rows() {
         fp_workspace_free(ws);
         fp_op_free(op);
     }
-    CHECK(tested == 21);
+    CHECK(tested == 30);
 
     // The kinds of the spec's table.
     {
@@ -4781,7 +4803,11 @@ static void test_structure_rows() {
                  {[](fp_op **o) { return fp_op_l2_ball(1.0, o); }, FP_STRUCT_CURVED},
                  {[&](fp_op **o) { return fp_op_group_l2(1.0, 3, three, 2, nullptr, o); }, FP_STRUCT_CURVED},
                  {[](fp_op **o) { return fp_op_sum_largest(1.0, 2, 1, o); }, FP_STRUCT_PROJECTOR},
-                 {[](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, FP_STRUCT_NONE},
+                 {[](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, FP_STRUCT_CURVED},
+                 {[](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { const double w[3] = {2.0, 2.0, 2.0}; int64_t m = 3; fp_array a = {const_cast<double *>(w), FP_F64, 1, &m, nullptr, FP_DEVICE_CPU}; return fp_op_isotonic(&a, 1, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { const double w[3] = {1.0, 3.0, 1.0}; int64_t m = 3; fp_array a = {const_cast<double *>(w), FP_F64, 1, &m, nullptr, FP_DEVICE_CPU}; return fp_op_isotonic(&a, 1, o); }, FP_STRUCT_WEIGHTED},
                  {[](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }, FP_STRUCT_NONE},
              }) {
             fp_op *op;
@@ -4842,6 +4868,63 @@ static void test_structure_rows() {
         fp_op_free(op);
     }
 
+    // The ordered and 1D family by hand.
+    {
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        fp_op *op;
+        // Isotonic regression with weights (1, 3, 1) at (2, 1, 0): one block,
+        // the weighted mean, so J e_0 = 1/5 everywhere.
+        double wv[3] = {1.0, 3.0, 1.0};
+        int64_t three = 3;
+        fp_array wa = {wv, FP_F64, 1, &three, nullptr, FP_DEVICE_CPU};
+        CHECK_OK(fp_op_isotonic(&wa, 1, &op));
+        Arr x({1, 3}, {2.0, 1.0, 0.0}), z({1, 3}), e0({1, 3}, {1.0, 0.0, 0.0}), je({1, 3});
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int64_t> lab({1, 3}, FP_I64, 9);
+        int64_t nreg = -1;
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, nullptr, &nreg, 1));
+        CHECK(nreg == 1 && lab.data == (std::vector<int64_t>{0, 0, 0}));
+        CHECK_OK(fp_jvp(op, ws, &e0.a, 0.0, nullptr, &je.a));
+        CHECK(std::fabs(je.data[0] - 0.2) < 1e-15 && std::fabs(je.data[2] - 0.2) < 1e-15);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        // Sorted l1 with weights (2, 1, 0.5, 0) at (-1, 4, 3.5, 0): sorted
+        // |x| - w = (2, 2.5, 0.5, 0) pools entries 1 and 2; entry 0 alone;
+        // entry 3 at 0.
+        double sw[4] = {2.0, 1.0, 0.5, 0.0};
+        int64_t four = 4;
+        fp_array swa = {sw, FP_F64, 1, &four, nullptr, FP_DEVICE_CPU};
+        CHECK_OK(fp_op_sorted_l1(&swa, &op));
+        Arr y({1, 4}, {-1.0, 4.0, 3.5, 0.0}), yz({1, 4});
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &yz.a, &o, ws, nullptr));
+        IntArr<int32_t> l4({1, 4}, FP_I32, 9);
+        IntArr<int8_t> s4({1, 4}, FP_I8, 9), st4({1, 4}, FP_I8, 9);
+        CHECK_OK(fp_workspace_states(ws, &st4.a, nullptr));
+        CHECK_OK(fp_workspace_regions(ws, &l4.a, &s4.a, &nreg, 1));
+        CHECK(st4.data == (std::vector<int8_t>{FP_ENTRY_FREE, FP_ENTRY_FREE, FP_ENTRY_FREE, FP_ENTRY_ZERO}));
+        CHECK(nreg == 2 && l4.data == (std::vector<int32_t>{0, 1, 1, -1}) && s4.data == (std::vector<int8_t>{-1, 1, 1, 0}));
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, y, false, "sorted l1 by hand");
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        // The 1D TV ball of radius 2 at (0, 3, 3, 0): gamma* = 1, z = (1, 2, 2,
+        // 1), segments {0}, {1, 2}, {3}, and a = D^T sign(Dz) = (-1, 1, 1, -1).
+        CHECK_OK(fp_op_tv1d_ball(2.0, nullptr, &op));
+        Arr b({1, 4}, {0.0, 3.0, 3.0, 0.0}), bz({1, 4}), coef({1, 4});
+        CHECK_OK(fp_workspace_create(op, &b.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &b.a, &bz.a, &o, ws, nullptr));
+        int8_t active = 0;
+        CHECK_OK(fp_workspace_regions(ws, &l4.a, nullptr, &nreg, 1));
+        CHECK_OK(fp_workspace_constraint(ws, &coef.a, &active, 1));
+        CHECK(nreg == 3 && l4.data == (std::vector<int32_t>{0, 1, 1, 2}));
+        CHECK(active == 1 && coef.data == (Vec{-1.0, 1.0, 1.0, -1.0}));
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, b, false, "tv ball by hand");
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
     // Branch overrides read the overridden codes. The simplex at (1, 0, -0.5):
     // tau = 0, entry 1 at the threshold, off the support by default and on it
     // from above.
@@ -4886,9 +4969,15 @@ static void test_structure_rows() {
     // Rows along a strided axis, 1, 2 and 15 threads, transposed outputs: the
     // same as the contiguous problem of the transpose. A NaN row has -1
     // regions and no constraint; the others are unaffected.
-    for (int which = 0; which < 3; ++which) {
+    for (int which = 0; which < 5; ++which) {
         auto make = [which](fp_op **o) {
-            return which == 0 ? fp_op_simplex(1.0, o) : which == 1 ? fp_op_linf(0.8, o) : fp_op_sum_largest(0.7, 3, 1, o);
+            switch (which) {
+            case 0: return fp_op_simplex(1.0, o);
+            case 1: return fp_op_linf(0.8, o);
+            case 2: return fp_op_sum_largest(0.7, 3, 1, o);
+            case 3: return sorted_l1_linear(40, o);
+            default: return fp_op_tv1d_ball(3.0, nullptr, o);
+            }
         };
         const int64_t C = 40, Rr = 1500;  // rows of C along axis 0 of a (C, Rr) array
         Vec xt = randn(C * Rr), xc(static_cast<size_t>(C * Rr));
@@ -4933,9 +5022,11 @@ static void test_structure_rows() {
     }
 
     // No allocation with a workspace.
-    {
+    for (int which = 0; which < 3; ++which) {
         fp_op *op;
-        CHECK_OK(fp_op_sum_largest(0.5, 4, 1, &op));
+        CHECK_OK(which == 0   ? fp_op_sum_largest(0.5, 4, 1, &op)
+                 : which == 1 ? sorted_l1_linear(1000, &op)
+                              : fp_op_tv1d_ball(5.0, nullptr, &op));
         Arr x({64, 1000}, randn(64000)), z({64, 1000}), coef({64, 1000});
         IntArr<int8_t> st({64, 1000}, FP_I8), sg({64, 1000}, FP_I8);
         IntArr<int32_t> lab({64, 1000}, FP_I32);

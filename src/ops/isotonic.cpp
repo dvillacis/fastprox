@@ -28,6 +28,7 @@ namespace fp {
 namespace {
 
 struct Isotonic final : RowOp<Isotonic> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     Vec w;  // empty: unit weights; else the weights over 2^k
     int wk = 0;  // k
     bool increasing;
@@ -48,6 +49,8 @@ struct Isotonic final : RowOp<Isotonic> {
     // Euclidean conjugate's prox: W (y - P_C^W(y)) lies in the polar cone,
     // y - P_C^W(y) need not (math audit M2).
     bool conj_supported() const noexcept override { return euclidean; }
+    // Unequal weights average in the metric diag(w).
+    int struct_kind() const noexcept override { return euclidean ? FP_STRUCT_PROJECTOR : FP_STRUCT_WEIGHTED; }
     int64_t nparams() const noexcept override { return static_cast<int64_t>(w.size()); }
     fp_status check_n(int64_t n) const noexcept override {
         return (w.empty() || static_cast<int64_t>(w.size()) == n) ? FP_OK : FP_ESHAPE;
@@ -135,6 +138,13 @@ struct Isotonic final : RowOp<Isotonic> {
                 f(s, i);
                 s = i;
             }
+    }
+
+    // Structure (since 1.0.2): every entry FREE, the pooled blocks as regions.
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        return runs(s, n, [code](int64_t i) { return code[i] != 0; });
     }
 
     template <class T>

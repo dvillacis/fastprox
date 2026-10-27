@@ -35,6 +35,7 @@ namespace fp {
 namespace {
 
 struct SortedL1 final : RowOp<SortedL1> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     Vec w;  // nonincreasing, >= 0; one entry for all positions
     explicit SortedL1(Vec ww) : w(std::move(ww)) {}
 
@@ -130,6 +131,44 @@ struct SortedL1 final : RowOp<SortedL1> {
             }
     }
     static double sgn(double v) noexcept { return v > 0 ? 1.0 : (v < 0 ? -1.0 : 0.0); }
+
+    // Structure (since 1.0.2): ZERO on the block at 0, FREE on the others,
+    // each block a region with signs sign(x_i). The blocks come in sorted
+    // order: each takes the label of its first entry in row order, and the
+    // labels are then renumbered in that order (the scratch past the keys).
+    template <class T>
+    int64_t structure(const T *x, const T *z, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *scr) const noexcept {
+        for (int64_t i = 0; i < n; ++i) {
+            s.state[i] = FP_ENTRY_ZERO;
+            s.label[i] = -1;
+            s.sign[i] = 0;
+            s.coef[i] = 0.0;
+        }
+        s.active = false;
+        // label[i]: the smallest row position among the FREE entries of i's
+        // block, the block's key.
+        active_blocks(x, z, code, n, scr, [&](const Key *key, int64_t b, int64_t e) {
+            int64_t first = n;
+            for (int64_t k = b; k < e; ++k)
+                if (x[key[k].i] != 0) first = std::min(first, key[k].i);
+            for (int64_t k = b; k < e; ++k) {
+                const int64_t i = key[k].i;
+                const double v = static_cast<double>(x[i]);
+                if (v == 0.0) continue;  // sign 0: dz_i = 0 (not reached: such an entry is thresholded)
+                s.state[i] = FP_ENTRY_FREE;
+                s.label[i] = first;
+                s.sign[i] = v > 0 ? 1 : -1;
+            }
+        });
+        int64_t *map = reinterpret_cast<int64_t *>(static_cast<Key *>(scr) + n);
+        int64_t r = 0;
+        for (int64_t i = 0; i < n; ++i)
+            if (s.label[i] == i) map[i] = r++;
+        for (int64_t i = 0; i < n; ++i)
+            if (s.label[i] >= 0) s.label[i] = map[s.label[i]];
+        return r;
+    }
 
     template <class T>
     void jvp(const T *x, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n, double gamma,
