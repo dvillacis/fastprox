@@ -14,6 +14,8 @@ uv run --group examples python examples/tv_denoising.py   # with a plot (matplot
 | [tv_denoising.py](tv_denoising.py) | 1D TV denoising for a range of γ, and a batch of signals in one call |
 | [proximal_gradient.py](proximal_gradient.py) | FISTA for the lasso, and a batch of simplex-constrained least-squares problems |
 | [derivatives.py](derivatives.py) | JVP and VJP in x, γ and the parameters, checked against finite differences and for adjointness |
+| [bilevel_deblurring.py](bilevel_deblurring.py) | The structure of the derivative (1.0.2): the hypergradient of 1D TV deblurring from the fixed-point adjoint, from a reduced system with one unknown per segment (`s.reduce`/`s.expand`), and from finite differences, agreeing to 2·10⁻¹³ and 2·10⁻¹¹ |
+| [scd_newton_lasso.py](scd_newton_lasso.py) | SCD semismooth\* Newton steps (Gfrerer, Hubmer and Ramlau 2025, Algorithm 4.2) with P from `s.project` and W = I − P, for the lasso and 1D TV deblurring: the solution to rounding one step after the support or segments are found |
 | [bilevel_learning.py](bilevel_learning.py) | Learning γ, then one TV weight per edge, from clean/noisy pairs by gradients through the prox |
 | [image_denoising.py](image_denoising.py) | Isotropic and anisotropic TV of images (0.2): gap certificates, warm starts, a batch, and learning γ through the VJP of an iterative operator |
 | [group_sparsity.py](group_sparsity.py) | Lasso, group lasso, sparse group lasso, group MCP and SCAD (0.2) on grouped regression with λ chosen on a validation set, and hierarchical sparsity with tree-structured groups |

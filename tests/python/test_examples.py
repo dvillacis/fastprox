@@ -98,3 +98,19 @@ def test_every_example_is_listed():
     table = (DIR / "README.md").read_text(encoding="utf-8")
     missing = [p.name for p in EXAMPLES if f"| [{p.name}]({p.name}) |" not in table]
     assert not missing
+
+
+def test_bilevel_deblurring_agrees():
+    # The three hypergradients of examples/bilevel_deblurring.py (spec Section 7,
+    # "Examples as tests"): 1e-12 between the adjoint and the reduced system,
+    # 1e-9 against finite differences.
+    adjoint, reduced, fd = _load("bilevel_deblurring").main()
+    assert abs(reduced - adjoint) <= 1e-12 * abs(adjoint)
+    assert abs(fd - adjoint) <= 1e-9 * abs(adjoint)
+
+
+def test_scd_newton_converges():
+    # Each problem ends with Newton steps and converges in a few iterations.
+    for hist in _load("scd_newton_lasso").main():
+        assert len(hist) <= 12
+        assert hist[-1][3] is None and hist[-2][3] is True

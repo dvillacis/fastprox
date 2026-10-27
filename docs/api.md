@@ -801,6 +801,206 @@ sensitivities and diagnostics (kink masks, `ctx.deriv`); it cannot certify
 the hypergradient of an enclosing problem without information about that
 problem.
 
+### Structure of the derivative (*since 1.0.2*)
+
+The JVPs and VJPs apply the Jacobian $J = \partial z / \partial x$ of the
+prox at the kept point; the structure queries say what $J$ is built from:
+which entries are held fixed, which move together, and the one linear
+constraint some operators add. Two uses need it explicitly: reduced systems
+for implicit differentiation, with one unknown per region instead of one per
+entry, and the subspaces of SCD semismooth\* Newton steps (Gfrerer, Hubmer and
+Ramlau, *Inverse Problems* 41 (2025) 075002, Algorithm 3.8). The queries only
+describe; the reduced systems and the Newton steps stay in the caller's code
+([examples/bilevel_deblurring.py](https://github.com/dvillacis/fastprox/blob/master/examples/bilevel_deblurring.py),
+[examples/scd_newton_lasso.py](https://github.com/dvillacis/fastprox/blob/master/examples/scd_newton_lasso.py)).
+
+**The subspace $L$.** A *unit* is the part of the batch the operator solves
+as one problem: the whole array for elementwise maps, each row along the axis
+for row operators, each image for image TV (the last 2 or 3 axes), each graph
+instance for graph and tree TV (the last axis). On a unit of `size` entries
+the structure is
+- a **state** per entry: FREE (it moves with $x$), or held at 0 (ZERO), at
+  its lower bound (LOWER) or at its upper bound (UPPER);
+- a **region** per FREE entry, a label $\ell_i \in \{0, \dots, K - 1\}$:
+  entries with one label move together, a singleton region on its own;
+- a **sign** per FREE entry, $\sigma_i = \pm 1$, with which it follows its
+  region; $-1$ only where an operator ties entries by magnitude (sorted ℓ1,
+  ℓ∞, the sum of the $k$ largest absolute values);
+- at most one **linear constraint**, a vector $a$ and an active flag (the ℓ2
+  ball, the second-order cone, the simplex, the ℓ1 ball, the hyperplane and
+  half-space with a box, the 1D TV ball).
+
+These define
+
+$$L = \{\, d :\; d_i = 0 \text{ if } i \text{ is not FREE},\;\; d_i = \sigma_i c_{\ell_i} \text{ for some } c \in \mathbb{R}^K,\;\; a^\top d = 0 \text{ if the constraint is active} \,\},$$
+
+that is $L = \{M c : (M^\top a)^\top c = 0 \text{ when active}\}$, with $M$ the
+size × $K$ matrix $M_{i, \ell_i} = \sigma_i$. $\dim L$ is $K - 1$ under an
+active constraint with $M^\top a \ne 0$, and $K$ otherwise.
+
+**What is guaranteed.** With $J$ the Jacobian in $x$ that `fp_jvp` and
+`fp_vjp` apply now (the default piece, or the one set by
+`fp_workspace_set_branch`):
+1. **Range:** $\operatorname{range} J = L$, every direction of $L$ reached.
+   For the convex operators $J$ is symmetric, so its kernel is $L^\perp$.
+2. **Form,** by the operator's kind (`fp_op_struct_kind`, `op.struct_kind`):
+   - PROJECTOR: $J = P_L$, the orthogonal projector onto $L$. Every
+     polyhedral operator: $J$ averages $\sigma_i\,dx_i$ over each region,
+     and an active constraint removes the component along $P_M a$.
+   - WEIGHTED: the projector onto $L$ orthogonal in $\operatorname{diag}(w)$;
+     only isotonic regression with unequal weights.
+   - CURVED: $\operatorname{range} J = L$, but $J$ is not a projector. On
+     $L$ it is symmetric positive definite (the convex operators with
+     curvature) or a positive diagonal (SCAD, MCP, ℓq, the log penalty).
+     Apply it with `fp_jvp`.
+   - NONE: no queries (the spectral operators, which are not `fp_op`s).
+3. **Parameters:** the derivatives in $\gamma$ and $\theta$ keep the states,
+   regions and signs (fixed entries stay, tied entries move together), but
+   not the constraint: a change of radius, $\alpha$ or $b$ moves its level.
+4. **Determinism:** the same outputs for any thread count and any strides of
+   $x$ and the outputs.
+
+**SCD subspaces.** At $z = \operatorname{prox}_{\gamma g}(x)$ with
+$v = (x - z)/\gamma$, the subspace $\operatorname{rge}(J, (I - J)/\gamma)$
+belongs to the SC derivative of $\partial g$ at $(z, v)$ for convex $g$
+(Gfrerer and Outrata, arXiv:2106.00519, Proposition 3.26), and within the step
+conditions for the prox-regular SCAD, MCP and log penalty. In the $(P, W)$
+form of Gfrerer, Hubmer and Ramlau (Definition 3.6) it is
+
+$$P = P_L, \qquad W = (I - P) + P\,(J_L^{-1} - I)\,P / \gamma,$$
+
+with $J_L$ the restriction of $J$ to $L$. For PROJECTOR operators $J_L = I$,
+so $W = I - P$: the structure alone gives the subspace. For CURVED operators
+$W$'s block on $L$ needs $J$, through `fp_jvp` (CG on $J_L y = s$). After
+`fp_prox_conj` the queries describe the inner prox at $y/\sigma$, whose
+Jacobian $J$ gives the conjugate's $I - J$: for a PROJECTOR operator the
+conjugate's subspace is $L^\perp$.
+
+**Operator by operator.** Constraint: $a$ when active.
+
+| Operator | States | Regions, signs | Constraint | Kind |
+| --- | --- | --- | --- | --- |
+| Soft thresholding, ℓ0 | ZERO where thresholded (ℓ0: the zero branch of `tie`), FREE | singletons | — | PROJECTOR |
+| Elastic net, ℓq, log penalty, SCAD, MCP | ZERO where thresholded, FREE | singletons | — | CURVED |
+| Huber, log barrier | FREE | singletons | — | CURVED |
+| Box, orthant, ℓ1 over a box | LOWER, UPPER (and ZERO for ℓ1 over a box), FREE | singletons | — | PROJECTOR |
+| Group ℓ2, group Huber, SCAD and MCP, tree groups, sparse group lasso | ZERO on the entries set to 0, FREE | singletons | — | CURVED |
+| ℓ2 ball | FREE | singletons | outside: $x/\lVert x\rVert$ | CURVED |
+| Second-order cone ($t$ first) | ZERO in the polar cone, FREE | singletons | on the boundary: $(-1, y/\lVert y\rVert)$ | CURVED |
+| Simplex | FREE on the support, ZERO off it | singletons | $1$ on the support | PROJECTOR |
+| ℓ1 ball | inside: FREE; projected: FREE on the support, ZERO off it | singletons | projected: $w_i \operatorname{sign}(x_i)$ on the support | PROJECTOR |
+| ℓ∞ norm | FREE (ZERO when $z = 0$) | the clipped set, $\sigma_i = \operatorname{sign}(x_i)$; singletons | — | PROJECTOR |
+| Maximum, sum of the $k$ largest | FREE (absolute values with the sum constraint inactive: ZERO at the level) | the entries at the shared level (signed for absolute values); singletons | — | PROJECTOR |
+| Hyperplane, half-space, with a box | LOWER, UPPER on the bounds, FREE | singletons | the hyperplane, and the half-space when active: $a_i$ on the FREE entries | PROJECTOR |
+| Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights |
+| Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks, $\sigma_i = \operatorname{sign}(x_i)$ | — | PROJECTOR |
+| 1D TV | FREE | the segments | — | PROJECTOR |
+| 1D TV ball | FREE | inside: singletons; on the sphere: the segments | on the sphere: $D^\top(w \odot \operatorname{sign}(Dz))$ | PROJECTOR |
+| 1D TV with ℓ2 of differences | FREE | dual inside its ball: the pieces between zero weights; else singletons | — | CURVED |
+| Anisotropic TV, graph TV, tree TV | FREE | the regions | — | PROJECTOR |
+| Isotropic TV | FREE | the flat regions | — | CURVED |
+
+A constraint whose coefficients are all 0 on the FREE entries is reported
+inactive (the empty simplex support at $r = 0$, the TV ball at $\alpha = 0$).
+
+**Numbering.** Labels are local to each unit and canonical: 0, 1, 2, … in the
+order of each region's first entry, in the unit's own order (along the axis
+for rows, C order over the image axes, node order for graphs, C order for
+elementwise maps), and −1 where the entry is not FREE. They are int32 or
+int64, as the caller chooses; int32 returns `FP_ESHAPE` for a unit of more than
+$2^{31} - 1$ entries. A global numbering across the batch is the offsets of
+the per-unit counts (Python: `s.offsets`, `s.global_labels()`).
+
+**Edge cases.**
+- **Kinks:** the queries describe the piece the derivatives use now. After
+  `fp_workspace_set_branch` they read the overridden piece (side −1 at the
+  tail of a 1D TV kink edge joins two segments; +1 at a simplex threshold
+  makes the entry FREE); clearing the override restores the default.
+- **The identity case** ($\gamma = 0$, a zero weight everywhere): every entry
+  FREE and its own region, no constraint.
+- **`fp_prox_conj` at $\sigma = 0$** ($J_{\text{conj}} = I$): the inner $J$
+  is 0, so every entry is ZERO, with no regions and no constraint.
+- **NaN:** a unit whose input holds a NaN has −1 regions, labels −1, states
+  FREE, signs 0 and no constraint (its derivatives are NaN too). For
+  elementwise maps, whose entries are independent, only the NaN entries are
+  marked so, and they count neither as regions nor as fixed entries.
+- **Iterative image operators** describe the saved point, as the derivatives
+  do: the solution's only when `ctx.deriv.exact`; after `fp_workspace_refine`,
+  the refined point.
+- **Empty arrays:** no units, nothing written, `FP_OK`.
+
+**C API.**
+
+```c
+typedef enum { FP_ENTRY_FREE = 0, FP_ENTRY_ZERO = 1, FP_ENTRY_LOWER = 2,
+               FP_ENTRY_UPPER = 3 } fp_entry_state;
+typedef enum { FP_STRUCT_NONE = 0, FP_STRUCT_PROJECTOR = 1, FP_STRUCT_WEIGHTED = 2,
+               FP_STRUCT_CURVED = 3 } fp_struct_kind;
+
+fp_status fp_op_struct_kind(const fp_op *op, int *kind);
+fp_status fp_workspace_units(const fp_workspace *ws, int64_t *count, int64_t *size);
+fp_status fp_workspace_states(const fp_workspace *ws, fp_array *state, int64_t *nfixed);
+fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, fp_array *sign,
+                               int64_t *nregions, int64_t count);
+fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef,
+                                  int8_t *active, int64_t count);
+```
+
+- `fp_workspace_units`: the number of units and the entries in each.
+- `fp_workspace_states`: per entry an `fp_entry_state` (`FP_I8`, the shape of
+  $x$, any strides) and the number of entries not FREE.
+- `fp_workspace_regions`: per entry the label (`FP_I32` or `FP_I64`) and the
+  sign (`FP_I8`: ±1, 0 where not FREE), both of $x$'s shape; per unit the
+  number of regions, `count` contiguous int64 in the order of the units (C
+  order over the dimensions other than the axis for rows, over the leading
+  dimensions for images and graphs).
+- `fp_workspace_constraint`: per unit the active flag (`count` contiguous
+  int8) and per entry the coefficient (the dtype and shape of $x$; 0 where not
+  FREE and in units without an active constraint). Operators that never have
+  a constraint write zeros.
+- Any output may be NULL. **Errors:** `FP_EINVAL` without a kept point, for
+  kind NONE and on a device workspace; `FP_EDTYPE` for states or signs not
+  `FP_I8`, labels not `FP_I32` or `FP_I64`, or coefficients not of $x$'s dtype;
+  `FP_ESHAPE` for an array not of $x$'s shape, a `count` that is not the
+  number of units, or int32 labels too narrow. Every argument is checked
+  before anything is written.
+- **Cost:** O(size) per unit (O(n log n) per row for sorted ℓ1), parallel
+  over units on the workspace's threads, without allocation once the
+  workspace exists. A query costs at most one `fp_jvp`, except the simplex's,
+  up to about twice its jvp of two vector passes per row. As for the other
+  workspace calls, no two may overlap on one workspace.
+
+**Python.** `ctx.structure(branch=None, kink_tol=0.0)` returns an
+`fp.Structure`, read under the context's lock; `branch` and `kink_tol` as in
+`jvp` give the structure of that piece. `op.struct_kind` is `"projector"`,
+`"weighted"`, `"curved"`, or None for the spectral operators, whose
+`structure` raises `TypeError`.
+
+```python
+op = fp.TV1D()
+z, ctx = op.prox(x, gamma, keep=True)
+s = ctx.structure()
+s.kind                   # "projector"
+s.state, s.labels, s.sign, s.nregions, s.nfixed
+s.coef, s.active         # None for operators that never have a constraint
+s.conj                   # True after prox_conj: s describes the inner prox
+s.offsets                # int64, units + 1: where each unit's regions start
+s.global_labels()        # int64, x's shape: offsets[unit] + label, -1 where not free
+s.reduce(v)              # M^T v: the signed sum of v over each region
+s.expand(c)              # M c, x's shape (0 where not free)
+s.project(v)             # P_L v (in diag(w) for "weighted"); equals jvp for "projector"
+s.dim                    # dim L per unit
+s.matrix(unit)           # M of one unit, dense (size x K)
+
+# The reduced adjoint of an outer least-squares problem with forward map A:
+# M^T A^T A M y = M^T g, one unknown per region (examples/bilevel_deblurring.py).
+apply = lambda c: s.reduce(A.T @ (A @ s.expand(c)))
+```
+
+`state` and `sign` are int8, `labels` int32 (int64 when a unit has more than
+$2^{31} - 1$ entries), all of $x$'s shape; `nregions` and `active` have the
+batch shape (`()` for elementwise operators). The helpers use NumPy only.
+
 ### Inexact proxes inside outer solvers (*since 1.0*)
 
 The iterative operators (`TVAniso`, `TVIso`, `GraphTV` and the device-native
@@ -1057,7 +1257,7 @@ exceeds the remaining error.
 ```c
 typedef struct {
     void          *data;
-    fp_dtype       dtype;    /* FP_F32 or FP_F64 */
+    fp_dtype       dtype;    /* FP_F32 or FP_F64; FP_I8, FP_I32, FP_I64 only where noted */
     int            ndim;     /* 0 (scalar) to FP_MAX_NDIM */
     const int64_t *shape;
     const int64_t *strides;  /* in elements, may be negative; NULL = C order */
@@ -1387,7 +1587,9 @@ with any later 1.y library without being rebuilt:
 - New functions, operators and enumerators may be added, such as new
   `fp_device` values for the GPU backend. A program that uses one needs
   the release that added it: check `FP_VERSION_MINOR` when building, or
-  `fp_version_string()` at run time.
+  `fp_version_string()` at run time. A patch release may add too (1.0.2
+  added the structure queries, `FP_I32`, `FP_I64` and their enums), so check
+  `FP_VERSION_PATCH` as well for those.
 
 `FP_ABI_VERSION` and `fp_abi_version()` give the major version, which is
 also the soname's (`libfastprox.so.1`). Only a release that breaks the ABI
