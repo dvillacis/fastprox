@@ -51,13 +51,20 @@ int enum_bits(const E &e) noexcept {
     return v;
 }
 
+// The dtypes an array may have: float32 and float64 (data), int8 (the kink,
+// branch, state and sign arrays), int32 and int64 (the labels of the
+// structure queries, since 1.0.2).
+enum class Dt { Float, Int8, Label };
+
 // Converts and validates a public descriptor. Scalars become shape [1].
-// int8: true for the kink and branch arrays, the only ones of that dtype.
-fp_status to_arr(const fp_array *a, Arr &out, bool int8 = false) noexcept {
+fp_status to_arr(const fp_array *a, Arr &out, Dt kind = Dt::Float) noexcept {
     if (!a) return FP_EINVAL;
     if (enum_bits(a->device) != FP_DEVICE_CPU) return FP_EINVAL;
     const int dt = enum_bits(a->dtype);
-    if (int8 ? dt != FP_I8 : (dt != FP_F32 && dt != FP_F64)) return FP_EDTYPE;
+    const bool ok = kind == Dt::Int8    ? dt == FP_I8
+                    : kind == Dt::Label ? dt == FP_I32 || dt == FP_I64
+                                        : dt == FP_F32 || dt == FP_F64;
+    if (!ok) return FP_EDTYPE;
     if (a->ndim < 0 || a->ndim > FP_MAX_NDIM) return FP_ESHAPE;
     out.data = static_cast<char *>(a->data);
     out.dtype = static_cast<fp_dtype>(dt);
@@ -270,6 +277,7 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         const int64_t units = elem ? ceil_div(w.numel, kChunk) : w.rows;
         w.nblocks = reduction_blocks(units, P);
         w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
+        if (elem) w.block_counts.resize(static_cast<size_t>(3 * w.nblocks));
         w.tot.resize(static_cast<size_t>(P + 2));
         w.dparams.resize(static_cast<size_t>(P) + 1);
         w.steps.resize(static_cast<size_t>(w.rows) + 1);
@@ -313,7 +321,8 @@ fp_status step_ok(const fp_op &op, double g) noexcept {
 }
 
 // dst = src entry by entry through both arrays' strides, or every entry of
-// dst = fill (FP_I8: 0) when src is null. memmove: dst may alias src exactly.
+// dst = fill when src is null (an integer for the integer dtypes). memmove:
+// dst may alias src exactly.
 void copy_array(const Arr *src, const Arr &dst, double fill) noexcept {
     if (dst.numel() == 0) return;  // for_runs divides by every extent
     const int64_t *st[2] = {dst.strides, src ? src->strides : dst.strides};
@@ -321,10 +330,15 @@ void copy_array(const Arr *src, const Arr &dst, double fill) noexcept {
     // Byte offsets stay signed: strides may be negative.
     const int64_t item = static_cast<int64_t>(dst.itemsize());
     const float f32 = static_cast<float>(fill);
-    const int8_t i8 = 0;
-    const void *fv = dst.dtype == FP_F32 ? static_cast<const void *>(&f32)
-                     : dst.dtype == FP_I8 ? static_cast<const void *>(&i8)
-                                          : static_cast<const void *>(&fill);
+    const bool integer = dst.dtype == FP_I8 || dst.dtype == FP_I32 || dst.dtype == FP_I64;
+    const int64_t i64 = integer ? static_cast<int64_t>(fill) : 0;  // fill may be NaN otherwise
+    const int8_t i8 = static_cast<int8_t>(i64);
+    const int32_t i32 = static_cast<int32_t>(i64);
+    const void *fv = dst.dtype == FP_F32   ? static_cast<const void *>(&f32)
+                     : dst.dtype == FP_I8  ? static_cast<const void *>(&i8)
+                     : dst.dtype == FP_I32 ? static_cast<const void *>(&i32)
+                     : dst.dtype == FP_I64 ? static_cast<const void *>(&i64)
+                                           : static_cast<const void *>(&fill);
     p.for_runs(0, p.numel, [&](const int64_t *off, int64_t len, int64_t, int64_t, int64_t) {
         for (int64_t i = 0; i < len; ++i)
             std::memmove(dst.data + (off[0] + i * p.stride[0][p.ndim - 1]) * item,
@@ -675,7 +689,7 @@ fp_status kink_arrays(const fp_workspace *ws, const fp_array *aa, Arr *a, bool b
     if (branch && !ws->op->has_branches()) return FP_EINVAL;
     if (!ws->valid) return FP_EINVAL;
     if (!aa) return FP_OK;
-    if (fp_status s = to_arr(aa, *a, true)) return s;
+    if (fp_status s = to_arr(aa, *a, Dt::Int8)) return s;
     if (a->ndim != ws->ndim) return FP_ESHAPE;
     const int64_t sites = ws->op->kink_sites();  // tree TV: (..., m) rather than x's shape
     for (int d = 0; d < a->ndim; ++d)
@@ -912,6 +926,106 @@ fp_status set_branch_impl(fp_workspace *ws, const fp_array *sa, double tol) {
     });
     ws->branch_on = true;
     ws->branch_tol = tol;
+    return FP_OK;
+}
+
+// ---- structure of the derivative (since 1.0.2) ------------------------------
+
+// The queries need a kept point of an operator with a structure kind, on the
+// CPU.
+fp_status struct_ws(const fp_workspace *ws) noexcept {
+    if (!ws || !ws->op || !ws->keep || !ws->valid) return FP_EINVAL;
+    if (ws->device != FP_DEVICE_CPU || ws->op->struct_kind() == FP_STRUCT_NONE) return FP_EINVAL;
+    return FP_OK;
+}
+
+// The units of the kept point: the whole array for elementwise operators,
+// each row or image otherwise; none for an empty array.
+int64_t struct_units(const fp_workspace &ws) noexcept {
+    if (ws.numel == 0) return 0;
+    return ws.op->elementwise() ? 1 : ws.rows;
+}
+int64_t struct_size(const fp_workspace &ws) noexcept { return ws.op->elementwise() ? ws.numel : ws.n; }
+
+// An output array of the queries: x's shape, of the dtype class kind (Float:
+// x's dtype), writable.
+fp_status struct_out(const fp_workspace &ws, const fp_array *a, Arr &out, Dt kind) noexcept {
+    if (fp_status s = to_arr(a, out, kind)) return s;
+    if (kind == Dt::Float && out.dtype != ws.dtype) return FP_EDTYPE;
+    if (out.ndim != ws.ndim) return FP_ESHAPE;
+    for (int d = 0; d < out.ndim; ++d)
+        if (out.shape[d] != ws.shape[d]) return FP_ESHAPE;
+    return check_output(nullptr, out);
+}
+
+fp_status units_impl(const fp_workspace *ws, int64_t *count, int64_t *size) {
+    if (fp_status s = struct_ws(ws)) return s;
+    if (count) *count = struct_units(*ws);
+    if (size) *size = struct_size(*ws);
+    return FP_OK;
+}
+
+// After fp_prox_conj at sigma = 0 (ws->identity) the conjugate's Jacobian is
+// I, so the inner prox's, I - J, is 0: every entry ZERO, no regions.
+fp_status states_impl(const fp_workspace *ws, fp_array *sa, int64_t *nfixed) {
+    if (fp_status s = struct_ws(ws)) return s;
+    Arr st;
+    if (sa)
+        if (fp_status s = struct_out(*ws, sa, st, Dt::Int8)) return s;
+    const Arr *sp = sa ? &st : nullptr;
+    int64_t nf = 0;
+    if (ws->numel == 0) {
+    } else if (ws->identity) {
+        if (sp) copy_array(nullptr, *sp, FP_ENTRY_ZERO);
+        nf = ws->numel;
+    } else if (ws->op->elementwise()) {
+        if (ws->dtype == FP_F32) elem_structure_driver<float>(*ws->op, *ws, sp, nullptr, nullptr, &nf);
+        else elem_structure_driver<double>(*ws->op, *ws, sp, nullptr, nullptr, &nf);
+    } else {
+        return FP_EINVAL;  // no row or image operator has a structure kind yet
+    }
+    if (nfixed) *nfixed = nf;
+    return FP_OK;
+}
+
+fp_status regions_impl(const fp_workspace *ws, fp_array *la, fp_array *ga, int64_t *nregions, int64_t count) {
+    if (fp_status s = struct_ws(ws)) return s;
+    const int64_t units = struct_units(*ws);
+    if (nregions && count != units) return FP_ESHAPE;
+    Arr lab, sg;
+    if (la) {
+        if (fp_status s = struct_out(*ws, la, lab, Dt::Label)) return s;
+        if (lab.dtype == FP_I32 && struct_size(*ws) > std::numeric_limits<int32_t>::max()) return FP_ESHAPE;
+    }
+    if (ga)
+        if (fp_status s = struct_out(*ws, ga, sg, Dt::Int8)) return s;
+    const Arr *lp = la ? &lab : nullptr, *gp = ga ? &sg : nullptr;
+    if (ws->numel == 0) return FP_OK;
+    if (ws->identity) {
+        if (lp) copy_array(nullptr, *lp, -1.0);
+        if (gp) copy_array(nullptr, *gp, 0.0);
+        if (nregions) std::fill(nregions, nregions + units, int64_t{0});
+        return FP_OK;
+    }
+    if (!ws->op->elementwise()) return FP_EINVAL;  // no row or image operator has a structure kind yet
+    const int64_t r = ws->dtype == FP_F32 ? elem_structure_driver<float>(*ws->op, *ws, nullptr, lp, gp, nullptr)
+                                          : elem_structure_driver<double>(*ws->op, *ws, nullptr, lp, gp, nullptr);
+    if (nregions) nregions[0] = r;
+    return FP_OK;
+}
+
+// No elementwise operator has a constraint.
+fp_status constraint_impl(const fp_workspace *ws, fp_array *ca, int8_t *active, int64_t count) {
+    if (fp_status s = struct_ws(ws)) return s;
+    const int64_t units = struct_units(*ws);
+    if (active && count != units) return FP_ESHAPE;
+    Arr c;
+    if (ca)
+        if (fp_status s = struct_out(*ws, ca, c, Dt::Float)) return s;
+    if (ws->numel == 0) return FP_OK;
+    if (!ws->identity && !ws->op->elementwise()) return FP_EINVAL;  // no row or image operator has a structure kind yet
+    if (ca) copy_array(nullptr, c, 0.0);
+    if (active) std::fill(active, active + units, int8_t{0});
     return FP_OK;
 }
 
@@ -1502,6 +1616,30 @@ FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array
 
 FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol) {
     return guard([&] { return fp::set_branch_impl(ws, side, tol); });
+}
+
+FP_API fp_status fp_op_struct_kind(const fp_op *op, int *kind) {
+    if (!op || !kind) return FP_EINVAL;
+    *kind = op->struct_kind();
+    return FP_OK;
+}
+
+FP_API fp_status fp_workspace_units(const fp_workspace *ws, int64_t *count, int64_t *size) {
+    return guard([&] { return fp::units_impl(ws, count, size); });
+}
+
+FP_API fp_status fp_workspace_states(const fp_workspace *ws, fp_array *state, int64_t *nfixed) {
+    return guard([&] { return fp::states_impl(ws, state, nfixed); });
+}
+
+FP_API fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, fp_array *sign,
+                                      int64_t *nregions, int64_t count) {
+    return guard([&] { return fp::regions_impl(ws, labels, sign, nregions, count); });
+}
+
+FP_API fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef, int8_t *active,
+                                         int64_t count) {
+    return guard([&] { return fp::constraint_impl(ws, coef, active, count); });
 }
 
 FP_API fp_status fp_workspace_set_deriv_tol(fp_workspace *ws, double tol, int max_iter) {

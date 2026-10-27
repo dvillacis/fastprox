@@ -38,6 +38,7 @@ inline double pos(double a) noexcept { return std::max(a, 0.0); }
 
 // g(z) = lambda sum_i w_i |z_i|.
 struct Soft final : ElemOp<Soft> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double lambda;
     Vec w;
     double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
@@ -138,6 +139,7 @@ struct Soft final : ElemOp<Soft> {
 
 // g(z) = l1 ||z||_1 + (l2/2) ||z||^2: z = soft(x, gamma l1) / (1 + gamma l2).
 struct ElasticNet final : ElemOp<ElasticNet> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double l1, l2;
     ElasticNet(double a, double b) : l1(a), l2(b) {}
 
@@ -188,6 +190,7 @@ struct ElasticNet final : ElemOp<ElasticNet> {
 // g(z) = lambda sum_i h_delta(z_i), the Moreau envelope of |.| with parameter
 // delta: h(t) = t^2/(2 delta) for |t| <= delta, |t| - delta/2 otherwise.
 struct Huber final : ElemOp<Huber> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double lambda, delta;
     Huber(double l, double d) : lambda(l), delta(d) {}
 
@@ -253,6 +256,7 @@ struct Huber final : ElemOp<Huber> {
 
 // Projection onto lo <= z <= hi. theta = (lo..., hi...).
 struct Box final : ElemOp<Box> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     static constexpr bool kGammaFree = true;  // a projection: dz/dgamma = 0 (audit C5)
     Vec lo, hi;
     Box(Vec a, Vec b) : lo(std::move(a)), hi(std::move(b)) {}
@@ -321,6 +325,8 @@ struct Box final : ElemOp<Box> {
         const double l = lo[li(i)], h = hi[hj(i)];
         return {(x < l || (x == l && l == h)) ? 0 : (x > h ? 2 : 1), 1.0};
     }
+    static constexpr bool kBounds = true;
+    int bound_state(Piece p) const noexcept { return p.id == 2 ? FP_ENTRY_UPPER : FP_ENTRY_LOWER; }
     ElemDeriv deriv_piece(double, double, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
         if (p.id == 0) {
@@ -352,6 +358,7 @@ struct Box final : ElemOp<Box> {
 };
 
 struct NonNeg final : ElemOp<NonNeg> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     static constexpr bool kGammaFree = true;  // a projection: dz/dgamma = 0 (audit C5)
     const char *name() const noexcept override { return "nonneg"; }
     double step_scale() const noexcept override { return 0.0; }
@@ -376,6 +383,8 @@ struct NonNeg final : ElemOp<NonNeg> {
     // Pieces (since 0.3 explicit): 0 clipped, 1 inside; kink 1 at x = 0.
     static constexpr bool kKinks = true;
     Piece piece_of(double x, double, int64_t) const noexcept { return {x < 0 ? 0 : 1, 1.0}; }
+    static constexpr bool kBounds = true;
+    int bound_state(Piece) const noexcept { return FP_ENTRY_LOWER; }
     ElemDeriv deriv_piece(double, double, int64_t, Piece p) const noexcept {
         ElemDeriv e;
         e.j = p.id;
@@ -394,6 +403,7 @@ struct NonNeg final : ElemOp<NonNeg> {
 
 // g(z) = -lambda sum_i log z_i. theta = (lambda).
 struct LogBarrier final : ElemOp<LogBarrier> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double lambda;
     explicit LogBarrier(double l) : lambda(l) {}
 
@@ -477,6 +487,7 @@ struct LogBarrier final : ElemOp<LogBarrier> {
 // g(z) = lambda sum_i w_i |z_i| + indicator(lo <= z <= hi).
 // theta = (w..., lo..., hi...).
 struct L1Box final : ElemOp<L1Box> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double lambda;
     Vec w, lo, hi;
     double wmax_ = vmax(w);  // its largest entry, for step_scale: once, not per call (it scanned every weight on each prox call)
@@ -567,6 +578,11 @@ struct L1Box final : ElemOp<L1Box> {
         if (y < l || (y == l && l == h)) return {2, sgn(x)};  // lo = hi: fixed (audit K11)
         if (y > h) return {3, sgn(x)};
         return {!(tau > 0.0) || std::fabs(x) > tau ? 1 : 0, sgn(x)};
+    }
+    // Held pieces: 0 at zero, 2 at the lower bound, 3 at the upper one.
+    static constexpr bool kBounds = true;
+    int bound_state(Piece p) const noexcept {
+        return p.id == 2 ? FP_ENTRY_LOWER : (p.id == 3 ? FP_ENTRY_UPPER : FP_ENTRY_ZERO);
     }
     ElemDeriv deriv_piece(double, double gamma, int64_t i, Piece p) const noexcept {
         ElemDeriv e;
