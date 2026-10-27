@@ -255,6 +255,12 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
             w.steps.resize(static_cast<size_t>(B));
             if (op.has_branches())
                 w.branch.resize(static_cast<size_t>(std::max(w.numel, B * op.kink_sites())) + 1);
+            if (op.struct_kind() != FP_STRUCT_NONE) {  // a label map per image set
+                w.struct_thread_bytes = round64(4 * static_cast<size_t>(N));
+                w.struct_scratch.resize(mul_size(w.struct_thread_bytes, static_cast<size_t>(w.image_sets)) /
+                                            sizeof(double) +
+                                        1);
+            }
         }
         return FP_OK;
     }
@@ -999,6 +1005,9 @@ int64_t structure(const fp_workspace &ws, const Arr *st, const Arr *lab, const A
         if (active) active[0] = 0;
         return nf;
     }
+    if (op.image_ndim())
+        return f32 ? image_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active)
+                   : image_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active);
     return f32 ? row_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active)
                : row_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active);
 }

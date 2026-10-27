@@ -172,6 +172,15 @@ struct TVAniso final : ImageOp<TVAniso> {
         return fiber_thread_bytes(*tv, g);
     }
 
+    // Structure (since 1.0.2): the saved components, over which the jvp
+    // averages.
+    int struct_kind() const noexcept override { return FP_STRUCT_PROJECTOR; }
+    const int32_t *image_labels(const char *save, const int64_t *shape, int64_t *nreg) const noexcept override {
+        const View v = view(const_cast<char *>(save), Geom(k, shape).N);
+        *nreg = *v.ncomp;
+        return v.label;
+    }
+
     // ---- fiber passes (image_util.hpp) ----------------------------------------
 
     template <class In, class Out>
