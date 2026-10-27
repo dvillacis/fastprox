@@ -45,6 +45,7 @@ namespace {
 // ---- group penalties by norm composition ----------------------------------------------
 
 struct GroupRadial final : RowOp<GroupRadial> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     std::unique_ptr<fp_op> h;  // the elementwise scalar map, with scalar parameters
     const char *nm;
     int64_t Ph;                // h's parameter count; theta = (h's theta..., c...)
@@ -158,6 +159,27 @@ struct GroupRadial final : RowOp<GroupRadial> {
         }
     }
 
+    // Structure (since 1.0.2): ZERO on a group set to 0, where the jvp's
+    // phi(s) / s (or j at s = 0) is 0; on the others J_g has the eigenvalues
+    // phi(s) / s and j > 0, positive definite.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *, int64_t n, double gamma, RowStruct &s,
+                      void *scr) const noexcept {
+        double *nrm = static_cast<double *>(scr), *M = nrm + G;
+        for (int64_t g = 0; g < G; ++g) nrm[g] = 0.0;
+        for (int64_t i = 0; i < n; ++i) nrm[group(i)] += static_cast<double>(x[i]) * static_cast<double>(x[i]);
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, nrm, M);
+        double d[4];
+        for (int64_t g = 0; g < G; ++g) {
+            const double sg = norm(nrm[g], M[g]);
+            double j;
+            const double p = deriv(sg, gamma * c[ci(g)], j, d);
+            nrm[g] = (sg > 0.0 ? p / sg != 0.0 : j != 0.0) ? 1.0 : 0.0;
+        }
+        for (int64_t i = 0; i < n; ++i) s.state[i] = nrm[group(i)] != 0.0 ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+        return singletons(s, n);
+    }
+
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double gamma,
              double dgamma, const double *dparams, void *scr) const noexcept {
@@ -228,6 +250,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
 // ---- second-order cone ----------------------------------------------------------------
 
 struct Soc final : RowOp<Soc> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     const char *name() const noexcept override { return "soc"; }
     double step_scale() const noexcept override { return 0.0; }
     bool conj_homogeneous() const noexcept override { return true; }
@@ -282,6 +305,28 @@ struct Soc final : RowOp<Soc> {
             }
         });
         return kRowOk;
+    }
+
+    // Structure (since 1.0.2): inside, every entry FREE; in the polar cone,
+    // every entry ZERO; on the boundary, every entry FREE with the
+    // constraint a = (-1, u), u = y / ||y||, the kernel of J there, whose
+    // eigenvalues on a^perp are 1 (along (1, u)) and alpha / s.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        if (n == 0) return 0;
+        const double t = static_cast<double>(x[0]);
+        const Region reg = with_ynorm(x, n, [=](double sn, double sc) { return region(t, sn, sc); });
+        for (int64_t i = 0; i < n; ++i) s.state[i] = reg == kZero ? FP_ENTRY_ZERO : FP_ENTRY_FREE;
+        const int64_t k = singletons(s, n);
+        if (reg == kMid) {
+            with_ynorm(x, n, [=, &s](double sn, double sc) {
+                s.coef[0] = -1.0;
+                for (int64_t i = 1; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * sc / sn;
+            });
+            s.active = true;
+        }
+        return k;
     }
 
     // The Jacobian is symmetric: jvp and vjp apply the same map.

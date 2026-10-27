@@ -4616,6 +4616,349 @@ static void test_structure_elementwise() {
     }
 }
 
+// The structure of a row operator at the kept point of ws (rows of n along
+// the last axis of x, R of them) against its Jacobian, guarantees 1 and 2 of
+// the spec: P_L from the structure (signed region means, then the
+// constraint's component removed); a projector's jvp is P_L, a curved map's
+// jvp maps into L and is positive definite on L. conj: after fp_prox_conj,
+// whose jvp is I - J.
+static void check_row_structure(fp_op *op, int kind, fp_workspace *ws, const Arr &x, bool conj,
+                                const std::string &name) {
+    const int64_t n = x.shape.back(), m = static_cast<int64_t>(x.data.size()), R = m / n;
+    int64_t count = -1, size = -1, nfixed = -1;
+    CHECK_OK(fp_workspace_units(ws, &count, &size));
+    CHECK(count == R && size == n);
+    IntArr<int8_t> st(x.shape, FP_I8, 9), sg(x.shape, FP_I8, 9);
+    IntArr<int64_t> lab(x.shape, FP_I64, 9);
+    Arr coef(x.shape, Vec(static_cast<size_t>(m), 7.0));
+    std::vector<int64_t> nreg(static_cast<size_t>(R), -9);
+    std::vector<int8_t> active(static_cast<size_t>(R), 9);
+    CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+    CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nreg.data(), R));
+    CHECK_OK(fp_workspace_constraint(ws, &coef.a, active.data(), R));
+    // J v for v of x's shape.
+    auto J = [&](const Vec &v) {
+        Arr va(x.shape, v), out(x.shape);
+        CHECK_OK(fp_jvp(op, ws, &va.a, 0.0, nullptr, &out.a));
+        if (conj)
+            for (int64_t i = 0; i < m; ++i) out.data[i] = v[i] - out.data[i];
+        return out.data;
+    };
+    int64_t fixed = 0;
+    for (int64_t r = 0; r < R; ++r) {
+        const int64_t o = r * n, K = nreg[r];
+        // Canonical labels, signs and coefficients.
+        int64_t next = 0;
+        bool ok = K >= 0;
+        for (int64_t i = 0; i < n && ok; ++i) {
+            const bool free = st.data[o + i] == FP_ENTRY_FREE;
+            fixed += !free;
+            const int64_t l = lab.data[o + i];
+            if (!free) ok = l == -1 && sg.data[o + i] == 0 && coef.data[o + i] == 0.0;
+            else if (l == next) ++next;
+            else ok = l >= 0 && l < next;
+            if (free) ok = ok && (sg.data[o + i] == 1 || sg.data[o + i] == -1);
+            if (!active[r]) ok = ok && coef.data[o + i] == 0.0;
+        }
+        CHECK(ok && next == K);
+        if (!ok) std::fprintf(stderr, "  %s: row %lld labels\n", name.c_str(), static_cast<long long>(r));
+    }
+    CHECK(fixed == nfixed);
+    // P_L of row r of v.
+    auto PL = [&](const Vec &v) {
+        Vec out(static_cast<size_t>(m), 0.0);
+        for (int64_t r = 0; r < R; ++r) {
+            const int64_t o = r * n, K = nreg[r];
+            Vec sum(static_cast<size_t>(K), 0.0), cnt(static_cast<size_t>(K), 0.0);
+            auto Q = [&](const double *w, double *q) {
+                std::fill(sum.begin(), sum.end(), 0.0);
+                std::fill(cnt.begin(), cnt.end(), 0.0);
+                for (int64_t i = 0; i < n; ++i)
+                    if (lab.data[o + i] >= 0) {
+                        sum[lab.data[o + i]] += sg.data[o + i] * w[i];
+                        cnt[lab.data[o + i]] += 1.0;
+                    }
+                for (int64_t i = 0; i < n; ++i)
+                    q[i] = lab.data[o + i] >= 0 ? sg.data[o + i] * sum[lab.data[o + i]] / cnt[lab.data[o + i]] : 0.0;
+            };
+            Q(v.data() + o, out.data() + o);
+            if (active[r]) {
+                Vec b(static_cast<size_t>(n));
+                Q(coef.data.data() + o, b.data());
+                double bq = 0.0, bb = 0.0;
+                for (int64_t i = 0; i < n; ++i) {
+                    bq += b[i] * out[o + i];
+                    bb += b[i] * b[i];
+                }
+                if (bb > 0.0)
+                    for (int64_t i = 0; i < n; ++i) out[o + i] -= bq / bb * b[i];
+            }
+        }
+        return out;
+    };
+    const Vec dx = randn(m), Jdx = J(dx), Pdx = PL(dx), PJ = PL(Jdx);
+    for (int64_t r = 0; r < R; ++r) {
+        double e1 = 0.0, e2 = 0.0, nj = 0.0, nd = 0.0;
+        for (int64_t i = r * n; i < (r + 1) * n; ++i) {
+            e1 = std::max(e1, std::fabs(Jdx[i] - Pdx[i]));
+            e2 = std::max(e2, std::fabs(Jdx[i] - PJ[i]));
+            nj = std::max(nj, std::fabs(Jdx[i]));
+            nd = std::max(nd, std::fabs(dx[i]));
+        }
+        const bool ok = kind == FP_STRUCT_PROJECTOR ? e1 <= 1e-12 * (1.0 + nd) : e2 <= 1e-12 * (1.0 + nj);
+        CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  %s: row %lld: J vs P_L %g, J off L %g\n", name.c_str(), static_cast<long long>(r), e1, e2);
+    }
+    if (kind == FP_STRUCT_CURVED) {
+        const Vec v = PL(randn(m)), Jv = J(v);
+        for (int64_t r = 0; r < R; ++r) {
+            double vjv = 0.0, vv = 0.0;
+            for (int64_t i = r * n; i < (r + 1) * n; ++i) {
+                vjv += v[i] * Jv[i];
+                vv += v[i] * v[i];
+            }
+            const bool ok = vv == 0.0 || vjv > 1e-6 * vv;
+            CHECK(ok);
+            if (!ok) std::fprintf(stderr, "  %s: row %lld: v^T J v = %g, |v|^2 = %g\n", name.c_str(), static_cast<long long>(r), vjv, vv);
+        }
+    }
+}
+
+static void test_structure_rows() {
+    // Every row operator of derivative_cases with a kind: rows inside and
+    // outside the sets (scaled by 0.05 and 4), after fp_prox and fp_prox_conj.
+    const int64_t R = 6, n = 12;
+    int tested = 0;
+    for (const auto &c : derivative_cases(n)) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        int kind = -1;
+        CHECK_OK(fp_op_struct_kind(op, &kind));
+        Vec xv = randn(R * n, 1.5);
+        for (int64_t i = 0; i < n; ++i) {
+            xv[i] *= 0.05;
+            xv[n + i] *= 4.0;
+        }
+        if (c.zero_entry >= 0)
+            for (int64_t r = 0; r < R; ++r) xv[r * n + c.zero_entry] = 0.0;
+        Arr x({R, n}, xv), z({R, n});
+        fp_options o = opts(-1, 2, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
+        int64_t count = 0;
+        const fp_status us = fp_workspace_units(ws, &count, nullptr);
+        if (kind == FP_STRUCT_NONE) CHECK(us == FP_EINVAL);
+        if (kind != FP_STRUCT_NONE && count == R) {
+            ++tested;
+            check_row_structure(op, kind, ws, x, false, c.name);
+            if (c.has_conj) {
+                CHECK_OK(fp_prox_conj(op, 1.3, &x.a, &z.a, &o, ws, nullptr));
+                check_row_structure(op, kind, ws, x, true, c.name + " (conj)");
+                // At sigma = 0, J = I: the inner prox's I - J is 0.
+                CHECK_OK(fp_prox_conj(op, 0.0, &x.a, &z.a, &o, ws, nullptr));
+                int64_t nfixed = -1;
+                std::vector<int64_t> nreg(static_cast<size_t>(R), -1);
+                CHECK_OK(fp_workspace_states(ws, nullptr, &nfixed));
+                CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, nreg.data(), R));
+                CHECK(nfixed == R * n && nreg == std::vector<int64_t>(static_cast<size_t>(R), 0));
+            }
+        }
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    CHECK(tested == 21);
+
+    // The kinds of the spec's table.
+    {
+        struct K {
+            std::function<fp_status(fp_op **)> make;
+            int kind;
+        };
+        const int64_t three[3] = {0, 1, 1};
+        for (const K &k : std::vector<K>{
+                 {[](fp_op **o) { return fp_op_simplex(1.0, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { return fp_op_l2_ball(1.0, o); }, FP_STRUCT_CURVED},
+                 {[&](fp_op **o) { return fp_op_group_l2(1.0, 3, three, 2, nullptr, o); }, FP_STRUCT_CURVED},
+                 {[](fp_op **o) { return fp_op_sum_largest(1.0, 2, 1, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { return fp_op_tv1d(nullptr, FP_TV1D_AUTO, o); }, FP_STRUCT_NONE},
+                 {[](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }, FP_STRUCT_NONE},
+             }) {
+            fp_op *op;
+            int kind = -1;
+            CHECK_OK(k.make(&op));
+            CHECK_OK(fp_op_struct_kind(op, &kind));
+            CHECK(kind == k.kind);
+            fp_op_free(op);
+        }
+    }
+
+    // Shared regions and constraints by hand. The l-infinity prox at gamma
+    // lambda = 1 of (3, -2.5, 0.5, 2.5): tau = 7/3 clips entries 0, 1 and 3,
+    // one region with signs (+, -, +); entry 2 on its own.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_linf(1.0, &op));
+        Arr x({1, 4}, {3.0, -2.5, 0.5, 2.5}), z({1, 4});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int32_t> lab({1, 4}, FP_I32, 9);
+        IntArr<int8_t> sg({1, 4}, FP_I8, 9);
+        int64_t nreg = -1;
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, &nreg, 1));
+        CHECK(nreg == 2 && lab.data == (std::vector<int32_t>{0, 0, 1, 0}) && sg.data == (std::vector<int8_t>{1, -1, 1, 1}));
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, x, false, "linf by hand");
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        // The simplex of radius 1 at (0.2, 1.0, -0.5, 0.6): tau = 0.4, support
+        // {1, 3}, constraint 1 there.
+        CHECK_OK(fp_op_simplex(1.0, &op));
+        Arr y({1, 4}, {0.2, 1.0, -0.5, 0.6});
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &z.a, &o, ws, nullptr));
+        IntArr<int8_t> st({1, 4}, FP_I8, 9);
+        Arr coef({1, 4});
+        int8_t active = 0;
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK_OK(fp_workspace_constraint(ws, &coef.a, &active, 1));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_ZERO, FP_ENTRY_FREE, FP_ENTRY_ZERO, FP_ENTRY_FREE}));
+        CHECK(active == 1 && coef.data == (Vec{0.0, 1.0, 0.0, 1.0}));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        // The hyperplane x_0 + x_1 + x_2 = 1 within [0, 0.5]^3 at (1, 0.3, -1):
+        // entry 0 at the upper bound, entry 2 at the lower one, entry 1 free
+        // (0.5) with the constraint a_1.
+        CHECK_OK(fp_op_hyperplane(nullptr, 1.0, 0.0, 0.5, nullptr, nullptr, 0, &op));
+        Arr h({1, 3}, {1.0, 0.3, -1.0}), hz({1, 3});
+        IntArr<int8_t> hs({1, 3}, FP_I8, 9);
+        CHECK_OK(fp_workspace_create(op, &h.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &h.a, &hz.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_states(ws, &hs.a, nullptr));
+        CHECK(hs.data == (std::vector<int8_t>{FP_ENTRY_UPPER, FP_ENTRY_FREE, FP_ENTRY_LOWER}));
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, h, false, "hyperplane by hand");
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // Branch overrides read the overridden codes. The simplex at (1, 0, -0.5):
+    // tau = 0, entry 1 at the threshold, off the support by default and on it
+    // from above.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_simplex(1.0, &op));
+        Arr x({1, 3}, {1.0, 0.0, -0.5}), z({1, 3});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int8_t> st({1, 3}, FP_I8, 9), side({1, 3}, FP_I8, 1);
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data[1] == FP_ENTRY_ZERO);
+        CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-12));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_FREE, FP_ENTRY_FREE, FP_ENTRY_ZERO}));
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, x, false, "simplex +1");
+        CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data[1] == FP_ENTRY_ZERO);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        // A row on the l1 sphere (|x|_1 = 1): projected with tau = 0 by
+        // default... side -1 at its first entry makes it the inside piece.
+        CHECK_OK(fp_op_l1_ball(1.0, nullptr, &op));
+        Arr y({1, 3}, {0.5, -0.25, 0.25});
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &z.a, &o, ws, nullptr));
+        int8_t active = 9;
+        CHECK_OK(fp_workspace_constraint(ws, nullptr, &active, 1));
+        CHECK(active == 0);  // inside: the norm is r, not above it
+        side.data.assign(3, 1);
+        CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-12));
+        CHECK_OK(fp_workspace_constraint(ws, nullptr, &active, 1));
+        CHECK(active == 1);
+        check_row_structure(op, FP_STRUCT_PROJECTOR, ws, y, false, "l1 sphere +1");
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // Rows along a strided axis, 1, 2 and 15 threads, transposed outputs: the
+    // same as the contiguous problem of the transpose. A NaN row has -1
+    // regions and no constraint; the others are unaffected.
+    for (int which = 0; which < 3; ++which) {
+        auto make = [which](fp_op **o) {
+            return which == 0 ? fp_op_simplex(1.0, o) : which == 1 ? fp_op_linf(0.8, o) : fp_op_sum_largest(0.7, 3, 1, o);
+        };
+        const int64_t C = 40, Rr = 1500;  // rows of C along axis 0 of a (C, Rr) array
+        Vec xt = randn(C * Rr), xc(static_cast<size_t>(C * Rr));
+        for (int64_t i = 0; i < C; ++i) xt[static_cast<size_t>(i * Rr + 7)] = i == 3 ? NAN : xt[static_cast<size_t>(i * Rr + 7)];
+        for (int64_t i = 0; i < C; ++i)
+            for (int64_t j = 0; j < Rr; ++j) xc[static_cast<size_t>(j * C + i)] = xt[static_cast<size_t>(i * Rr + j)];
+        fp_op *op;
+        CHECK_OK(make(&op));
+        Arr x({C, Rr}, xt), z({C, Rr}), y({Rr, C}, xc), yz({Rr, C});
+        fp_options oc = opts(-1, 1, 1);
+        fp_workspace *wc;
+        CHECK_OK(fp_workspace_create(op, &y.a, &oc, &wc));
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &yz.a, &oc, wc, nullptr));
+        IntArr<int64_t> ref({Rr, C}, FP_I64, 9);
+        std::vector<int64_t> rref(static_cast<size_t>(Rr));
+        CHECK_OK(fp_workspace_regions(wc, &ref.a, nullptr, rref.data(), Rr));
+        CHECK(rref[7] == -1 && rref[6] >= 0 && ref.data[static_cast<size_t>(7 * C)] == -1);
+        for (int nt : {1, 2, 15}) {
+            fp_options o = opts(0, nt, 1);
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+            IntArr<int64_t> lab({C, Rr}, FP_I64, 9);
+            IntArr<int32_t> lt({C, Rr}, FP_I32, 9, {1, C});  // column-major: the transpose's C order
+            std::vector<int64_t> nr(static_cast<size_t>(Rr));
+            std::vector<int8_t> act(static_cast<size_t>(Rr), 9);
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, nullptr, nr.data(), Rr));
+            CHECK_OK(fp_workspace_regions(ws, &lt.a, nullptr, nullptr, 0));
+            CHECK_OK(fp_workspace_constraint(ws, nullptr, act.data(), Rr));
+            CHECK(nr == rref && act[7] == 0);
+            bool same = true;
+            for (int64_t i = 0; i < C; ++i)
+                for (int64_t j = 0; j < Rr; ++j) {
+                    same = same && lab.data[static_cast<size_t>(i * Rr + j)] == ref.data[static_cast<size_t>(j * C + i)];
+                    same = same && lt.data[static_cast<size_t>(j * C + i)] == ref.data[static_cast<size_t>(j * C + i)];
+                }
+            CHECK(same);
+            fp_workspace_free(ws);
+        }
+        fp_workspace_free(wc);
+        fp_op_free(op);
+    }
+
+    // No allocation with a workspace.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_sum_largest(0.5, 4, 1, &op));
+        Arr x({64, 1000}, randn(64000)), z({64, 1000}), coef({64, 1000});
+        IntArr<int8_t> st({64, 1000}, FP_I8), sg({64, 1000}, FP_I8);
+        IntArr<int32_t> lab({64, 1000}, FP_I32);
+        std::vector<int64_t> nreg(64);
+        std::vector<int8_t> act(64);
+        fp_options o = opts(-1, 4, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+        int64_t nfixed;
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nreg.data(), 64));  // warm up the thread pool
+        const long before = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nreg.data(), 64));
+            CHECK_OK(fp_workspace_constraint(ws, &coef.a, act.data(), 64));
+        }
+        CHECK(g_allocs.load() == before);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -4636,6 +4979,7 @@ int main() {
     test_prox_steps();
     test_no_allocation();
     test_structure_elementwise();
+    test_structure_rows();
     test_concurrent_callers();
     test_errors_and_special_values();
     test_kept_empty_and_identity();

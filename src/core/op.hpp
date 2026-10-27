@@ -152,6 +152,56 @@ struct ImageCall {
     char *thread_scratch(int t) const noexcept { return thread_base + static_cast<size_t>(t) * thread_bytes; }
 };
 
+// The structure of the derivative of one row (since 1.0.2), contiguous: per
+// entry its fp_entry_state, its region's label (0, 1, ... in the order of the
+// regions' first entries; -1 where not FREE), its sign (0 where not FREE) and
+// its coefficient in the row's linear constraint (0 where not FREE, and in a
+// row without an active constraint); and whether the constraint is active.
+struct RowStruct {
+    int8_t *state = nullptr;
+    int64_t *label = nullptr;
+    int8_t *sign = nullptr;
+    double *coef = nullptr;
+    bool active = false;
+};
+
+// Labels, signs and coefficients of a row whose regions are singletons, from
+// its states; no constraint. Returns the number of regions.
+inline int64_t singletons(RowStruct &s, int64_t n) noexcept {
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        const bool free = s.state[i] == FP_ENTRY_FREE;
+        s.label[i] = free ? k++ : -1;
+        s.sign[i] = free;
+        s.coef[i] = 0.0;
+    }
+    s.active = false;
+    return k;
+}
+
+// The same with the FREE entries where in(i) is true forming one region,
+// with sign sg(i); the other FREE entries singletons.
+template <class In, class Sg>
+inline int64_t one_region(RowStruct &s, int64_t n, In in, Sg sg) noexcept {
+    int64_t k = 0, shared = -1;
+    for (int64_t i = 0; i < n; ++i) {
+        s.coef[i] = 0.0;
+        if (s.state[i] != FP_ENTRY_FREE) {
+            s.label[i] = -1;
+            s.sign[i] = 0;
+        } else if (in(i)) {
+            if (shared < 0) shared = k++;
+            s.label[i] = shared;
+            s.sign[i] = static_cast<int8_t>(sg(i));
+        } else {
+            s.label[i] = k++;
+            s.sign[i] = 1;
+        }
+    }
+    s.active = false;
+    return k;
+}
+
 // Iterative derivative solves of an image operator (conjugate gradients):
 // tolerance on the relative residual and iteration cap in, the achieved
 // residual and iterations out. Operators with closed-form derivatives leave
@@ -322,6 +372,13 @@ struct fp_op {
                          int64_t, double, double *, void *) const noexcept {}
     virtual void vjp_row(const double *, const double *, const uint8_t *, const double *,
                          double *, int64_t, double, double *, void *) const noexcept {}
+    // The structure of the derivative at a saved row (since 1.0.2), read
+    // from what jvp_row reads (x, z, code after any override, the step) into
+    // s; returns the row's number of regions. scratch: scratch_bytes(n).
+    virtual int64_t struct_row(const float *, const float *, const uint8_t *, int64_t, double, fp::RowStruct &,
+                               void *) const noexcept { return 0; }
+    virtual int64_t struct_row(const double *, const double *, const uint8_t *, int64_t, double, fp::RowStruct &,
+                               void *) const noexcept { return 0; }
 
     // ---- image interface -------------------------------------------------
     // Image operators (multi-dimensional TV) act on the last image_ndim() axes
@@ -863,10 +920,13 @@ struct ElemOp : fp_op {
 };
 
 // CRTP base for row operators. D provides templates prox, jvp and vjp with
-// the signatures of prox_row, jvp_row and vjp_row.
+// the signatures of prox_row, jvp_row and vjp_row, and, with a kStruct other
+// than FP_STRUCT_NONE (since 1.0.2), structure with that of struct_row.
 template <class D>
 struct RowOp : fp_op {
+    static constexpr int kStruct = FP_STRUCT_NONE;
     bool elementwise() const noexcept override { return false; }
+    int struct_kind() const noexcept override { return D::kStruct; }
 
 #define FP_ROW_FORWARD(T)                                                                        \
     int prox_row(const T *x, T *z, int64_t n, double gamma, void *scratch, uint8_t *code)        \
@@ -883,6 +943,14 @@ struct RowOp : fp_op {
                  double gamma, double *acc, void *scratch) const noexcept override {             \
         static_cast<const D *>(this)->template vjp<T>(x, z, code, g, gx, n, gamma, acc,          \
                                                       scratch);                                  \
+    }                                                                                            \
+    int64_t struct_row(const T *x, const T *z, const uint8_t *code, int64_t n, double gamma,     \
+                       RowStruct &s, void *scratch) const noexcept override {                    \
+        if constexpr (D::kStruct != FP_STRUCT_NONE)                                              \
+            return static_cast<const D *>(this)->template structure<T>(x, z, code, n, gamma, s,  \
+                                                                       scratch);                 \
+        else                                                                                     \
+            return 0;                                                                            \
     }
     FP_ROW_FORWARD(float)
     FP_ROW_FORWARD(double)

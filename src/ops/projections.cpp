@@ -223,6 +223,7 @@ inline size_t condat_scratch(int64_t n) noexcept {
 // ---------------------------------------------------------------------------
 
 struct L2Ball final : RowOp<L2Ball> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double r;
     explicit L2Ball(double rr) : r(rr) {}
     const char *name() const noexcept override { return "l2_ball"; }
@@ -310,6 +311,22 @@ struct L2Ball final : RowOp<L2Ball> {
             return kRowOk;
         });
     }
+    // Structure (since 1.0.2): every entry FREE; outside the ball, the
+    // constraint a = x / ||x||, where J = (r / ||x||) (I - a a^T). The test
+    // is the jvp's: the same norm, bit for bit.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
+        const int64_t k = singletons(s, n);
+        with_norm(x, n, [=, &s](double m, double t) {
+            if (m <= r * t) return 0;
+            for (int64_t i = 0; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * t / m;
+            s.active = true;
+            return 0;
+        });
+        return k;
+    }
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double, double,
              const double *dp, void *) const noexcept {
@@ -348,6 +365,7 @@ struct L2Ball final : RowOp<L2Ball> {
 // ---------------------------------------------------------------------------
 
 struct Simplex final : RowOp<Simplex> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double r;
     explicit Simplex(double rr) : r(rr) {}
     const char *name() const noexcept override { return "simplex"; }
@@ -397,6 +415,17 @@ struct Simplex final : RowOp<Simplex> {
             }
         }
         return kRowOk;
+    }
+    // Structure (since 1.0.2): FREE on the support S (the saved codes),
+    // ZERO elsewhere, and the constraint a = 1_S: J = P_S - 1_S 1_S^T / |S|.
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        for (int64_t i = 0; i < n; ++i) s.state[i] = code[i] ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+        const int64_t k = singletons(s, n);
+        for (int64_t i = 0; i < n; ++i) s.coef[i] = code[i] ? 1.0 : 0.0;
+        s.active = k > 0;
+        return k;
     }
     // J = P_S - 1_S 1_S^T / |S|, dz/dr = 1_S / |S|.
     template <class T>
@@ -505,6 +534,7 @@ double l1_threshold(const T *x, int64_t n, const Vec &w, double radius, void *sc
 // depends only on their ratios, with radius r / scale), so that sums of
 // squared weights cannot underflow for tiny but valid weights.
 struct L1Ball final : RowOp<L1Ball> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double r;
     Vec w;         // normalised: max w = 1
     double scale;  // the largest weight given
@@ -548,6 +578,21 @@ struct L1Ball final : RowOp<L1Ball> {
             if (code) code[i] = d > 0;
         }
         return kRowOk;
+    }
+    // Structure (since 1.0.2): inside the ball every entry FREE; projected,
+    // FREE on the support S, ZERO elsewhere, with the constraint a_i = w_i
+    // sign(x_i) on S (in the weights given).
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        const bool inside = code[0] == kInside;
+        for (int64_t i = 0; i < n; ++i) s.state[i] = inside || code[i] ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+        const int64_t k = singletons(s, n);
+        if (inside) return k;
+        for (int64_t i = 0; i < n; ++i)
+            s.coef[i] = code[i] ? std::copysign(wi(i) * scale, static_cast<double>(x[i])) : 0.0;
+        s.active = k > 0;
+        return k;
     }
     // Active: J = P_S - a a^T / W2 with a_i = s_i w_i, W2 = sum_S w_i^2;
     // dz/dr = a / W2.
@@ -654,6 +699,7 @@ struct L1Ball final : RowOp<L1Ball> {
 // prox of gamma lambda ||.||_inf: z = x - P_{B1(gamma lambda)}(x), which clips
 // x to [-tau, tau] when x is outside the ball and is 0 inside it.
 struct LInf final : RowOp<LInf> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double lambda;
     Vec one{1.0};
     explicit LInf(double l) : lambda(l) {}
@@ -693,6 +739,17 @@ struct LInf final : RowOp<LInf> {
             if (code) code[i] = clip;
         }
         return kRowOk;
+    }
+    // Structure (since 1.0.2): z = 0 inside the ball, every entry ZERO;
+    // otherwise every entry FREE, the clipped set S one region with signs
+    // s_i = sign(x_i), the others singletons.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        const bool inside = code[0] == kInside;
+        for (int64_t i = 0; i < n; ++i) s.state[i] = inside ? FP_ENTRY_ZERO : FP_ENTRY_FREE;
+        return one_region(s, n, [code](int64_t i) { return code[i] != 0; },
+                          [x](int64_t i) { return static_cast<double>(x[i]) < 0 ? -1 : 1; });
     }
     // Active: (J v)_i = v_i off S and s_i <s_S, v_S> / |S| on S;
     // dz_i/dgamma = -lambda s_i / |S| and dz_i/dlambda = -gamma s_i / |S| on S.
@@ -745,6 +802,7 @@ struct LInf final : RowOp<LInf> {
 // radius c: with tau its threshold, z = min(x, tau). The scaled form avoids
 // Beck's x / c, which overflows for small c.
 struct Max final : RowOp<Max> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double lambda;
     explicit Max(double l) : lambda(l) {}
     const char *name() const noexcept override { return "max"; }
@@ -786,6 +844,14 @@ struct Max final : RowOp<Max> {
             if (code) code[i] = top;
         }
         return kRowOk;
+    }
+    // Structure (since 1.0.2): every entry FREE, the top set S one region,
+    // the others singletons.
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
+        return one_region(s, n, [code](int64_t i) { return code[i] != 0; }, [](int64_t) { return 1; });
     }
     // On S = {x_i > tau}: z_i = tau with sum_S (x_i - tau) = c, so
     // dz_S = (sum_S dx - dc) / |S|; dz = dx off S.

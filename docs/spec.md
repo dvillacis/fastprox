@@ -629,12 +629,12 @@ so that L = {M c : c ∈ ℝᴷ, (Mᵀa)ᵀc = 0 when active}, with M the size �
 | Tree-structured group ℓ2, sparse group lasso | ZERO where the ℓ1 step or a nested shrink zeroes the entry, FREE | singletons | — | CURVED | recomputed |
 | ℓ2 ball | FREE | singletons | outside the ball: a = x/‖x‖ | CURVED | recomputed |
 | Second-order cone (t first) | inside: FREE; in the polar cone: ZERO; on the boundary: FREE | singletons | on the boundary: a = (−1, y/‖y‖) | CURVED | recomputed |
-| Simplex | FREE on the support, ZERO elsewhere | singletons | a = 1 on the support | PROJECTOR | stored |
+| Simplex | FREE on the support, ZERO elsewhere | singletons | a = 1 on the support (none when the support is empty, r = 0) | PROJECTOR | stored |
 | ℓ1 ball (weighted) | inside: FREE; projected: FREE on the support, ZERO elsewhere | singletons | projected: a\_i = w\_i sign(x\_i) on the support | PROJECTOR | stored |
 | ℓ∞ norm | z = 0: ZERO; else FREE | the clipped set is one region with σ\_i = sign(x\_i); the rest singletons | — | PROJECTOR | stored |
 | Maximum | FREE | the clipped (top) set is one region, σ = +1; the rest singletons | — | PROJECTOR | stored |
-| Sum of the k largest | FREE | the entries at the shared level are one region, σ = +1 (sign(x\_i) for absolute values); entries below the level and at the cap are singletons | — | PROJECTOR | stored |
-| Hyperplane, half-space, each with a box | LOWER, UPPER on the bounds (lo\_i = hi\_i: LOWER), FREE inside | singletons | the hyperplane, and the half-space when active: a\_i on the FREE entries | PROJECTOR | stored |
+| Sum of the k largest | FREE; for absolute values with the sum constraint inactive, ZERO at the level (z = 0 there) | the entries at the shared level are one region, σ = +1 (sign(x\_i) for absolute values); entries below the level and at the cap are singletons | — | PROJECTOR | stored |
+| Hyperplane, half-space, each with a box | LOWER, UPPER on the bounds (lo\_i = hi\_i: LOWER), FREE inside | singletons | the hyperplane, and the half-space when active: a\_i on the FREE entries (none when they are all 0) | PROJECTOR | stored |
 | Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights | stored (block starts) |
 | Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks with z ≠ 0, σ\_i = sign(x\_i) | — | PROJECTOR | stored; a re-sort, O(n log n) |
 | 1D TV (weighted) | FREE | the segments (an edge with a jump or a zero weight separates) | — | PROJECTOR | stored (edge codes) |
