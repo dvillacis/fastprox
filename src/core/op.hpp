@@ -266,6 +266,17 @@ struct fp_op {
     virtual void branch_image(char *, const double *, const double *, const double *, const int64_t *,
                               double, double, const int8_t *, char *) const noexcept {}
 
+    // ---- structure of the derivative (since 1.0.2) -------------------------
+    // The fp_struct_kind of every point (FP_STRUCT_NONE: no queries).
+    virtual int struct_kind() const noexcept { return FP_STRUCT_NONE; }
+    // Elementwise operators: the fp_entry_state of each saved entry of the run
+    // into state (contiguous), with the arguments of jvp_run (side and tol
+    // the branch override, as there).
+    virtual void state_run(const float *, int64_t, double, int64_t, int64_t, int, const int8_t *, double,
+                           int8_t *) const noexcept {}
+    virtual void state_run(const double *, int64_t, double, int64_t, int64_t, int, const int8_t *, double,
+                           int8_t *) const noexcept {}
+
     // ---- row interface ---------------------------------------------------
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
@@ -469,9 +480,17 @@ struct ElemOp : fp_op {
     // kink1 returns the code of the breakpoint nearest to x within tol (0 if
     // none) and fills k; deriv1 must equal deriv_piece(x, piece_of(x)).
     static constexpr bool kKinks = false;
+    // The fp_struct_kind of the map (spec Section 7, "Structure of the
+    // derivative"). An entry is FREE where its derivative in x is not 0, and
+    // held otherwise: at 0, or, for D with kBounds, at the bound D's
+    //   int bound_state(Piece p) const;
+    // names for a held piece p.
+    static constexpr int kStruct = FP_STRUCT_NONE;
+    static constexpr bool kBounds = false;
     bool elementwise() const noexcept override { return true; }
     bool has_ties() const noexcept override { return D::kTies; }
     bool has_kinks() const noexcept override { return D::kKinks; }
+    int struct_kind() const noexcept override { return D::kStruct; }
 
     // g(x) = sum_i of D's value1(x_i, i, atol), the term of entry i (atol for
     // the indicators of sets, see fp_op::value_row).
@@ -490,15 +509,50 @@ struct ElemOp : fp_op {
     static ElemDeriv deriv_at(const D &d, double x, double gamma, int64_t w, int tie, int side,
                               double tol) noexcept {
         if constexpr (D::kKinks) {
-            if (side != 0) {
-                Kink k;
-                if (d.kink1(x, gamma, w, tol, k)) {
-                    const double delta = 32.0 * 2.220446049250313e-16 * k.scale + 1e-300;
-                    return d.deriv_piece(x, gamma, w, d.piece_of(k.b + side * delta, gamma, w));
-                }
-            }
+            Piece p;
+            if (side_piece(d, x, gamma, w, side, tol, p)) return d.deriv_piece(x, gamma, w, p);
         }
         return ElemCall<D>::deriv(d, x, gamma, w, tie);
+    }
+    // The piece on the side's side of the breakpoint within tol of x, if side
+    // is not 0 and there is one (operators with kinks).
+    static bool side_piece(const D &d, double x, double gamma, int64_t w, int side, double tol, Piece &p) noexcept {
+        if constexpr (D::kKinks) {
+            Kink k;
+            if (side != 0 && d.kink1(x, gamma, w, tol, k)) {
+                const double delta = 32.0 * 2.220446049250313e-16 * k.scale + 1e-300;
+                p = d.piece_of(k.b + side * delta, gamma, w);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The fp_entry_state of entry x under the derivative deriv_at takes: from
+    // its piece (a held piece names its bound), or for the maps with ties,
+    // whose default derivative follows the tie rule, from that derivative.
+    static int state_of_piece(const D &d, double x, double gamma, int64_t w, Piece p) noexcept {
+        if constexpr (D::kKinks) {
+            if (d.deriv_piece(x, gamma, w, p).j != 0.0) return FP_ENTRY_FREE;
+            if constexpr (D::kBounds) return d.bound_state(p);
+        }
+        return FP_ENTRY_ZERO;
+    }
+    static int state_at(const D &d, double x, double gamma, int64_t w, int tie, int side, double tol) noexcept {
+        if constexpr (D::kKinks) {
+            Piece p;
+            if (side_piece(d, x, gamma, w, side, tol, p)) return state_of_piece(d, x, gamma, w, p);
+            if constexpr (!D::kTies) return state_of_piece(d, x, gamma, w, d.piece_of(x, gamma, w));
+        }
+        return ElemCall<D>::deriv(d, x, gamma, w, tie).j != 0.0 ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+    }
+    template <class T>
+    void run_states(const T *xsave, int64_t len, double gamma, int64_t widx, int64_t wstep, int tie,
+                    const int8_t *side, double tol, int8_t *state) const noexcept {
+        const D &d = static_cast<const D &>(*this);
+        for (int64_t i = 0; i < len; ++i)
+            state[i] = static_cast<int8_t>(state_at(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie,
+                                                    side ? side[i] : 0, tol));
     }
 
     template <class T>
@@ -798,6 +852,10 @@ struct ElemOp : fp_op {
     int64_t kink_run(const T *xsave, int64_t len, double gamma, int64_t widx, int64_t wstep,     \
                      double tol, int8_t *codes) const noexcept override {                        \
         return run_kinks<T>(xsave, len, gamma, widx, wstep, tol, codes);                         \
+    }                                                                                            \
+    void state_run(const T *xsave, int64_t len, double gamma, int64_t widx, int64_t wstep,       \
+                   int tie, const int8_t *side, double tol, int8_t *state) const noexcept override { \
+        run_states<T>(xsave, len, gamma, widx, wstep, tie, side, tol, state);                    \
     }
     FP_ELEM_FORWARD(float)
     FP_ELEM_FORWARD(double)

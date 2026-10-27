@@ -46,8 +46,10 @@ extern "C" {
 #endif
 
 /* FP_I8 (since 0.2) is accepted only by the kink and branch arrays of
- * fp_workspace_kinks and fp_workspace_set_branch. */
-typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3 } fp_dtype;
+ * fp_workspace_kinks and fp_workspace_set_branch, and the state and sign
+ * arrays of the structure queries; FP_I32 and FP_I64 (since 1.0.2) only by
+ * the labels of fp_workspace_regions. */
+typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3, FP_I32 = 4, FP_I64 = 5 } fp_dtype;
 /* FP_DEVICE_CUDA (since 1.0) is DLPack's kDLCUDA; 10 (kDLROCM) is reserved. */
 typedef enum { FP_DEVICE_CPU = 0, FP_DEVICE_CUDA = 2 } fp_device;
 
@@ -494,6 +496,72 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
 FP_API fp_status fp_workspace_kinks(const fp_workspace *ws, double tol, fp_array *mask,
                                     int64_t *count);
 FP_API fp_status fp_workspace_set_branch(fp_workspace *ws, const fp_array *side, double tol);
+
+/* ------------------------------------------------------------------------
+ * Structure of the derivative (since 1.0.2; docs/spec.md, Section 7,
+ * "Structure of the derivative"). At the kept point, the Jacobian J in x
+ * that fp_jvp and fp_vjp apply (the default piece, or the one chosen by
+ * fp_workspace_set_branch) has range
+ *   L = { d : d_i = 0 where state_i != FREE, d_i = sign_i c_{label_i},
+ *         a^T d = 0 when the unit's constraint is active },
+ * per unit: the whole array for elementwise operators, each row along the
+ * axis for row operators, each image (or graph instance) for image
+ * operators. The kind says what J is on L. After fp_prox_conj the queries
+ * describe the inner prox at y / sigma, whose Jacobian is I - J (at
+ * sigma = 0, where J = I, every entry is ZERO). A unit of a row or image
+ * operator whose input holds a NaN has -1 regions, every entry FREE with
+ * label -1 and sign 0, and no active constraint; for elementwise operators,
+ * whose entries are independent, only the NaN entries are so marked, and
+ * they count neither as regions nor as fixed. Every argument is checked before anything is written,
+ * and the outputs are the same for any thread count and strides. Errors:
+ * FP_EINVAL without a kept point, for an operator of kind NONE and on a
+ * device workspace; FP_EDTYPE and FP_ESHAPE for the arrays, as below.
+ */
+typedef enum {
+    FP_ENTRY_FREE  = 0, /* moves with x: on its own, or with its region */
+    FP_ENTRY_ZERO  = 1, /* held at 0: thresholded, a killed group, off the support */
+    FP_ENTRY_LOWER = 2, /* held at its lower bound (lower = upper included) */
+    FP_ENTRY_UPPER = 3  /* held at its upper bound */
+} fp_entry_state;
+
+typedef enum {
+    FP_STRUCT_NONE      = 0, /* no structure queries (spectral operators) */
+    FP_STRUCT_PROJECTOR = 1, /* J is the orthogonal projector onto L */
+    FP_STRUCT_WEIGHTED  = 2, /* J is the projector onto L orthogonal in diag(w) */
+    FP_STRUCT_CURVED    = 3  /* range J = L; J is not a projector */
+} fp_struct_kind;
+
+/* The kind of every point of op (a property of the operator, not of a call):
+ * an fp_struct_kind in *kind. */
+FP_API fp_status fp_op_struct_kind(const fp_op *op, int *kind);
+
+/* The units of the kept point: their number and the entries in each. Either
+ * may be NULL. An empty array has 0 units. */
+FP_API fp_status fp_workspace_units(const fp_workspace *ws, int64_t *count, int64_t *size);
+
+/* Per entry, an fp_entry_state (FP_I8, the shape of x, any strides; NULL for
+ * the count only) and the number of entries not FREE (may be NULL). */
+FP_API fp_status fp_workspace_states(const fp_workspace *ws, fp_array *state, int64_t *nfixed);
+
+/* Per entry, the label of its region within its unit (FP_I32 or FP_I64, the
+ * shape of x; -1 where the state is not FREE), numbered 0, 1, ... in the
+ * order of each region's first entry, and its sign (FP_I8, the shape of x;
+ * +1 or -1, 0 where not FREE); per unit, the number of regions (nregions, a
+ * contiguous array of count entries in the order of fp_workspace_units; -1
+ * for a unit of a row or image operator whose input holds a NaN). Any of the three may be NULL; count
+ * must equal the number of units when nregions is given (FP_ESHAPE
+ * otherwise), and FP_ESHAPE for int32 labels of a unit of more than
+ * 2^31 - 1 entries. */
+FP_API fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, fp_array *sign,
+                                      int64_t *nregions, int64_t count);
+
+/* Per unit, whether its linear constraint is active (active, a contiguous
+ * int8 array of count entries) and, per entry, its coefficient (coef, x's
+ * dtype and shape; 0 where not FREE and in units without an active
+ * constraint). Either may be NULL; count as for fp_workspace_regions.
+ * Operators that never have a constraint write zeros. */
+FP_API fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef, int8_t *active,
+                                         int64_t count);
 
 /* ------------------------------------------------------------------------
  * Entry points. ws may be NULL unless opt->keep_structure is set. out may be

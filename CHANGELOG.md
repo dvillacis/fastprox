@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Structure of the derivative, first part (spec Section 7, "Structure of the derivative"): the C types `FP_I32` and `FP_I64` (labels only), `fp_entry_state` and `fp_struct_kind`, and the queries `fp_op_struct_kind`, `fp_workspace_units`, `fp_workspace_states`, `fp_workspace_regions` and `fp_workspace_constraint`. They describe the range L of the Jacobian that `fp_jvp` applies at the kept point (the default piece or a branch override): a state per entry (free, or held at 0, a lower or an upper bound), region labels with signs, and a linear constraint per unit. Implemented for the twelve elementwise maps (soft thresholding, the elastic net, Huber, box, the orthant, the log barrier, ℓ1 over a box, ℓ0, ℓq, SCAD, MCP and the log penalty); the row and image operators return `FP_EINVAL` until their families land. A NaN entry of an elementwise map is FREE with label −1 and sign 0, and the other entries keep their structure; a row or image whose input holds a NaN reports −1 regions. Labels are the same for any thread count and strides, and no query allocates with a workspace.
+
 ## [1.0.1] — 2026-10-25
 
 A patch release with the fixes from the two mathematical audits of 2026-10-25 (M1–M7, docs/math-audit-2026-10.md), the documentation of what the derivatives are and guarantee (C1–C6), and eight defects at extreme scales found by the fuzz harness, which now draws parameters from every binade. It adds no C function and changes no signature, so the ABI is 1.0.0's. Three calls now return errors where they gave wrong results: `fp_prox_conj` of weighted isotonic regression with unequal weights (`FP_EINVAL`), and group Huber, SCAD and MCP steps beyond γ · max(λ, 1) · max c ≤ 2^960 (`FP_EPARAM`; they gave NaN). Some results change in the last ulp (SCAD, MCP, and where the new bounds apply).

@@ -4208,6 +4208,414 @@ static void test_thread_cap() {
     fp_op_free(op);
 }
 
+// ---------------------------------------------------------------- structure of the derivative
+// (since 1.0.2; docs/spec.md, Section 7, "Structure of the derivative")
+
+template <class T>
+struct IntArr {  // integer array with an fp_array view; C order unless strides are given
+    std::vector<int64_t> shape, strides;
+    std::vector<T> data;
+    fp_array a{};
+    IntArr(std::vector<int64_t> s, fp_dtype dt, T fill = 0, std::vector<int64_t> st = {}, size_t n = 0)
+        : shape(std::move(s)), strides(std::move(st)) {
+        int64_t m = 1;
+        for (int64_t v : shape) m *= v;
+        if (strides.empty()) {
+            strides.resize(shape.size());
+            int64_t k = 1;
+            for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+                strides[i] = k;
+                k *= shape[i];
+            }
+        }
+        data.assign(n ? n : static_cast<size_t>(m), fill);
+        a.data = data.data();
+        a.dtype = dt;
+        a.ndim = static_cast<int>(shape.size());
+        a.shape = shape.data();
+        a.strides = strides.data();
+        a.device = FP_DEVICE_CPU;
+    }
+};
+
+struct StructCase {
+    std::string name;
+    std::function<fp_status(fp_op **)> make;
+    double gamma;
+    int kind;
+};
+
+static std::vector<StructCase> elementwise_struct_cases() {
+    return {
+        {"soft", [](fp_op **o) { return fp_op_soft(0.4, nullptr, o); }, 0.8, FP_STRUCT_PROJECTOR},
+        {"elastic_net", [](fp_op **o) { return fp_op_elastic_net(0.3, 0.7, o); }, 0.9, FP_STRUCT_CURVED},
+        {"huber", [](fp_op **o) { return fp_op_huber(0.6, 0.5, o); }, 0.7, FP_STRUCT_CURVED},
+        {"box", [](fp_op **o) { return fp_op_box(-0.3, 0.5, nullptr, nullptr, o); }, 1.0, FP_STRUCT_PROJECTOR},
+        {"nonneg", [](fp_op **o) { return fp_op_nonneg(o); }, 1.0, FP_STRUCT_PROJECTOR},
+        {"log_barrier", [](fp_op **o) { return fp_op_log_barrier(0.6, o); }, 0.8, FP_STRUCT_CURVED},
+        {"l1_box", [](fp_op **o) { return fp_op_l1_box(0.4, nullptr, -0.5, 0.6, nullptr, nullptr, o); }, 0.8,
+         FP_STRUCT_PROJECTOR},
+        {"l1_box_shifted", [](fp_op **o) { return fp_op_l1_box(0.4, nullptr, 0.2, 0.9, nullptr, nullptr, o); }, 0.8,
+         FP_STRUCT_PROJECTOR},
+        {"l0", [](fp_op **o) { return fp_op_l0(0.5, nullptr, o); }, 0.8, FP_STRUCT_PROJECTOR},
+        {"lq", [](fp_op **o) { return fp_op_lq(0.3, 0.5, nullptr, o); }, 0.8, FP_STRUCT_CURVED},
+        {"scad", [](fp_op **o) { return fp_op_scad(0.5, 3.7, nullptr, o); }, 0.8, FP_STRUCT_CURVED},
+        {"mcp", [](fp_op **o) { return fp_op_mcp(0.5, 3.0, nullptr, o); }, 0.8, FP_STRUCT_CURVED},
+        {"log", [](fp_op **o) { return fp_op_log_penalty(0.5, 0.3, o); }, 0.8, FP_STRUCT_CURVED},
+    };
+}
+
+// The structure of an elementwise map against its Jacobian, whose diagonal is
+// the jvp of ones: guarantee 1 (range J = L: the diagonal is nonzero exactly
+// on the free entries) and 2 (1 there for a projector, positive for a curved
+// map), singleton regions labelled in C order, signs +1.
+static void check_elementwise_structure(fp_op *op, int kind, fp_workspace *ws, const Arr &x) {
+    const int64_t m = static_cast<int64_t>(x.data.size());
+    Arr ones(x.shape, Vec(static_cast<size_t>(m), 1.0)), d(x.shape);
+    CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+    IntArr<int8_t> st(x.shape, FP_I8, 9), sg(x.shape, FP_I8, 9);
+    IntArr<int64_t> lab(x.shape, FP_I64, 9);
+    int64_t nfixed = -5, nreg = -5, count = -5, size = -5;
+    CHECK_OK(fp_workspace_units(ws, &count, &size));
+    CHECK(count == 1 && size == m);
+    CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+    CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, &nreg, 1));
+    CHECK(nreg == m - nfixed);
+    int64_t fixed = 0, next = 0;
+    for (int64_t i = 0; i < m; ++i) {
+        const int s = st.data[i];
+        CHECK(s >= FP_ENTRY_FREE && s <= FP_ENTRY_UPPER);
+        const bool free = s == FP_ENTRY_FREE;
+        fixed += !free;
+        CHECK((d.data[i] != 0.0) == free);
+        if (free && kind == FP_STRUCT_PROJECTOR) CHECK(d.data[i] == 1.0);
+        if (free && kind == FP_STRUCT_CURVED) CHECK(d.data[i] > 0.0);
+        CHECK(lab.data[i] == (free ? next : -1));
+        CHECK(sg.data[i] == (free ? 1 : 0));
+        next += free;
+    }
+    CHECK(fixed == nfixed);
+    Arr coef(x.shape, Vec(static_cast<size_t>(m), 7.0));
+    int8_t active = 5;
+    CHECK_OK(fp_workspace_constraint(ws, &coef.a, &active, 1));
+    CHECK(active == 0 && maxabs(coef.data) == 0.0);
+}
+
+static void test_structure_elementwise() {
+    // Every map, with entries on both sides of its thresholds and bounds.
+    for (const auto &c : elementwise_struct_cases()) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        int kind = -1;
+        CHECK_OK(fp_op_struct_kind(op, &kind));
+        CHECK(kind == c.kind);
+        Arr x({5, 40}, randn(200));
+        fp_options o = opts(-1, 2, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        Arr z(x.shape);
+        CHECK_OK(fp_prox(op, c.gamma, &x.a, &z.a, &o, ws, nullptr));
+        check_elementwise_structure(op, c.kind, ws, x);
+        // After fp_prox_conj the queries describe the inner prox, whose
+        // Jacobian is I - J (not for the nonconvex maps, whose conjugates are
+        // not proxes).
+        if (c.kind == FP_STRUCT_PROJECTOR && c.name != "l0") {
+            CHECK_OK(fp_prox_conj(op, 1.7, &x.a, &z.a, &o, ws, nullptr));
+            Arr ones(x.shape, Vec(200, 1.0)), d(x.shape);
+            CHECK_OK(fp_jvp(op, ws, &ones.a, 0.0, nullptr, &d.a));
+            IntArr<int8_t> st(x.shape, FP_I8, 9);
+            CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+            for (int64_t i = 0; i < 200; ++i) CHECK(d.data[i] == (st.data[i] == FP_ENTRY_FREE ? 0.0 : 1.0));
+            // At sigma = 0, J = I: the inner prox's I - J is 0.
+            int64_t nfixed = -1, nreg = -1;
+            CHECK_OK(fp_prox_conj(op, 0.0, &x.a, &z.a, &o, ws, nullptr));
+            CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+            CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
+            CHECK(nfixed == 200 && nreg == 0 && st.data[17] == FP_ENTRY_ZERO);
+        }
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // States named by the bounds: the box, the orthant (LOWER at 0) and l1
+    // over a box.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_box(-0.3, 0.5, nullptr, nullptr, &op));
+        Arr x({4}, {-1.0, 0.1, 2.0, -0.3}), z({4});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int8_t> st({4}, FP_I8, 9);
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_LOWER, FP_ENTRY_FREE, FP_ENTRY_UPPER, FP_ENTRY_FREE}));
+        // A branch override: x = -0.3 on the bound is inside by default, at
+        // the bound from below.
+        IntArr<int8_t> side({4}, FP_I8, -1);
+        CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-12));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data[3] == FP_ENTRY_LOWER && st.data[1] == FP_ENTRY_FREE);
+        check_elementwise_structure(op, FP_STRUCT_PROJECTOR, ws, x);
+        CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data[3] == FP_ENTRY_FREE);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        CHECK_OK(fp_op_l1_box(1.0, nullptr, 0.2, 0.9, nullptr, nullptr, &op));
+        Arr y({4}, {0.5, 1.2, 3.0, -2.0});
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.5, &y.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_LOWER, FP_ENTRY_FREE, FP_ENTRY_UPPER, FP_ENTRY_LOWER}));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        CHECK_OK(fp_op_l1_box(1.0, nullptr, -0.5, 0.9, nullptr, nullptr, &op));
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.5, &y.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_ZERO, FP_ENTRY_FREE, FP_ENTRY_UPPER, FP_ENTRY_LOWER}));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        CHECK_OK(fp_op_nonneg(&op));
+        CHECK_OK(fp_workspace_create(op, &y.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &y.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data[3] == FP_ENTRY_LOWER && st.data[0] == FP_ENTRY_FREE);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // Soft thresholding at its threshold (gamma lambda = 1): ZERO by default,
+    // FREE from above; and l0 at its tie, sqrt(2 gamma lambda) = 1, by the
+    // tie rule.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_soft(1.0, nullptr, &op));
+        Arr x({3}, {1.0, -1.0, 2.0}), z({3});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int8_t> st({3}, FP_I8, 9), side({3}, FP_I8, 1);
+        IntArr<int32_t> lab({3}, FP_I32, 9);
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_ZERO, FP_ENTRY_ZERO, FP_ENTRY_FREE}));
+        side.data[1] = -1;  // -1 at x = -1 is the far side of the threshold
+        CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-12));
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_FREE, FP_ENTRY_FREE, FP_ENTRY_FREE}));
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, nullptr, nullptr, 0));
+        CHECK(lab.data == (std::vector<int32_t>{0, 1, 2}));
+        check_elementwise_structure(op, FP_STRUCT_PROJECTOR, ws, x);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        CHECK_OK(fp_op_l0(1.0, nullptr, &op));
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        for (int tie : {FP_TIE_NONZERO, FP_TIE_ZERO}) {
+            o.tie = tie;
+            CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+            CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+            const int8_t at = tie == FP_TIE_NONZERO ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+            CHECK(st.data == (std::vector<int8_t>{at, at, FP_ENTRY_FREE}));
+            check_elementwise_structure(op, FP_STRUCT_PROJECTOR, ws, x);
+        }
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // Determinism and layout: more entries than one block, an axis with
+    // weights, 1, 2 and 15 threads, and outputs written through a transposed
+    // and a strided view.
+    {
+        const int64_t R = 300, C = 257, m = R * C;
+        Vec w(static_cast<size_t>(C));
+        for (auto &v : w) v = unif(0.2, 2.0);
+        Arr wa({C}, w), x({R, C}, randn(m)), z({R, C});
+        x.data[1000] = x.data[60000] = NAN;  // in different blocks
+        fp_op *op;
+        CHECK_OK(fp_op_soft(0.5, &wa.a, &op));
+        std::vector<int64_t> ref;
+        int64_t ref_nreg = 0;
+        for (int nt : {1, 2, 15}) {
+            fp_options o = opts(-1, nt, 1);
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_prox(op, 0.9, &x.a, &z.a, &o, ws, nullptr));
+            IntArr<int64_t> lab({R, C}, FP_I64, 9);
+            int64_t nreg = -1, nfixed = -1;
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, nullptr, &nreg, 1));
+            CHECK_OK(fp_workspace_states(ws, nullptr, &nfixed));
+            CHECK(nreg + nfixed + 2 == m && lab.data[1000] == -1 && lab.data[60000] == -1);
+            if (nt == 1) {
+                ref = lab.data;
+                ref_nreg = nreg;
+                int64_t next = 0;
+                for (int64_t i = 0; i < m; ++i)
+                    if (lab.data[i] >= 0) CHECK(lab.data[i] == next++);
+                CHECK(next == nreg && nreg > 0 && nreg < m);
+            } else {
+                CHECK(lab.data == ref && nreg == ref_nreg);
+            }
+            // Transposed (column-major) int32 labels and signs every other entry.
+            IntArr<int32_t> lt({R, C}, FP_I32, 9, {1, R});
+            IntArr<int8_t> sg({R, C}, FP_I8, 9, {2 * C, 2}, static_cast<size_t>(2 * m));
+            CHECK_OK(fp_workspace_regions(ws, &lt.a, &sg.a, nullptr, 0));
+            for (int64_t i = 0; i < R; ++i)
+                for (int64_t j = 0; j < C; ++j) {
+                    const int64_t e = ref[static_cast<size_t>(i * C + j)];
+                    CHECK(lt.data[static_cast<size_t>(j * R + i)] == e);
+                    CHECK(sg.data[static_cast<size_t>(2 * (i * C + j))] == (e >= 0 ? 1 : 0));
+                    CHECK(sg.data[static_cast<size_t>(2 * (i * C + j) + 1)] == 9);
+                }
+            // The same along the other axis of a transposed input (axis 0 of
+            // shape (C, R)), whose C order is the transpose's.
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+
+    // One step per row: the threshold of each row's own step.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_soft(1.0, nullptr, &op));
+        Arr x({2, 3}, {0.5, 1.5, -2.5, 0.5, 1.5, -2.5}), z({2, 3}), g({2}, {1.0, 2.0});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox_steps(op, &g.a, &x.a, &z.a, &o, ws));
+        IntArr<int8_t> st({2, 3}, FP_I8, 9);
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{1, 0, 0, 1, 1, 0}));
+        check_elementwise_structure(op, FP_STRUCT_PROJECTOR, ws, x);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // A NaN entry is FREE with label -1 and sign 0, in no region and not
+    // fixed; the other entries keep their structure (decision of 2026-10-27).
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_soft(1.0, nullptr, &op));
+        Arr x({4}, {0.5, NAN, 3.0, -0.1}), z({4});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        IntArr<int8_t> st({4}, FP_I8, 9), sg({4}, FP_I8, 9);
+        IntArr<int64_t> lab({4}, FP_I64, 9);
+        int64_t nfixed = -1, nreg = 0;
+        CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, &nreg, 1));
+        CHECK(nfixed == 2 && nreg == 1);
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_ZERO, FP_ENTRY_FREE, FP_ENTRY_FREE, FP_ENTRY_ZERO}));
+        CHECK(lab.data == (std::vector<int64_t>{-1, -1, 0, -1}));
+        CHECK(sg.data == (std::vector<int8_t>{0, 0, 1, 0}));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // float32.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_box(-0.3, 0.5, nullptr, nullptr, &op));
+        std::vector<float> xf = {-1.0f, 0.1f, 2.0f}, zf(3);
+        const int64_t sh[1] = {3};
+        fp_array xa{xf.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU}, za{zf.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU};
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &xa, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &xa, &za, &o, ws, nullptr));
+        IntArr<int8_t> st({3}, FP_I8, 9);
+        CHECK_OK(fp_workspace_states(ws, &st.a, nullptr));
+        CHECK(st.data == (std::vector<int8_t>{FP_ENTRY_LOWER, FP_ENTRY_FREE, FP_ENTRY_UPPER}));
+        Arr coef({3});  // float64: not x's dtype
+        CHECK(fp_workspace_constraint(ws, &coef.a, nullptr, 0) == FP_EDTYPE);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+
+    // Errors, checked before anything is written; empty arrays.
+    {
+        fp_op *op, *tv;
+        CHECK_OK(fp_op_soft(1.0, nullptr, &op));
+        CHECK_OK(fp_op_tv1d(nullptr, FP_TV1D_AUTO, &tv));
+        int kind = -1;
+        CHECK(fp_op_struct_kind(nullptr, &kind) == FP_EINVAL && fp_op_struct_kind(op, nullptr) == FP_EINVAL);
+        Arr x({2, 3}, {0.5, 1.5, -2.5, 0.5, 1.5, -2.5}), z({2, 3});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws, *wt;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_workspace_create(tv, &x.a, &o, &wt));
+        int64_t count = -7;
+        CHECK(fp_workspace_units(ws, &count, nullptr) == FP_EINVAL && count == -7);  // no kept point
+        CHECK(fp_workspace_units(nullptr, &count, nullptr) == FP_EINVAL);
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_prox(tv, 1.0, &x.a, &z.a, &o, wt, nullptr));
+        CHECK(fp_workspace_units(wt, &count, nullptr) == FP_EINVAL);  // no structure kind yet
+        IntArr<int8_t> st({2, 3}, FP_I8, 9), st_short({2, 2}, FP_I8, 9);
+        IntArr<int32_t> st32({2, 3}, FP_I32, 9), lab({2, 3}, FP_I32, 9);
+        IntArr<int64_t> lab_bad({3, 2}, FP_I64, 9);
+        IntArr<int8_t> lab8({2, 3}, FP_I8, 9);
+        int64_t nreg[2] = {-7, -7};
+        CHECK(fp_workspace_states(ws, &st32.a, nullptr) == FP_EDTYPE);
+        CHECK(fp_workspace_states(ws, &st_short.a, nullptr) == FP_ESHAPE);
+        CHECK(fp_workspace_regions(ws, &lab8.a, nullptr, nullptr, 0) == FP_EDTYPE);
+        CHECK(fp_workspace_regions(ws, &lab.a, &st32.a, nullptr, 0) == FP_EDTYPE);
+        CHECK(fp_workspace_regions(ws, &lab.a, nullptr, nreg, 2) == FP_ESHAPE);  // one unit
+        CHECK(fp_workspace_regions(ws, &lab_bad.a, &st.a, nullptr, 0) == FP_ESHAPE);
+        CHECK(lab.data == std::vector<int32_t>(6, 9) && st.data == std::vector<int8_t>(6, 9) && nreg[0] == -7);
+        int8_t active[2] = {5, 5};
+        CHECK(fp_workspace_constraint(ws, nullptr, active, 2) == FP_ESHAPE && active[0] == 5);
+        const int64_t zst[2] = {0, 1};  // stride 0 on an extent > 1: not writable
+        st.a.strides = zst;
+        CHECK(fp_workspace_states(ws, &st.a, nullptr) == FP_EINVAL);
+        fp_workspace_free(ws);
+        fp_workspace_free(wt);
+        // Empty: no units, nothing written.
+        Arr e({0, 3}), ez({0, 3});
+        CHECK_OK(fp_workspace_create(op, &e.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &e.a, &ez.a, &o, ws, nullptr));
+        int64_t size = -1, nfixed = -1;
+        CHECK_OK(fp_workspace_units(ws, &count, &size));
+        CHECK(count == 0 && size == 0);
+        IntArr<int8_t> es({0, 3}, FP_I8);
+        CHECK_OK(fp_workspace_states(ws, &es.a, &nfixed));
+        CHECK(nfixed == 0);
+        CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, nreg, 0));
+        CHECK_OK(fp_workspace_constraint(ws, nullptr, active, 0));
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        fp_op_free(tv);
+    }
+
+    // No allocation with a workspace, on several threads and blocks.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_soft(0.5, nullptr, &op));
+        Arr x({64, 1000}, randn(64000)), z({64, 1000}), coef({64, 1000});
+        IntArr<int8_t> st({64, 1000}, FP_I8), sg({64, 1000}, FP_I8);
+        IntArr<int32_t> lab({64, 1000}, FP_I32);
+        fp_options o = opts(-1, 4, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+        int64_t nfixed, nreg, count, size;
+        int8_t active;
+        CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, &nreg, 1));  // warm up the thread pool
+        const long before = g_allocs.load();
+        for (int k = 0; k < 3; ++k) {
+            CHECK_OK(fp_workspace_units(ws, &count, &size));
+            CHECK_OK(fp_workspace_states(ws, &st.a, &nfixed));
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, &nreg, 1));
+            CHECK_OK(fp_workspace_constraint(ws, &coef.a, &active, 1));
+        }
+        CHECK(g_allocs.load() == before);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -4227,6 +4635,7 @@ int main() {
     test_device_api();
     test_prox_steps();
     test_no_allocation();
+    test_structure_elementwise();
     test_concurrent_callers();
     test_errors_and_special_values();
     test_kept_empty_and_identity();

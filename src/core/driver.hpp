@@ -381,6 +381,106 @@ int64_t kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, const 
     return count;
 }
 
+// Structure of the derivative of elementwise operators (since 1.0.2): the
+// states (FP_I8), labels (FP_I32 or FP_I64) and signs (FP_I8) of the saved
+// entries into the arrays given (each may be null; x's shape, any strides).
+// The whole array is one unit, whose free entries are singleton regions,
+// labelled in C order: a count per fixed block (the vjp's blocks over chunks
+// of kChunk entries) and a prefix over the blocks, so that the labels do not
+// depend on the thread count. A NaN entry is FREE with label -1 and sign 0,
+// and counts neither as a region nor as fixed: the entries are independent,
+// so the others keep their structure (decision of 2026-10-27). Returns the
+// number of regions and sets nfixed (may be null), the entries held.
+template <class T>
+int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr *state, const Arr *labels,
+                              const Arr *sign, int64_t *nfixed) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[3] = {state ? state->strides : cstr, labels ? labels->strides : cstr,
+                            sign ? sign->strides : cstr};
+    const ElemPlan p = make_elem_plan(ws.ndim, ws.shape, ws.axis, op.axis_params() || ws.steps_on, 3, st);
+    const RowOfPos rp = row_of_pos(ws.ndim, ws.shape, ws.axis);
+    const T *save = ws.xs<T>();
+    const int8_t *side = ws.branch_on ? ws.branch.data() : nullptr;
+    const double ktol = branch_tol(ws);
+    const int64_t nb = ws.nblocks, nch = ceil_div(p.numel, kChunk);
+    int64_t *cnt = ws.block_counts.data(), *nnan = cnt + nb, *start = nnan + nb;
+    const int nt = p.numel < kParallelMin ? 1 : ws.nthreads;
+    constexpr int8_t kNan = -1;  // a NaN entry, in the states passed to f
+    // f(off, i, m, s): the states s (kNan at a NaN) of the entries i .. i + m - 1
+    // of the run at offsets off, for the entries of block b.
+    auto states = [&](int64_t b, auto &&f) {
+        const int64_t e0 = std::min(p.numel, nch * b / nb * kChunk);
+        const int64_t e1 = std::min(p.numel, nch * (b + 1) / nb * kChunk);
+        p.for_runs(e0, e1, [&](const int64_t *off, int64_t len, int64_t pos, int64_t widx, int64_t wstep) {
+            split_rows(rp, ws.steps_on, pos, len, [&](int64_t j0, int64_t jlen, int64_t row) {
+                int8_t buf[256];
+                for (int64_t i0 = j0; i0 < j0 + jlen; i0 += 256) {
+                    const int64_t m = std::min<int64_t>(256, j0 + jlen - i0);
+                    const T *xs = save + pos + i0;
+                    op.state_run(xs, m, ws.step(row), widx + i0 * wstep, wstep, ws.tie,
+                                 side ? side + pos + i0 : nullptr, ktol, buf);
+                    for (int64_t i = 0; i < m; ++i)
+                        if (xs[i] != xs[i]) buf[i] = kNan;
+                    f(off, i0, m, buf);
+                }
+            });
+        });
+    };
+    // Pass 1: the free entries of each block, and its NaNs.
+    parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
+        for (int64_t b = b0; b < b1; ++b) {
+            int64_t c = 0, q = 0;
+            states(b, [&](const int64_t *, int64_t, int64_t m, const int8_t *s) {
+                for (int64_t i = 0; i < m; ++i) {
+                    c += s[i] == FP_ENTRY_FREE;
+                    q += s[i] == kNan;
+                }
+            });
+            cnt[b] = c;
+            nnan[b] = q;
+        }
+    });
+    int64_t total = 0, nans = 0;
+    for (int64_t b = 0; b < nb; ++b) {
+        start[b] = total;
+        total += cnt[b];
+        nans += nnan[b];
+    }
+    if (nfixed) *nfixed = p.numel - total - nans;
+    if (!state && !labels && !sign) return total;
+    // Pass 2: the outputs, each block's labels from its offset.
+    int8_t *sd = state ? reinterpret_cast<int8_t *>(state->data) : nullptr;
+    int8_t *gd = sign ? reinterpret_cast<int8_t *>(sign->data) : nullptr;
+    char *ld = labels ? labels->data : nullptr;
+    const bool l64 = labels && labels->dtype == FP_I64;
+    const int64_t ss = p.stride[0][p.ndim - 1], ls = p.stride[1][p.ndim - 1], gs = p.stride[2][p.ndim - 1];
+    auto put = [&](const int64_t *off, int64_t i, int8_t s, int64_t label, int8_t sg) {
+        if (sd) sd[off[0] + i * ss] = s;
+        if (ld) {
+            if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + i * ls] = label;
+            else reinterpret_cast<int32_t *>(ld)[off[1] + i * ls] = static_cast<int32_t>(label);
+        }
+        if (gd) gd[off[2] + i * gs] = sg;
+    };
+    parallel_for(nt, nb, 1, [&](int, int64_t b0, int64_t b1) {
+        for (int64_t b = b0; b < b1; ++b) {
+            int64_t next = start[b];
+            states(b, [&](const int64_t *off, int64_t i0, int64_t m, const int8_t *s) {
+                for (int64_t i = 0; i < m; ++i) {
+                    if (s[i] == kNan) {
+                        put(off, i0 + i, FP_ENTRY_FREE, -1, 0);
+                        continue;
+                    }
+                    const bool free = s[i] == FP_ENTRY_FREE;
+                    put(off, i0 + i, s[i], free ? next : -1, free ? 1 : 0);
+                    next += free;
+                }
+            });
+        }
+    });
+    return total;
+}
+
 // Kink codes of row operators with has_kinks() (since 0.3): row by row from
 // the saved input and solution, into mask (may be null) through its strides.
 template <class T>

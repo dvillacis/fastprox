@@ -84,6 +84,42 @@ int main(void) {
     fp_op_free(op);
     CHECK(fp_op_tv1d(NULL, (fp_tv1d_method)7, &op) == FP_EPARAM && op == NULL);
 
+    /* Structure of the derivative (since 1.0.2): soft thresholding of x keeps
+       entries 0 and 3, as above. */
+    {
+        fp_options o;
+        fp_workspace *ws = NULL;
+        int kind = -1;
+        int8_t state[5], sign[5];
+        int32_t labels[5];
+        int64_t count = 0, size = 0, nfixed = 0, nregions = 0;
+        fp_array sa = vec(NULL, &n), ga = vec(NULL, &n), la = vec(NULL, &n);
+        sa.data = state;
+        sa.dtype = FP_I8;
+        ga.data = sign;
+        ga.dtype = FP_I8;
+        la.data = labels;
+        la.dtype = FP_I32;
+        fp_options_init(&o);
+        o.keep_structure = 1;
+        CHECK(fp_op_soft(1.0, NULL, &op) == FP_OK);
+        CHECK(fp_op_struct_kind(op, &kind) == FP_OK && kind == FP_STRUCT_PROJECTOR);
+        CHECK(fp_workspace_create(op, &xa, &o, &ws) == FP_OK);
+        CHECK(fp_prox(op, 1.0, &xa, &za, &o, ws, NULL) == FP_OK);
+        CHECK(fp_workspace_units(ws, &count, &size) == FP_OK && count == 1 && size == 5);
+        CHECK(fp_workspace_states(ws, &sa, &nfixed) == FP_OK && nfixed == 3);
+        CHECK(state[0] == FP_ENTRY_FREE && state[1] == FP_ENTRY_ZERO && state[3] == FP_ENTRY_FREE);
+        CHECK(fp_workspace_regions(ws, &la, &ga, &nregions, 1) == FP_OK && nregions == 2);
+        CHECK(labels[0] == 0 && labels[1] == -1 && labels[3] == 1 && sign[3] == 1 && sign[4] == 0);
+        CHECK(fp_workspace_constraint(ws, NULL, NULL, 0) == FP_OK);
+        la.dtype = FP_F64;
+        CHECK(fp_workspace_regions(ws, &la, NULL, NULL, 0) == FP_EDTYPE);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        CHECK(FP_STRUCT_NONE == 0 && FP_STRUCT_WEIGHTED == 2 && FP_STRUCT_CURVED == 3);
+        CHECK(FP_ENTRY_LOWER == 2 && FP_ENTRY_UPPER == 3);
+    }
+
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures != 0;
 }

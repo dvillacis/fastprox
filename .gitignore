@@ -12,3 +12,5 @@ dist/
 .cache/
 fuzz-crash.bin
 site/
+reports/
+research_notes/

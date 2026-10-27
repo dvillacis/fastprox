@@ -111,6 +111,7 @@ inline int nearest_kink(double x, const double *t, int m, double tol, Kink &k) n
 // ---- l0 -------------------------------------------------------------------------------
 
 struct L0 final : ElemOp<L0> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     static constexpr bool kTies = true;
     double lambda;
     Vec w;
@@ -163,6 +164,7 @@ struct L0 final : ElemOp<L0> {
 // ---- lq -------------------------------------------------------------------------------
 
 struct Lq final : ElemOp<Lq> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     static constexpr bool kTies = true;
     double lambda, q;
     Vec w;
@@ -414,6 +416,7 @@ struct WeightedPair {
 
 template <bool Weighted>
 struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     using P = WeightedPair<Weighted>;
     using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
     Scad(double l, double aa, Vec ww) : P(l, aa, std::move(ww)) {}
@@ -517,6 +520,7 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
 
 template <bool Weighted>
 struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     using P = WeightedPair<Weighted>;
     using P::chain, P::check_len, P::lambda, P::nw, P::p, P::step, P::wmax;
     Mcp(double l, double bb, Vec ww) : P(l, bb, std::move(ww)) {}
@@ -606,6 +610,7 @@ struct Mcp final : ElemOp<Mcp<Weighted>>, WeightedPair<Weighted> {
 // ---- log ------------------------------------------------------------------------------
 
 struct LogPen final : ElemOp<LogPen> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     static constexpr bool kTies = true;
     double lambda, eps;
     bool eps_mid;  // eps in [2^-500, 2^499]: log_root's usual path needs only a <= 2^499

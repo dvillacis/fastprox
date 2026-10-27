@@ -70,6 +70,9 @@ struct fp_workspace {
     fp::Buffer<double> tot;      // reduced totals, P + 2
     fp::Buffer<double> dparams;  // dparams converted to double
     int64_t nblocks = 1;
+    // Structure queries (since 1.0.2) of elementwise operators: per block, its
+    // free entries and whether it holds a NaN, then the blocks' label offsets.
+    fp::Buffer<int64_t> block_counts;  // 3 * nblocks
 
     // Image operators: images of image_numel entries (the last image_ndim axes),
     // `rows` of them. Working sets for up to image_sets images at once, thread
