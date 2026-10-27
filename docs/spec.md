@@ -48,7 +48,7 @@ Four kinds of caller drive the design. Each one needs something existing librari
 | --- | --- | --- |
 | Proximal splitting (FISTA, PDHG, ADMM, Condat–Vũ) | prox of g or of the conjugate g\* once per iteration, often on a whole image | speed on large arrays, in-place output, a conjugate prox through the Moreau identity |
 | Bilevel learning of regularisation parameters | prox inside the lower-level solver, then derivatives of the solution with respect to the parameters | Jacobian-vector and vector-Jacobian products in the input and in the weights; for single-loop methods, one fused prox step per outer iteration |
-| Sparse hyperparameter learning (Lasso-type models) | soft thresholding, group and weighted ℓ1, simplex and ℓ1-ball projection | the active set or support as a by-product, and Jacobians restricted to it |
+| Sparse hyperparameter learning (Lasso-type models) | soft thresholding, group and weighted ℓ1, simplex and ℓ1-ball projection | the active set or support as a by-product, and Jacobians restricted to it (Section 7, "Structure of the derivative", since 1.0.2) |
 | Nonconvex regularisation (DC methods, IRL1, ℓq penalties, quasinormed TV) | pointwise nonconvex prox maps, and weighted 1D or anisotropic TV as convex subproblems | correct thresholds, a defined tie-breaking rule, and weighted TV with per-edge weights |
 
 - **Many small problems.** Bilevel and cross-validation loops call the operator thousands of times on small inputs. Per-call overhead must therefore be small: no Python-level loops over rows, and no array copies when the input is contiguous.
@@ -449,10 +449,11 @@ Every operator exposes Jacobian-vector products (JVP) and vector-Jacobian produc
 | ℓ1 ball | signed version of the simplex Jacobian on the magnitudes when active, else identity | support, signs |
 | Monotone cone | block averaging over the pooled blocks | block boundaries |
 | 1D TV, weighted 1D TV | averaging over the constant segments of the solution | segment boundaries |
-| Anisotropic, isotropic and graph TV | no simple closed form | the dual variables; derivatives by implicit differentiation of the dual optimality conditions, solved with conjugate gradients |
+| Anisotropic, graph and tree TV | averaging over the regions of the solution, with boundary terms in γ and the weights from the jump signs (revised 27 October 2026: this row described the 0.1 plan) | region labels, region sizes, edge signs |
+| Isotropic TV | M(Mᵀ(I + GᵀHG)M)⁻¹Mᵀ, with M the flat regions and H the curvature of the non-flat pixels, solved in region space by conjugate gradients | region labels, flat mask, the dual |
 
 - **Parameter derivatives.** For 1D TV, the derivative in γ or in w\_i is constant on each segment and depends only on the segment length, the weights at its two ends and the signs of the jumps there, so it is also O(n). For thresholding maps, the derivative in λ is −γ ψ'(z\_i) / (1 + γλ ψ''(z\_i)) on the support.
-- **Kinks.** At points where the prox is not differentiable (an entry exactly at a threshold, a segment boundary with zero jump), the library returns the Jacobian of the active structure it selected, consistent with the tie rule in Section 4. Callers that need a full Clarke Jacobian are out of scope. Revised 23 October 2026: the regular and limiting coderivatives at kinks, and mixtures of the one-sided pieces, come in 1.x ("Coderivatives for nonsmooth bilevel methods" below).
+- **Kinks.** At points where the prox is not differentiable (an entry exactly at a threshold, a segment boundary with zero jump), the library returns the Jacobian of the active structure it selected, consistent with the tie rule in Section 4. Callers that need a full Clarke Jacobian are out of scope. Revised 23 October 2026: the regular and limiting coderivatives at kinks, and mixtures of the one-sided pieces, come in 1.x ("Coderivatives for nonsmooth bilevel methods" below). Since 1.0.2 the selected piece itself is queryable: its fixed entries, regions and constraint ("Structure of the derivative" below).
 - **Iterative operators.** For isotropic and multi-dimensional TV, the VJP solves a linear system on the dual active set by conjugate gradients, warm-started and stopped at a user tolerance. The returned residual tells bilevel codes with inexactness control, such as MAID-type methods, how accurate the hypergradient is.
 - **Verification.** Every derivative is tested against finite differences away from kinks, and the JVP and VJP are tested for adjointness: ⟨v, J u⟩ = ⟨Jᵀ v, u⟩ to rounding.
 
@@ -466,6 +467,11 @@ Every operator exposes Jacobian-vector products (JVP) and vector-Jacobian produc
 
 fastprox does not ship these methods: bilevel algorithms belong in a separate package on the public API (decision of 2026-10-23). The sets, however, are known exactly and cheaply only inside the operator. fastprox provides them for three families, in this order.
 
+**Relation to the structure of the derivative (1.0.2).** The default derivatives, and the structure queries of 1.0.2 ("Structure of the derivative" below), describe one piece: the one the tie rule selects, or the one a branch override forces. A coderivative at a kink is a set over all the pieces that meet there, and each of those pieces is a structure the 1.0.2 queries describe under one choice of sides. So the families build on those queries rather than computing structure of their own (decision of 2026-10-27).
+- **Family 1** reads its codes after `fp_prox_conj` from the states and the kink mask of the inner prox; only the multipliers, the codes of the image duals and the projections are new.
+- **Family 2**'s two pieces at a kink are the structures under side −1 and side +1; the sets, their projections and the mixtures are new.
+- **Family 3** is a quadratic programme in the coordinates of the structure, over the pieces that the sides of the row's kink entries select.
+
 **Family 1: balls of a dual or a conjugate (closed form).**
 - **Which operators.**
   - After `fp_prox_conj` with `keep_structure`, operators whose conjugate prox projects onto a product of balls: group ℓ2, with the ℓ2 norm as one group (Euclidean balls), and soft thresholding (intervals, the one-dimensional case). In a PDPS method for TV with K = ∇, the dual step is `fp_prox_conj` of group ℓ2.
@@ -478,6 +484,8 @@ fastprox does not ship these methods: bilevel algorithms belong in a separate pa
   - 1: strictly active, ‖u\_j‖ = r\_j and ν\_j > tol;
   - 2: degenerate, ‖u\_j‖ = r\_j and ν\_j ≤ tol.
   - Code 2 is the existing kink code of group ℓ2 and of isotropic TV.
+  - After `fp_prox_conj`, the codes are not a second source of structure. The conjugate projection keeps y\_j inside its ball exactly where the inner prox (Section 7, "Structure of the derivative", edge cases) holds group j at ZERO, and puts it on the sphere with ν\_j = 0 exactly at the inner prox's kink. So at tol = 0 the codes are a function of the 1.0.2 states and the kink mask: 0 for ZERO entries off the kink, 1 for FREE entries off the kink, 2 at the kink. The implementation derives them that way, and a test checks the agreement. For tol > 0, ν\_j ≤ tol widens code 2 in ν's relative units, where the kink mask's tolerance is absolute in y's.
+  - After `fp_prox` of the image operators, the codes are new: they are per dual ball (pixel, or edge for anisotropic TV), while the 1.0.2 structure describes the entries of x, and its flat regions do not say which pixel's ball is active.
 - **The sets.** Per ball, for the adjoint pair (w\_j ∈ ℝ^{c}, λ\_j ∈ ℝ), from Suonperä and Valkonen's Lemma 5.5 and Corollary 5.6:
 
 | Code | Fréchet, (5.21) | Limiting, (5.22) |
@@ -497,6 +505,7 @@ fastprox does not ship these methods: bilevel algorithms belong in a separate pa
   - Away from kinks both are {slope · y}.
 - **Jointly in x and the parameters.** At a kink, the two pieces' rows J\_− and J\_+ (derivatives in x, γ and θ) agree on the kink's hyperplane x = κ(γ, θ). The same argument gives the regular coderivative {(1 − s) y J\_−ᵀ + s y J\_+ᵀ : s ∈ [0, 1]} when (b − a) y ≥ 0 and the empty set otherwise. The limiting coderivative adds the endpoints s = 0 and s = 1.
 - **Group forms.** For a group in the norm (group soft thresholding at ‖x\_g‖ = γλc\_g, group SCAD, MCP and splines), the pieces meet on a sphere rather than a hyperplane. The directional derivative is still J\_− h or J\_+ h by the side of the normal n, with J\_+ − J\_− = c nᵀ by continuity. So the same holds with (b − a) y replaced by ⟨c, y⟩: v = J\_−ᵀ y + t n with 0 ≤ t ≤ ⟨c, y⟩. Its projection is a small quadratic programme with two linear constraints, solved by cases.
+- **The two pieces are the 1.0.2 structures.** J\_− and J\_+ are the Jacobians of the structures under side −1 and side +1 (`ctx.structure(branch=-1)` and `branch=+1`): for the projector maps, ZERO or LOWER/UPPER on one side and FREE on the other. The coderivative needs no structure beyond them.
 - **Fractional branches.** So every element is a mixture of the two pieces with a weight s\_i ∈ [0, 1] per kink entry. `fp_workspace_set_branch_weights` generalises `fp_workspace_set_branch` (s = 0 is side −1, s = 1 side +1), and `fp_jvp` and `fp_vjp` then differentiate the mixture. That includes the parameter gradients, which is what a hypergradient through the selected element needs.
 - **The projections.** Per entry, onto the graph of the coderivative in the (y, v) plane:
   - a convex cone at a kink in the regular case;
@@ -507,7 +516,8 @@ fastprox does not ship these methods: bilevel algorithms belong in a separate pa
 **Family 3: polyhedral rows (design only, later).**
 - **Which operators.** The simplex, the ℓ1 ball, the hyperplane with a box, isotonic regression, and 1D, anisotropic, graph and tree TV. They also have piecewise-affine prox maps, so 8(26) gives the regular coderivative as a polyhedral cone. The pieces are indexed by the kink structure: which threshold entries join the support, which zero-jump edges join or split.
 - **Why not closed form.** One isolated kink in a row is the segment of family 2, between the two pieces' VJPs. Several kinks in one row interact: one entry joining the support moves τ for the others, and one edge joining moves a segment's mean. The set is then a cone over 2^m pieces, and its projection is a small quadratic programme over the m kink entries of the row.
-- **What is planned.** The kink mask already counts m per row. The design is a QP in the row's kink coordinates, solved exactly by an active-set method, scheduled when a user needs more than isolated kinks.
+- **What 1.0.2 already gives.** The kink mask counts m per row, and each piece is queryable: setting the sides of the row's kink entries with `fp_workspace_set_branch` and reading the structure gives the piece's subspace L\_σ, the range of its Jacobian J\_σ, which is the projector onto L\_σ for the PROJECTOR rows. The pieces with a full-dimensional cone of directions are the B-Jacobians, so their L\_σ are the subspaces of the SCD derivative (Gfrerer and Outrata 2022); the regular coderivative is {v : ⟨v, h⟩ ≤ ⟨y, J\_σ h⟩ for every σ and every h in the cone C\_σ of σ}, by 8(26).
+- **What is planned.** The cones C\_σ are sign conditions on the m kink coordinates, so the set is described by the structure at one side plus m variables, not by 2^m explicit pieces. The design is a QP in those coordinates (the regions and the constraint of L, and the m kink entries), solved exactly by an active-set method, scheduled when a user needs more than isolated kinks.
 
 ```c
 /* Family 1 (1.x). After fp_prox_conj on fp_op_group_l2 (groups NULL: the l2
@@ -544,6 +554,210 @@ FP_API fp_status fp_workspace_set_branch_weights(fp_workspace *ws, const fp_arra
   - Determinism for both.
   - A PDPS denoising run against Suonperä and Valkonen's Section 6 setup, in the bilevel package's test suite rather than here.
 - **Out of fastprox.** The PDPS loop, the adjoint objective, the step sizes and the choice of element belong to the bilevel package.
+
+### Structure of the derivative (1.0.2, design)
+
+**Why the structure itself.** The derivative calls apply the Jacobian J of the prox in x at the kept point, but they never say what that Jacobian is built from. The structure is in the workspace already: the support of a projection, the segments of 1D TV, the region labels of image and graph TV. Three uses need it explicitly, not only through products.
+- **Reduced systems for implicit differentiation through an outer iteration.** When the prox sits inside a solver with a forward operator A (deblurring, tomography), the hypergradient's adjoint system restricted to the identified structure is Mᵀ AᵀA M c = Mᵀ g, with M the matrix whose columns are the regions. It is far smaller than the full system: in the check of 2026-10-26 (1D TV deblurring, n = 120), it had 17 unknowns, and it agreed with the fixed-point adjoint built from `fp_vjp` to 2·10⁻¹⁴ and with finite differences to 6·10⁻¹¹. Without the labels the caller has to rebuild them from z with a threshold, which is fragile for image TV at loose tolerances.
+- **SCD semismooth\* Newton steps.** The Newton direction of Gfrerer, Hubmer and Ramlau (Inverse Problems 41 (2025) 075002, Algorithm 3.8) is a stationary point of a quadratic programme over rng P, with P the orthogonal projector of a subspace in the SC derivative of ∂g. For the polyhedral operators P is determined by the structure alone ("Relation to SCD subspaces" below). `ctx.jacobian_diag` already serves the elementwise maps (0.2); this extends it to every row, image and graph operator.
+- **Support-restricted hypergradients and the polyhedral coderivatives.** Sparse hyperparameter learning (Section 3, Use cases) wants the support as a by-product, and Family 3 of the coderivatives (above) is a QP in the coordinates of exactly this structure.
+
+**Scope.** Queries on the kept point. No new operator, no change to `fp_prox`, `fp_jvp` or `fp_vjp`, and no solver: the reduced systems, Newton steps and hypergradients stay in the caller's code (Section 2, non-goals).
+
+**The object: the tangent subspace L of each unit.** A unit is the part of the batch the operator solves as one problem (table below). For a unit with `size` entries, the structure is four things.
+- **A state per entry**, s\_i ∈ {FREE, ZERO, LOWER, UPPER}. FREE entries move with x; the others are held: at 0 (thresholded, a killed group, off the support), at the lower bound or at the upper bound.
+- **A region per FREE entry**, a label ℓ\_i ∈ {0, …, K − 1}, with K the unit's number of regions. Entries with one label move together: a singleton region is an entry that moves on its own.
+- **A sign per FREE entry**, σ\_i ∈ {−1, +1}: the entry follows its region's coordinate with that sign. It is +1 everywhere except where an operator ties entries by magnitude (the sorted ℓ1 norm, the ℓ∞ norm, the sum of the k largest absolute values).
+- **At most one linear constraint**, a vector a of the unit's size and a flag saying whether it is active. Six operators have one (table below); the others never do.
+
+These define
+
+```latex
+L = \{\, d \in \mathbb{R}^{\mathrm{size}} :\; d_i = 0 \text{ if } s_i \neq \mathrm{FREE},\;\; d_i = \sigma_i\, c_{\ell_i} \text{ for some } c \in \mathbb{R}^K,\;\; a^\top d = 0 \text{ if the constraint is active} \,\}
+```
+
+so that L = {M c : c ∈ ℝᴷ, (Mᵀa)ᵀc = 0 when active}, with M the size × K matrix M\_{i,ℓ\_i} = σ\_i, and dim L = K − 1 with an active constraint (when Mᵀa ≠ 0), K otherwise.
+
+**What the library guarantees.** Let J be the Jacobian in x that `fp_jvp` and `fp_vjp` apply at the kept point now: the default piece, or the one chosen by `fp_workspace_set_branch`.
+1. **Range.** range J = L, not only ⊆: every direction in L is reached. For J symmetric, as for every convex operator (Section 4), the kernel is then L^⊥.
+2. **Form of J,** per operator, given by `fp_op_struct_kind`:
+   - **PROJECTOR:** J = P\_L, the orthogonal projector onto L. All the polyhedral operators: on a region it averages σ\_i x\_i, and an active constraint removes the component along P\_M a.
+   - **WEIGHTED:** J is the projector onto L orthogonal in the metric diag(w). Only weighted isotonic regression, whose fit is a projection in that metric, not a Euclidean prox (decision of 2026-10-25).
+   - **CURVED:** range J = L, but J is not a projector: J restricted to L is symmetric positive definite (the convex operators with curvature) or a positive diagonal (SCAD, MCP, ℓq, the log penalty: their slopes). The caller applies it by `fp_jvp`.
+   - **NONE:** no structure query (the spectral operators; "Later" below).
+3. **Parameters.** The columns of the Jacobian in γ and in the parameters θ respect the states, the regions and the signs (fixed entries do not move, tied entries move together), but not necessarily the constraint: a change of radius, α or b moves the affine level of the face. The guarantee on L is about x only.
+4. **Determinism.** The four outputs are the same for any thread count, and the same for any strides of x and of the outputs.
+
+**Relation to SCD subspaces.** For v = (x − z)/γ ∈ ∂g(z) at z = prox\_{γg}(x):
+- **Convex g.** Gfrerer and Outrata (arXiv 2106.00519, Proposition 3.26 and Corollary 3.28; restated as Theorem 3.6 of Gfrerer, Outrata and Valdman 2022) show that ∂g is an SCD mapping, and that its subspaces at (z, v) are rge(B, (I − B)/γ) with B a limiting Jacobian of prox\_{γg} at x, symmetric positive semidefinite with ‖B‖ ≤ 1. The J of the Lipschitz class is the Jacobian of a smooth piece, an element of the B-subdifferential (Section 4), so rge(J, (I − J)/γ) is such a subspace.
+- **In the (P, W) form** of Gfrerer, Hubmer and Ramlau (Definition 3.6: L = rge(P, W) with P² = P and W(I − P) = I − P, both symmetric), that subspace is
+  - P = P\_L, the projector this section describes;
+  - W = (I − P) + P (J\_L⁻¹ − I) P / γ, with J\_L the restriction of J to L, invertible by guarantee 1.
+  - For PROJECTOR operators J\_L = I, so W = I − P: the structure alone gives the subspace, with no curvature term. For CURVED operators W's block on L needs J, which the caller applies through `fp_jvp` (for example by CG on J\_L y = s).
+- **Prox-regular g.** SCAD and MCP under their step conditions, and the log penalty at γλ < ε²: Proposition 3.26 of the same paper covers prox-regular, subdifferentially continuous functions, with γ in the role of λ, so the same statement holds within the step conditions.
+- **The discontinuous class** (ℓ0, ℓq, the log penalty above ε²): the states give the per-entry subspaces that `jacobian_diag` already documents, as a convention; this section claims nothing more there (Section 4).
+- **Weighted isotonic regression:** the statements hold after the change of variables z ↦ W^½ z.
+- **After `fp_prox_conj`:** Moreau's identity gives J\_conj = I − J, so the roles of the two components swap: for a PROJECTOR operator, the conjugate's tangent subspace is L^⊥. The queries describe the inner prox at y/σ, and say so (Python: `s.conj`).
+
+**Units and numbering.**
+
+| Operator class | Unit | size | Per-unit arrays (count entries) |
+| --- | --- | --- | --- |
+| Elementwise maps | the whole array | numel | count = 1 |
+| Row operators (groups, projections, isotonic, sorted ℓ1, 1D TV and its variants) | each row along the axis | the axis length n | one per row, in C order over the dimensions other than the axis |
+| Image operators (anisotropic and isotropic TV) | each image (the last 2 or 3 axes) | the image's pixel count N | one per image, in C order over the leading dimensions |
+| Graph and tree TV | each graph instance (the last axis, of length n) | n | one per instance, in C order over the leading dimensions |
+
+- **Labels are local to the unit and canonical:** numbered 0, 1, 2, … in the order of each region's first entry, in the unit's own order (along the axis for rows, C order over the image axes for images, node order for graphs, C order for elementwise maps). Two calls with the same structure give the same labels, whatever the strides, the axis or the thread count. Fixed entries have label −1.
+- **Labels are int32 or int64,** as the caller chooses (new dtypes FP\_I32 and FP\_I64, accepted only by these queries). int32 returns FP\_ESHAPE for a unit with more than 2³¹ − 1 entries; the stored image and graph labels are int32 already.
+- **Global numbering** across the batch is the offsets of the per-unit counts, in Python (`s.offsets`, `s.global_labels()`), not in C: a global int32 numbering would overflow on large batches.
+
+**Operator by operator.** "Stored" means the derivative already saves it (inventory of `src/ops/*.cpp`, 2026-10-27), so the query is a copy and a scatter. "Recomputed" means O(1) per entry from the saved x and the operator's parameters, by the same function the derivative uses (`piece_of`, the group norms), so the two cannot disagree.
+
+| Operator | States | Regions and signs | Constraint a (when active) | Kind | Source |
+| --- | --- | --- | --- | --- | --- |
+| Soft thresholding (weighted) | ZERO thresholded, FREE | singletons | — | PROJECTOR | recomputed |
+| Elastic net | ZERO, FREE | singletons | — | CURVED | recomputed |
+| Huber, log barrier | FREE | singletons | — | CURVED | — |
+| Box, nonnegative orthant | LOWER, UPPER (orthant: LOWER at 0), FREE | singletons | — | PROJECTOR | recomputed |
+| ℓ1 over a box | ZERO, LOWER, UPPER, FREE | singletons | — | PROJECTOR | recomputed |
+| ℓ0 | ZERO (the zero branch of the tie rule), FREE | singletons | — | PROJECTOR | recomputed with `ws.tie` |
+| ℓq, log penalty | ZERO, FREE | singletons | — | CURVED | recomputed with `ws.tie` |
+| SCAD, MCP | ZERO (the thresholded piece), FREE | singletons | — | CURVED | recomputed |
+| Group ℓ2 | ZERO on killed groups, FREE | singletons | — | CURVED | stored (`code`: group live) |
+| Group Huber, SCAD, MCP | ZERO on groups set to 0, FREE | singletons | — | CURVED | recomputed |
+| Tree-structured group ℓ2, sparse group lasso | ZERO where the ℓ1 step or a nested shrink zeroes the entry, FREE | singletons | — | CURVED | recomputed |
+| ℓ2 ball | FREE | singletons | outside the ball: a = x/‖x‖ | CURVED | recomputed |
+| Second-order cone (t first) | inside: FREE; in the polar cone: ZERO; on the boundary: FREE | singletons | on the boundary: a = (−1, y/‖y‖) | CURVED | recomputed |
+| Simplex | FREE on the support, ZERO elsewhere | singletons | a = 1 on the support | PROJECTOR | stored |
+| ℓ1 ball (weighted) | inside: FREE; projected: FREE on the support, ZERO elsewhere | singletons | projected: a\_i = w\_i sign(x\_i) on the support | PROJECTOR | stored |
+| ℓ∞ norm | z = 0: ZERO; else FREE | the clipped set is one region with σ\_i = sign(x\_i); the rest singletons | — | PROJECTOR | stored |
+| Maximum | FREE | the clipped (top) set is one region, σ = +1; the rest singletons | — | PROJECTOR | stored |
+| Sum of the k largest | FREE | the entries at the shared level are one region, σ = +1 (sign(x\_i) for absolute values); entries below the level and at the cap are singletons | — | PROJECTOR | stored |
+| Hyperplane, half-space, each with a box | LOWER, UPPER on the bounds (lo\_i = hi\_i: LOWER), FREE inside | singletons | the hyperplane, and the half-space when active: a\_i on the FREE entries | PROJECTOR | stored |
+| Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights | stored (block starts) |
+| Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks with z ≠ 0, σ\_i = sign(x\_i) | — | PROJECTOR | stored; a re-sort, O(n log n) |
+| 1D TV (weighted) | FREE | the segments (an edge with a jump or a zero weight separates) | — | PROJECTOR | stored (edge codes) |
+| 1D TV ball | FREE | inside: singletons; on the sphere: the segments of the 1D TV prox at γ\* | on the sphere: a = Dᵀ(w ⊙ sign(Dz)), with sign 0 where there is no jump | PROJECTOR | stored |
+| 1D TV with ℓ2 of differences | FREE | dual strictly inside its ball: the pieces between zero weights; otherwise singletons | — | CURVED | stored (inside flag) |
+| Anisotropic TV (2D, 3D) | FREE | the regions of the saved structure | — | PROJECTOR | stored (`label`, `ncomp`) |
+| Isotropic TV (2D, 3D) | FREE | the flat regions of the derivative's region space | — | CURVED | stored (`label`, `ncomp`) |
+| Graph TV, tree TV | FREE | the regions | — | PROJECTOR | stored (`label`, `nreg`) |
+| Spectral operators | — | — | — | NONE | — |
+
+- **Checks on the table.** Each row follows from the Jacobian documented in Section 7 and `docs/api.md`; for instance the simplex's I − 1 1ᵀ/|S| on S is P\_L with a = 1\_S, the ℓ1 ball's P\_S − a aᵀ/‖a‖² is P\_L with a = w ⊙ sign(x) on S, and 1D TV's segment averaging is P\_L with the segments as regions. Where a row and the code disagree, the code's JVP is the reference and the table is corrected: guarantee 1 and 2 are tested against `fp_jvp` for every operator (Tests below), so a wrong row cannot ship.
+- **Isotropic TV is CURVED:** its Jacobian is M(Mᵀ(I + GᵀHG)M)⁻¹Mᵀ on the flat regions (Section 7; `tv_iso.cpp`), whose range is span M. The curvature H, and with it W's block on L, is not exported ("Later").
+
+**Edge cases.**
+- **Kinks and branch overrides.** The queries describe the piece the derivatives use now. After `fp_workspace_set_branch`, the elementwise states come from `piece_of(b + side·δ)` exactly as `deriv_at` takes them, and the row and image queries read the overridden code or structure (`apply_structure`). So side −1 at the tail of a 1D TV kink edge merges two segments into one region, and +1 at a simplex threshold entry makes it FREE. Clearing the override restores the default.
+- **Mixtures.** While fractional branch weights are set (`fp_workspace_set_branch_weights`, Family 2 above), J is a convex combination of two pieces and has no single tangent subspace: the queries return FP\_EINVAL.
+- **The identity case** (γ = 0, λ = 0, a zero weight everywhere): every entry FREE and its own region, no constraint.
+- **A unit whose input holds a NaN:** its count of regions is −1, its labels −1, its states FREE, its signs 0 and its constraint inactive. The derivatives of such a unit are already undefined (NaN).
+- **Iterative image operators at a loose tolerance.** The structure is that of the saved point, as the derivatives are: it is the solution's only when `fp_workspace_deriv_exact` says so. After `fp_workspace_refine` the queries describe the refined point.
+- **fp\_prox\_steps:** one step per row or image changes nothing here.
+- **Devices.** A workspace on FP\_DEVICE\_CUDA returns FP\_EINVAL until the 1.x kernels save their structure.
+- **Empty arrays:** count 0, nothing written, FP\_OK.
+
+**C API** (all since 1.0.2; additions only, the ABI rules of Section 9 hold).
+
+```c
+/* FP_I32 and FP_I64 (since 1.0.2) are accepted only by the labels of
+ * fp_workspace_regions. */
+typedef enum { FP_F32 = 1, FP_F64 = 2, FP_I8 = 3, FP_I32 = 4, FP_I64 = 5 } fp_dtype;
+
+typedef enum {
+    FP_ENTRY_FREE  = 0, /* moves with x: on its own, or with its region */
+    FP_ENTRY_ZERO  = 1, /* held at 0: thresholded, a killed group, off the support */
+    FP_ENTRY_LOWER = 2, /* held at its lower bound (lower = upper included) */
+    FP_ENTRY_UPPER = 3  /* held at its upper bound */
+} fp_entry_state;
+
+typedef enum {
+    FP_STRUCT_NONE      = 0, /* no structure queries (spectral operators) */
+    FP_STRUCT_PROJECTOR = 1, /* J is the orthogonal projector onto L */
+    FP_STRUCT_WEIGHTED  = 2, /* J is the projector onto L orthogonal in diag(w) */
+    FP_STRUCT_CURVED    = 3  /* range J = L; J is not a projector */
+} fp_struct_kind;
+
+/* The kind of every point of op (a property of the operator, not of a call):
+ * an fp_struct_kind in *kind. */
+FP_API fp_status fp_op_struct_kind(const fp_op *op, int *kind);
+
+/* The units of the kept point: their number and the entries in each
+ * (docs/spec.md, Section 7, "Structure of the derivative"). Either may be
+ * NULL. FP_EINVAL without a kept point. */
+FP_API fp_status fp_workspace_units(const fp_workspace *ws, int64_t *count, int64_t *size);
+
+/* Per entry, an fp_entry_state (FP_I8, the shape of x, any strides; NULL for
+ * the count only) and the number of entries not FREE (may be NULL). */
+FP_API fp_status fp_workspace_states(const fp_workspace *ws, fp_array *state, int64_t *nfixed);
+
+/* Per entry, the label of its region within its unit (FP_I32 or FP_I64, the
+ * shape of x; -1 where the state is not FREE) and its sign (FP_I8, the shape
+ * of x; +1 or -1, 0 where not FREE); per unit, the number of regions
+ * (nregions, a contiguous array of count entries in the order of
+ * fp_workspace_units; -1 for a unit whose input holds a NaN). Any of the
+ * three may be NULL; count must equal the number of units when nregions is
+ * given (FP_ESHAPE otherwise). */
+FP_API fp_status fp_workspace_regions(const fp_workspace *ws, fp_array *labels, fp_array *sign,
+                                      int64_t *nregions, int64_t count);
+
+/* Per unit, whether its linear constraint is active (active, a contiguous
+ * int8 array of count entries) and, per entry, its coefficient (coef, x's
+ * dtype and shape; 0 where not FREE and in units without an active
+ * constraint). Either may be NULL. Operators that never have a constraint
+ * write zeros. */
+FP_API fp_status fp_workspace_constraint(const fp_workspace *ws, fp_array *coef,
+                                         int8_t *active, int64_t count);
+```
+
+- **Errors.** FP\_EINVAL without a kept point (as `fp_jvp`), for an operator of kind NONE, while branch weights are set, and on a device workspace; FP\_EDTYPE for a state or sign array that is not FP\_I8, labels that are not FP\_I32 or FP\_I64, or a coefficient array not of x's dtype; FP\_ESHAPE for a shape that is not x's, a count that is not the number of units, or int32 labels too narrow. Every argument is checked before anything is written, so a failed query writes nothing and leaves the workspace as it was.
+- **Cost and allocation.** O(size) per unit (O(n log n) per row for the sorted ℓ1 norm), on the workspace's threads, parallel over units. The elementwise labels are a prefix count over the whole array, in the fixed blocks of `reduction_blocks` (two passes), so they do not depend on the thread count. No query allocates when the workspace exists: its scratch, including the per-block counts, is sized in `build_workspace`, and the allocation counter of `tests/c/test_core.cpp` covers them. A query costs at most one `fp_jvp` (performance gate below).
+- **Thread safety.** As for the other queries: no two calls on one workspace may overlap.
+- **Layout.** The saved structure is in canonical order (rows axis-last, images in C order over the leading dimensions: `RowPlan` and `ImagePlan` in `src/core/layout.hpp` and `driver.hpp`). The outputs are scattered to x's layout through the plan's offsets, as `fp_workspace_set_branch` gathers in the other direction.
+
+**Python** (since 1.0.2).
+
+```python
+op = fp.TV1D(weights=w)
+z, ctx = op.prox(x, gamma, keep=True)
+s = ctx.structure()            # an fp.Structure, read under the context's lock
+s.kind                         # "projector", "weighted", "curved"
+s.state                        # int8, x's shape: 0 free, 1 zero, 2 lower, 3 upper
+s.labels                       # int32 (int64 when a unit needs it), x's shape, -1 where not free
+s.sign                         # int8, x's shape
+s.nregions                     # int64, the batch shape (() for elementwise operators)
+s.coef, s.active               # x's dtype and x's shape, and bool per unit; None for
+                               # operators that never have a constraint
+s.conj                         # True after prox_conj: s describes the inner prox
+s.offsets                      # int64, count + 1: where each unit's regions start
+s.global_labels()              # int64, x's shape: offsets[unit] + label, -1 where not free
+s.reduce(v)                    # M^T v: the signed sum of v over each region, length offsets[-1]
+s.expand(c)                    # M c, x's shape (0 where not free)
+s.project(v)                   # P_L v (in the metric diag(w) for "weighted")
+s.dim                          # dim L per unit: K - 1 with an active constraint, K otherwise
+s.matrix(unit)                 # M of one unit, dense (size x K), for small problems and tests
+```
+
+- **The helpers are NumPy**, with `np.bincount` on the global labels; no SciPy, so the wheels still depend only on NumPy. `s.project` is the reference implementation of guarantee 2, used by the tests. With an active constraint it is Q v − (⟨b, Q v⟩/⟨b, b⟩) b, with Q the projector onto span M and b = Q a.
+- **`ctx.structure()` after a branch override** is not possible in one call, since `branch=` applies to a single `jvp` or `vjp`. `ctx.structure(branch=side, kink_tol=0.0)` takes the same arguments and describes that piece.
+- **The reduced deblurring system** of the motivating check, matrix-free: `lambda c: s.reduce(AT(A(s.expand(c))))`, by CG on its offsets[-1] unknowns.
+
+**Tests.**
+- **Guarantee 1 (range), every operator in `CASES`.** For random dx: J dx is 0 on the fixed entries, σ\_i (J dx)\_i is equal within each region, and aᵀ(J dx) = 0 under an active constraint, to rounding. Conversely, on small units, the matrix of J (n JVPs) has rank dim L, and J c ∈ L reaches each basis vector of L.
+- **Guarantee 2 (form).** PROJECTOR: `fp_jvp` equals `s.project` to rounding for random dx; WEIGHTED: the same in the metric diag(w); CURVED: J maps L into L, and its restriction is symmetric positive definite (the convex ones) or a positive diagonal (SCAD, MCP, ℓq, log).
+- **Branches.** The same checks after random sides at the kinks of every operator that has `fp_workspace_set_branch`, and after clearing it.
+- **Edge cases.** The identity case, NaN units, empty arrays, `fp_prox_conj` (`fp_jvp` equals I − J of the inner structure), `fp_prox_steps`, refine on the image operators, and FP\_EINVAL for spectral operators, branch weights and device workspaces.
+- **Determinism and layout.** The same outputs for 1, 2 and 15 threads, for transposed and strided inputs and outputs, and for every axis; labels in first-appearance order.
+- **No allocation.** The allocation counter with a workspace; the C header check with FP\_I32 and FP\_I64.
+- **Fuzzing.** `fuzz/fuzz_ops.cpp` checks guarantee 1 on the fuzzed rows, at the extreme parameter ranges of the 1.0.1 audit.
+- **Examples as tests.** `examples/bilevel_deblurring.py`: the fixed-point adjoint, the reduced system through `s.reduce`/`s.expand` and finite differences agree (to 10⁻⁹ against finite differences, 10⁻¹² between the first two). `examples/scd_newton_lasso.py`: Algorithm 3.8 of Gfrerer, Hubmer and Ramlau for a Lasso problem with P from `s.project` and W = I − P, converging in a few steps once the support is identified. The Newton loop lives in the example, not in the library.
+
+**Later (not in 1.0.2).**
+- **The device-native image TV and the framework wrappers.** `_tv_torch.py` and `_tv_jax.py` build regions by hooking and pointer jumping but keep them private, labelled by the smallest global index. Compacting them to the canonical labels is a cumulative sum over the sorted keys (O(N), no new sort). Exposing them, and `structure` in `fastprox.torch` and `fastprox.jax`, waits for a user.
+- **The curvature of the CURVED image operators.** Isotropic TV's H (the region-space operator of its CG) would give W's block on L without JVPs; it needs a design for exporting a sparse operator through a plain-C API.
+- **The spectral operators.** Their structure lives in the clusters of the spectrum, which the caller's decomposition determines; a query would need the decomposition passed back.
+- **The coderivatives** ("Coderivatives for nonsmooth bilevel methods", above) build on this section: Family 1 reads its codes after `fp_prox_conj` from the states and the kink mask, Family 2's pieces are the structures under side −1 and +1, and Family 3 is a QP in the coordinates this section defines.
 
 ## Architecture
 
@@ -924,6 +1138,7 @@ Release 0.1 is highlighted because it already serves most callers: thresholding,
 - **0.2 — images.** Anisotropic and isotropic TV in 2D and 3D with duality gaps and warm starts, 1D TV with ℓ2 of differences, and the nonconvex pointwise maps, all exposed in the Python package.
 - **0.3 — graph TV.** The max-flow engine, graph TV and tree TV, VJPs for the iterative operators by conjugate gradients, and the PyTorch and JAX wrappers, with a device-native path for image TV that runs on GPUs (Section 12).
 - **1.0 — stable.** ABI freeze, conda-forge packages, documentation, and the PyProximal adapter. After 1.0, only additions that keep the ABI are allowed until 2.0.
+- **1.0.2 — structure of the derivative.** Queries for the entry states, region labels and linear constraint that define the range of each operator's Jacobian at the kept point, in C and Python, with the SCD (P, W) form for semismooth\* Newton callers (Section 7, "Structure of the derivative"). Added in a patch release at the maintainer's request (decision of 2026-10-27).
 - **1.x — GPU backend.** CUDA kernels in the C core behind the device field, an addition that keeps the frozen ABI (design in Section 8). The first operators are those the 0.3 device path shows people running on GPUs: iterative image TV, elementwise maps and batched simplex and ℓ1-ball projections, and exact 1D TV with one thread per row for large batches. Max-flow graph TV stays on the CPU. CUDA builds ship as a separate package and through conda-forge, not in the main wheel.
 - **After 1.0 — other languages.** Julia (ccall), MATLAB (mex, with a gate that the mex files load on Linux next to MATLAB's own libstdc++) and the thin Rust crate, each over the frozen C API, plus a ProximalOperators.jl adapter.
 
@@ -1041,9 +1256,13 @@ The papers below are the sources each kernel is implemented from. The first grou
 - S. Lefkimmiatis, J. P. Ward and M. Unser, Hessian Schatten-norm regularization for linear inverse problems, IEEE TIP 22, 2013, doi:10.1109/TIP.2013.2237919 — second-order TV and its dual prox.
 - Y. Chen, R. Ranftl and T. Pock, Insights into analysis operator learning, IEEE TIP, 2014, doi:10.1109/TIP.2014.2299065 — bilevel learning of filters and potentials.
 - K. Bredies, K. Kunisch and T. Pock, Total generalized variation, SIAM J. Imaging Sci. 3(3), 2010, doi:10.1137/090769521.
+- H. Gfrerer and J. V. Outrata, On (local) analysis of multifunctions via subspaces contained in graphs of generalized derivatives, arXiv 2106.00519 (v2) — SCD mappings; Proposition 3.26 and Corollary 3.28: the subspaces of ∂q for prox-regular and convex q are rge(B, (I − B)/λ) with B a limiting Jacobian of the prox (Section 7, "Structure of the derivative").
+- H. Gfrerer, J. V. Outrata and J. Valdman, On the application of the SCD semismooth\* Newton method to variational inequalities of the second kind, Springer, 2022, pp. 1453–1484 — Theorem 3.6 (p. 1459), the same statement for convex q.
+- H. Gfrerer, S. Hubmer and R. Ramlau, On SCD semismooth\* Newton methods for the efficient minimization of Tikhonov functionals with non-smooth and non-convex penalties, Inverse Problems 41 (2025) 075002 — Definition 3.6 (the (P, W) form), Lemma 3.7 and Algorithm 3.8 (the Newton step as a QP over rng P), Section 5 (ℓp and TV).
 
 **To check before citing in code**
 
 - Tooling documentation (nanobind, scikit-build-core, cibuildwheel, BinaryBuilder, the GCC Runtime Library Exception) was not opened while writing this spec; confirm the details in Section 12 against it.
+- The journal of Gfrerer, Outrata and Valdman (2022): the library copy shows Springer, pp. 1453–1484, received 15 December 2021, published 28 November 2022, but not the journal's name (Set-Valued and Variational Analysis 30 is likely); confirm before citing. The converse used in Section 7, "Structure of the derivative" (every B-Jacobian of the prox gives a subspace of the SC derivative, not only every subspace comes from one), rests on the exact formula for graphically Lipschitzian mappings in Section 3 of arXiv 2106.00519; check the proposition number before citing it in code.
 
 The survey this spec builds on: [Compiled solvers for variational imaging and nonsmooth optimization](https://claude.ai/code/artifact/51657fed-21f0-4ccc-b9ed-2d47aa2a97f3).
