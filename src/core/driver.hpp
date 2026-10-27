@@ -481,6 +481,82 @@ int64_t elem_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr
     return total;
 }
 
+// Per-thread bytes of one row's structure (fp::RowStruct): states and signs,
+// labels and coefficients. SIZE_MAX beyond 2^48 entries, as row_thread_bytes.
+inline size_t row_struct_bytes(int64_t n) noexcept {
+    if (n > (int64_t{1} << 48)) return SIZE_MAX;
+    const size_t m = static_cast<size_t>(n);
+    return 2 * round64(m) + 2 * round64(8 * m);
+}
+
+// Structure of the derivative of row operators (since 1.0.2): row by row, in
+// parallel, from the saved x, z and code, scattered to the arrays given (each
+// may be null; x's shape, any strides): states (FP_I8), labels (FP_I32 or
+// FP_I64), signs (FP_I8) and constraint coefficients (T). Per row in
+// canonical order, its regions into nregions and its constraint's flag into
+// active (each may be null). A row whose input holds a NaN has -1 regions,
+// every entry FREE with label -1, sign 0 and coefficient 0, and no
+// constraint. Returns the entries not FREE.
+template <class T>
+int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr *state, const Arr *labels,
+                             const Arr *sign, const Arr *coef, int64_t *nregions, int8_t *active) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[4] = {state ? state->strides : cstr, labels ? labels->strides : cstr,
+                            sign ? sign->strides : cstr, coef ? coef->strides : cstr};
+    const RowPlan p = make_row_plan(ws.ndim, ws.shape, ws.axis, 4, st);
+    const int64_t n = p.n;
+    int8_t *sd = state ? reinterpret_cast<int8_t *>(state->data) : nullptr;
+    int8_t *gd = sign ? reinterpret_cast<int8_t *>(sign->data) : nullptr;
+    char *ld = labels ? labels->data : nullptr;
+    T *cd = coef ? reinterpret_cast<T *>(coef->data) : nullptr;
+    const bool l64 = labels && labels->dtype == FP_I64;
+    const int nt = p.rows == 1 || p.rows * n < kParallelMin ? 1 : ws.nthreads;
+    std::atomic<int64_t> fixed{0};  // integer sums: the same for any order
+    parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int tid, int64_t r0, int64_t r1) {
+        RowBuffers<T> buf(ws, op, tid, n);
+        char *base = reinterpret_cast<char *>(ws.struct_scratch.data()) + static_cast<size_t>(tid) * ws.struct_thread_bytes;
+        RowStruct s;
+        s.state = reinterpret_cast<int8_t *>(base);
+        s.sign = s.state + round64(static_cast<size_t>(n));
+        s.label = reinterpret_cast<int64_t *>(s.sign + round64(static_cast<size_t>(n)));
+        s.coef = reinterpret_cast<double *>(reinterpret_cast<char *>(s.label) + round64(8 * static_cast<size_t>(n)));
+        int64_t local = 0;
+        for (int64_t r = r0; r < r1; ++r) {
+            const T *x = ws.xs<T>() + r * n;
+            bool nan = false;
+            for (int64_t i = 0; i < n; ++i) nan = nan || x[i] != x[i];
+            int64_t k = -1;
+            if (nan) {
+                for (int64_t i = 0; i < n; ++i) {
+                    s.state[i] = FP_ENTRY_FREE;
+                    s.label[i] = -1;
+                    s.sign[i] = 0;
+                    s.coef[i] = 0.0;
+                }
+                s.active = false;
+            } else {
+                k = op.struct_row(x, ws.zs<T>() + r * n, ws.code.data() + r * n, n, ws.step(r), s, buf.kernel);
+                for (int64_t i = 0; i < n; ++i) local += s.state[i] != FP_ENTRY_FREE;
+            }
+            if (nregions) nregions[r] = k;
+            if (active) active[r] = s.active;
+            int64_t off[4];
+            p.offsets(r, off);
+            for (int64_t i = 0; i < n; ++i) {
+                if (sd) sd[off[0] + i * p.astride[0]] = s.state[i];
+                if (ld) {
+                    if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + i * p.astride[1]] = s.label[i];
+                    else reinterpret_cast<int32_t *>(ld)[off[1] + i * p.astride[1]] = static_cast<int32_t>(s.label[i]);
+                }
+                if (gd) gd[off[2] + i * p.astride[2]] = s.sign[i];
+                if (cd) cd[off[3] + i * p.astride[3]] = static_cast<T>(s.coef[i]);
+            }
+        }
+        fixed.fetch_add(local, std::memory_order_relaxed);
+    });
+    return fixed.load();
+}
+
 // Kink codes of row operators with has_kinks() (since 0.3): row by row from
 // the saved input and solution, into mask (may be null) through its strides.
 template <class T>

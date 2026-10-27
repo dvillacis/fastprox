@@ -287,6 +287,7 @@ inline int load_row(const T *x, double *v, int64_t n, bool &nan, double &vmax) n
 // ---------------------------------------------------------------------------
 
 struct HyperBox final : RowOp<HyperBox> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     Vec a, lo, hi;  // a and b divided by s
     double b, inv_s;
     bool ineq;
@@ -380,6 +381,27 @@ struct HyperBox final : RowOp<HyperBox> {
         if (den > 0.0) mu = std::ldexp(num / den, k);
     }
 
+    // Structure (since 1.0.2): LOWER and UPPER at the bounds (lo = hi:
+    // LOWER), FREE inside, the saved states; the constraint a_F, unless the
+    // half-space's box projection met it or no free entry has a_i != 0
+    // (|a_F|^2 = 0, where the jvp is the identity on F).
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        const Plane p = plane();
+        double den = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            const uint8_t st = code[i] & kStateMask;
+            s.state[i] = st == kLoE ? FP_ENTRY_LOWER : (st == kHiE ? FP_ENTRY_UPPER : FP_ENTRY_FREE);
+            if (st == kFreeE) den += p.A(i) * p.A(i);
+        }
+        const int64_t k = singletons(s, n);
+        if ((code[0] & kInactive) || !(den > 0.0)) return k;
+        for (int64_t i = 0; i < n; ++i) s.coef[i] = s.state[i] == FP_ENTRY_FREE ? p.A(i) : 0.0;
+        s.active = true;
+        return k;
+    }
+
     template <class T>
     void jvp(const T *x, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n, double,
              double, const double *dp, void *) const noexcept {
@@ -439,6 +461,7 @@ struct HyperBox final : RowOp<HyperBox> {
 // ---------------------------------------------------------------------------
 
 struct SumLargest final : RowOp<SumLargest> {
+    static constexpr int kStruct = FP_STRUCT_PROJECTOR;
     double lambda;
     int64_t k;
     bool absolute;
@@ -513,6 +536,21 @@ struct SumLargest final : RowOp<SumLargest> {
     template <class T>
     static double sgn(const T *x, int64_t i, bool absolute) noexcept {
         return absolute && static_cast<double>(x[i]) < 0.0 ? -1.0 : 1.0;
+    }
+
+    // Structure (since 1.0.2) of z = x - S P: the entries below the shared
+    // level and at the cap move with x (singletons); the free set F of the
+    // projection, at the shared level, is one region with signs S_i when the
+    // constraint is active, and ZERO when the absolute values' "<=" is met
+    // there (dz_F = 0). gamma lambda = 0: the identity.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *code, int64_t n, double gamma, RowStruct &s,
+                      void *) const noexcept {
+        const bool id = gamma * lambda == 0.0, active = id || !(code[0] & kInactive);
+        for (int64_t i = 0; i < n; ++i)
+            s.state[i] = !id && !active && (code[i] & kStateMask) == kFreeE ? FP_ENTRY_ZERO : FP_ENTRY_FREE;
+        return one_region(s, n, [=](int64_t i) { return !id && (code[i] & kStateMask) == kFreeE; },
+                          [=](int64_t i) { return sgn(x, i, absolute); });
     }
 
     template <class T>

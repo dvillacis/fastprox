@@ -43,6 +43,7 @@ namespace {
 inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 
 struct GroupL2 final : RowOp<GroupL2> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double lambda;
     std::vector<int64_t> gid;  // empty: one group
     int64_t G;
@@ -167,6 +168,15 @@ struct GroupL2 final : RowOp<GroupL2> {
             if (set[group(i)] != 0) code[i] = set[group(i)] > 0;
     }
 
+    // Structure (since 1.0.2): ZERO on the killed groups, the saved codes'.
+    // On a live group J = (1 - c) I + c u u^T with c < 1, positive definite.
+    template <class T>
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        for (int64_t i = 0; i < n; ++i) s.state[i] = code[i] ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+        return singletons(s, n);
+    }
+
     // Fills nrm[g] = m_g and M[g] = t_g with ||x_g|| = m_g / t_g
     // (safe_group_norms), and dot[g] = <t_g x_g, v_g>.
     template <class T>
@@ -261,6 +271,7 @@ struct GroupL2 final : RowOp<GroupL2> {
 };
 
 struct TreeL2 final : RowOp<TreeL2> {
+    static constexpr int kStruct = FP_STRUCT_CURVED;
     double l1;
     std::vector<int64_t> ptr, idx;  // groups in the caller's order
     Vec eta;                        // length 1 or G
@@ -331,6 +342,34 @@ struct TreeL2 final : RowOp<TreeL2> {
         }
         for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(w[i]);
         return kRowOk;
+    }
+
+    // Structure (since 1.0.2): the forward pass of jvp, ZERO where soft
+    // thresholding or a killed group zeroes the entry. Each live shrink is
+    // invertible on its group and keeps the zeros of the groups inside it.
+    template <class T>
+    int64_t structure(const T *x, const T *, const uint8_t *, int64_t n, double gamma, RowStruct &s,
+                      void *scr) const noexcept {
+        double *w = static_cast<double *>(scr);
+        const double tau1 = gamma * l1;
+        for (int64_t i = 0; i < n; ++i) {
+            const double v = static_cast<double>(x[i]);
+            const bool on = !(tau1 > 0.0) || std::fabs(v) > tau1;
+            w[i] = on ? v - sgn(v) * tau1 : 0.0;
+            s.state[i] = on ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
+        }
+        for (int64_t g : order) {
+            double sc;
+            const double m = norm(w, g, sc), tau = gamma * eta[ei(g)];
+            if (!(tau > 0.0) && !(m > 0.0)) continue;  // the identity
+            const bool live = m > tau * sc || !(tau > 0.0);
+            const double a = live ? 1.0 - tau * sc / m : 0.0;
+            for (int64_t k = ptr[g]; k < ptr[g + 1]; ++k) {
+                w[idx[k]] *= a;
+                if (!live) s.state[idx[k]] = FP_ENTRY_ZERO;
+            }
+        }
+        return singletons(s, n);
     }
 
     template <class T>

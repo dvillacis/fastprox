@@ -73,6 +73,9 @@ struct fp_workspace {
     // Structure queries (since 1.0.2) of elementwise operators: per block, its
     // free entries and whether it holds a NaN, then the blocks' label offsets.
     fp::Buffer<int64_t> block_counts;  // 3 * nblocks
+    // Row operators: per thread, one row's structure (fp::RowStruct).
+    size_t struct_thread_bytes = 0;
+    fp::Buffer<double> struct_scratch;
 
     // Image operators: images of image_numel entries (the last image_ndim axes),
     // `rows` of them. Working sets for up to image_sets images at once, thread

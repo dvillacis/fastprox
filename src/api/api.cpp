@@ -278,6 +278,11 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         w.nblocks = reduction_blocks(units, P);
         w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
         if (elem) w.block_counts.resize(static_cast<size_t>(3 * w.nblocks));
+        if (!elem && op.struct_kind() != FP_STRUCT_NONE && w.numel > 0) {
+            w.struct_thread_bytes = row_struct_bytes(w.n);
+            w.struct_scratch.resize(mul_size(w.struct_thread_bytes, static_cast<size_t>(w.nthreads)) / sizeof(double) +
+                                    1);
+        }
         w.tot.resize(static_cast<size_t>(P + 2));
         w.dparams.resize(static_cast<size_t>(P) + 1);
         w.steps.resize(static_cast<size_t>(w.rows) + 1);
@@ -965,33 +970,52 @@ fp_status units_impl(const fp_workspace *ws, int64_t *count, int64_t *size) {
     return FP_OK;
 }
 
-// After fp_prox_conj at sigma = 0 (ws->identity) the conjugate's Jacobian is
-// I, so the inner prox's, I - J, is 0: every entry ZERO, no regions.
+// The structure of the kept point into the outputs given, each checked and
+// each may be null: per entry its state, label, sign and coefficient, per
+// unit its regions and constraint flag. Returns the entries not FREE. After
+// fp_prox_conj at sigma = 0 (ws.identity) the conjugate's Jacobian is I, so
+// the inner prox's, I - J, is 0: every entry ZERO, no regions.
+int64_t structure(const fp_workspace &ws, const Arr *st, const Arr *lab, const Arr *sg, const Arr *coef,
+                  int64_t *nregions, int8_t *active) {
+    const int64_t units = struct_units(ws);
+    if (ws.numel == 0) return 0;
+    if (ws.identity) {
+        if (st) copy_array(nullptr, *st, FP_ENTRY_ZERO);
+        if (lab) copy_array(nullptr, *lab, -1.0);
+        if (sg) copy_array(nullptr, *sg, 0.0);
+        if (coef) copy_array(nullptr, *coef, 0.0);
+        if (nregions) std::fill(nregions, nregions + units, int64_t{0});
+        if (active) std::fill(active, active + units, int8_t{0});
+        return ws.numel;
+    }
+    const fp_op &op = *ws.op;
+    const bool f32 = ws.dtype == FP_F32;
+    if (op.elementwise()) {  // one unit, no constraint
+        int64_t nf = 0;
+        const int64_t k = f32 ? elem_structure_driver<float>(op, ws, st, lab, sg, &nf)
+                              : elem_structure_driver<double>(op, ws, st, lab, sg, &nf);
+        if (coef) copy_array(nullptr, *coef, 0.0);
+        if (nregions) nregions[0] = k;
+        if (active) active[0] = 0;
+        return nf;
+    }
+    return f32 ? row_structure_driver<float>(op, ws, st, lab, sg, coef, nregions, active)
+               : row_structure_driver<double>(op, ws, st, lab, sg, coef, nregions, active);
+}
+
 fp_status states_impl(const fp_workspace *ws, fp_array *sa, int64_t *nfixed) {
     if (fp_status s = struct_ws(ws)) return s;
     Arr st;
     if (sa)
         if (fp_status s = struct_out(*ws, sa, st, Dt::Int8)) return s;
-    const Arr *sp = sa ? &st : nullptr;
-    int64_t nf = 0;
-    if (ws->numel == 0) {
-    } else if (ws->identity) {
-        if (sp) copy_array(nullptr, *sp, FP_ENTRY_ZERO);
-        nf = ws->numel;
-    } else if (ws->op->elementwise()) {
-        if (ws->dtype == FP_F32) elem_structure_driver<float>(*ws->op, *ws, sp, nullptr, nullptr, &nf);
-        else elem_structure_driver<double>(*ws->op, *ws, sp, nullptr, nullptr, &nf);
-    } else {
-        return FP_EINVAL;  // no row or image operator has a structure kind yet
-    }
+    const int64_t nf = structure(*ws, sa ? &st : nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     if (nfixed) *nfixed = nf;
     return FP_OK;
 }
 
 fp_status regions_impl(const fp_workspace *ws, fp_array *la, fp_array *ga, int64_t *nregions, int64_t count) {
     if (fp_status s = struct_ws(ws)) return s;
-    const int64_t units = struct_units(*ws);
-    if (nregions && count != units) return FP_ESHAPE;
+    if (nregions && count != struct_units(*ws)) return FP_ESHAPE;
     Arr lab, sg;
     if (la) {
         if (fp_status s = struct_out(*ws, la, lab, Dt::Label)) return s;
@@ -999,33 +1023,17 @@ fp_status regions_impl(const fp_workspace *ws, fp_array *la, fp_array *ga, int64
     }
     if (ga)
         if (fp_status s = struct_out(*ws, ga, sg, Dt::Int8)) return s;
-    const Arr *lp = la ? &lab : nullptr, *gp = ga ? &sg : nullptr;
-    if (ws->numel == 0) return FP_OK;
-    if (ws->identity) {
-        if (lp) copy_array(nullptr, *lp, -1.0);
-        if (gp) copy_array(nullptr, *gp, 0.0);
-        if (nregions) std::fill(nregions, nregions + units, int64_t{0});
-        return FP_OK;
-    }
-    if (!ws->op->elementwise()) return FP_EINVAL;  // no row or image operator has a structure kind yet
-    const int64_t r = ws->dtype == FP_F32 ? elem_structure_driver<float>(*ws->op, *ws, nullptr, lp, gp, nullptr)
-                                          : elem_structure_driver<double>(*ws->op, *ws, nullptr, lp, gp, nullptr);
-    if (nregions) nregions[0] = r;
+    structure(*ws, nullptr, la ? &lab : nullptr, ga ? &sg : nullptr, nullptr, nregions, nullptr);
     return FP_OK;
 }
 
-// No elementwise operator has a constraint.
 fp_status constraint_impl(const fp_workspace *ws, fp_array *ca, int8_t *active, int64_t count) {
     if (fp_status s = struct_ws(ws)) return s;
-    const int64_t units = struct_units(*ws);
-    if (active && count != units) return FP_ESHAPE;
+    if (active && count != struct_units(*ws)) return FP_ESHAPE;
     Arr c;
     if (ca)
         if (fp_status s = struct_out(*ws, ca, c, Dt::Float)) return s;
-    if (ws->numel == 0) return FP_OK;
-    if (!ws->identity && !ws->op->elementwise()) return FP_EINVAL;  // no row or image operator has a structure kind yet
-    if (ca) copy_array(nullptr, c, 0.0);
-    if (active) std::fill(active, active + units, int8_t{0});
+    structure(*ws, nullptr, nullptr, nullptr, ca ? &c : nullptr, nullptr, active);
     return FP_OK;
 }
 
