@@ -218,6 +218,15 @@ struct TVIso final : ImageOp<TVIso> {
         double *z, *u, *inv;
         int32_t *members, *rstart;
     };
+    // Structure (since 1.0.2): the saved regions; J = M (M^T (I + G^T H G)
+    // M)^{-1} M^T, with M their membership matrix, has range span M and is
+    // positive definite there.
+    int struct_kind() const noexcept override { return FP_STRUCT_CURVED; }
+    const int32_t *image_labels(const char *save, const int64_t *shape, int64_t *nreg) const noexcept override {
+        const View v = view(const_cast<char *>(save), Geom(k, shape).N);
+        *nreg = *v.ncomp;
+        return v.label;
+    }
     View view(char *s, int64_t N) const noexcept {
         View v;
         const size_t n = static_cast<size_t>(N);

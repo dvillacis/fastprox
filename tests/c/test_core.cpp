@@ -4537,22 +4537,18 @@ static void test_structure_elementwise() {
 
     // Errors, checked before anything is written; empty arrays.
     {
-        fp_op *op, *tv;
+        fp_op *op;
         CHECK_OK(fp_op_soft(1.0, nullptr, &op));
-        CHECK_OK(fp_op_tv_aniso(2, nullptr, &tv));
         int kind = -1;
         CHECK(fp_op_struct_kind(nullptr, &kind) == FP_EINVAL && fp_op_struct_kind(op, nullptr) == FP_EINVAL);
         Arr x({2, 3}, {0.5, 1.5, -2.5, 0.5, 1.5, -2.5}), z({2, 3});
         fp_options o = opts(-1, 1, 1);
-        fp_workspace *ws, *wt;
+        fp_workspace *ws;
         CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
-        CHECK_OK(fp_workspace_create(tv, &x.a, &o, &wt));
         int64_t count = -7;
         CHECK(fp_workspace_units(ws, &count, nullptr) == FP_EINVAL && count == -7);  // no kept point
         CHECK(fp_workspace_units(nullptr, &count, nullptr) == FP_EINVAL);
         CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
-        CHECK_OK(fp_prox(tv, 1.0, &x.a, &z.a, &o, wt, nullptr));
-        CHECK(fp_workspace_units(wt, &count, nullptr) == FP_EINVAL);  // no structure kind yet
         IntArr<int8_t> st({2, 3}, FP_I8, 9), st_short({2, 2}, FP_I8, 9);
         IntArr<int32_t> st32({2, 3}, FP_I32, 9), lab({2, 3}, FP_I32, 9);
         IntArr<int64_t> lab_bad({3, 2}, FP_I64, 9);
@@ -4571,7 +4567,6 @@ static void test_structure_elementwise() {
         st.a.strides = zst;
         CHECK(fp_workspace_states(ws, &st.a, nullptr) == FP_EINVAL);
         fp_workspace_free(ws);
-        fp_workspace_free(wt);
         // Empty: no units, nothing written.
         Arr e({0, 3}), ez({0, 3});
         CHECK_OK(fp_workspace_create(op, &e.a, &o, &ws));
@@ -4586,7 +4581,6 @@ static void test_structure_elementwise() {
         CHECK_OK(fp_workspace_constraint(ws, nullptr, active, 0));
         fp_workspace_free(ws);
         fp_op_free(op);
-        fp_op_free(tv);
     }
 
     // No allocation with a workspace, on several threads and blocks.
@@ -4624,8 +4618,9 @@ static void test_structure_elementwise() {
 // maps into L and is positive definite on L. conj: after fp_prox_conj,
 // whose jvp is I - J.
 static void check_row_structure(fp_op *op, int kind, fp_workspace *ws, const Arr &x, bool conj,
-                                const std::string &name) {
-    const int64_t n = x.shape.back(), m = static_cast<int64_t>(x.data.size()), R = m / n;
+                                const std::string &name, int64_t unit = 0) {
+    // Units of n entries: rows along the last axis, or images (unit = N).
+    const int64_t n = unit ? unit : x.shape.back(), m = static_cast<int64_t>(x.data.size()), R = m / n;
     int64_t count = -1, size = -1, nfixed = -1;
     CHECK_OK(fp_workspace_units(ws, &count, &size));
     CHECK(count == R && size == n);
@@ -4808,7 +4803,8 @@ static void test_structure_rows() {
                  {[](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, FP_STRUCT_PROJECTOR},
                  {[](fp_op **o) { const double w[3] = {2.0, 2.0, 2.0}; int64_t m = 3; fp_array a = {const_cast<double *>(w), FP_F64, 1, &m, nullptr, FP_DEVICE_CPU}; return fp_op_isotonic(&a, 1, o); }, FP_STRUCT_PROJECTOR},
                  {[](fp_op **o) { const double w[3] = {1.0, 3.0, 1.0}; int64_t m = 3; fp_array a = {const_cast<double *>(w), FP_F64, 1, &m, nullptr, FP_DEVICE_CPU}; return fp_op_isotonic(&a, 1, o); }, FP_STRUCT_WEIGHTED},
-                 {[](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }, FP_STRUCT_NONE},
+                 {[](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }, FP_STRUCT_PROJECTOR},
+                 {[](fp_op **o) { return fp_op_tv_iso(3, nullptr, o); }, FP_STRUCT_CURVED},
              }) {
             fp_op *op;
             int kind = -1;
@@ -5050,6 +5046,176 @@ static void test_structure_rows() {
     }
 }
 
+// The structure of the image and graph operators against their Jacobians,
+// three images per array, after fp_prox and fp_prox_conj; a NaN image;
+// threads and strides; no allocation.
+static void test_structure_images() {
+    static const std::vector<int64_t> e12 = graph_edges(12, 8, 5);
+    std::vector<int64_t> t12;
+    for (int64_t i = 1; i < 12; ++i) t12.insert(t12.end(), {(i - 1) / 2, i});  // a binary tree
+    struct Case {
+        const char *name;
+        std::vector<int64_t> shape;  // three images
+        int kind;
+        std::function<fp_status(fp_op **)> make;
+    };
+    const std::vector<Case> cases = {
+        {"tv_aniso", {3, 6, 7}, FP_STRUCT_PROJECTOR, [](fp_op **o) { return fp_op_tv_aniso(2, nullptr, o); }},
+        {"tv_aniso_3d", {3, 3, 4, 5}, FP_STRUCT_PROJECTOR, [](fp_op **o) { return fp_op_tv_aniso(3, nullptr, o); }},
+        {"tv_iso", {3, 6, 7}, FP_STRUCT_CURVED, [](fp_op **o) { return fp_op_tv_iso(2, nullptr, o); }},
+        {"graph_tv", {3, 12}, FP_STRUCT_PROJECTOR,
+         [](fp_op **o) { return fp_op_graph_tv(12, static_cast<int64_t>(e12.size()) / 2, e12.data(), nullptr, o); }},
+        {"tree_tv", {3, 12}, FP_STRUCT_PROJECTOR,
+         [&](fp_op **o) { return fp_op_tree_tv(12, 11, t12.data(), nullptr, o); }},
+    };
+    for (const auto &c : cases) {
+        fp_op *op;
+        CHECK_OK(c.make(&op));
+        int kind = -1;
+        CHECK_OK(fp_op_struct_kind(op, &kind));
+        CHECK(kind == c.kind);
+        int64_t m = 1;
+        for (int64_t e : c.shape) m *= e;
+        const int64_t R = c.shape[0], N = m / R;
+        // Piecewise constant images plus noise, so that regions form.
+        Vec xv = randn(m, 0.2);
+        for (int64_t i = 0; i < m; ++i) xv[i] += static_cast<double>((i % N) * 3 / N) - 1.0;
+        Arr x(c.shape, xv), z(c.shape);
+        fp_options o = opts(-1, 2, 1);
+        o.tol = 1e-10;
+        o.max_iter = 20000;
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 0.6, &x.a, &z.a, &o, ws, nullptr));
+        int64_t count = 0, size = 0;
+        CHECK_OK(fp_workspace_units(ws, &count, &size));
+        CHECK(count == R && size == N);
+        check_row_structure(op, kind, ws, x, false, c.name, N);
+        std::vector<int64_t> nreg(static_cast<size_t>(R));
+        CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, nreg.data(), R));
+        bool merged = false;
+        for (int64_t k : nreg) merged = merged || (k > 0 && k < N);
+        CHECK(merged);
+        if (!merged) std::fprintf(stderr, "  %s: no image has regions\n", c.name);
+        // After fp_workspace_refine the queries describe the refined point.
+        if (std::strcmp(c.name, "tv_iso") == 0) {
+            CHECK_OK(fp_workspace_refine(op, ws, 1e-13, 50000, nullptr, nullptr));
+            check_row_structure(op, kind, ws, x, false, "tv_iso (refined)", N);
+        }
+        CHECK_OK(fp_prox_conj(op, 1.3, &x.a, &z.a, &o, ws, nullptr));
+        check_row_structure(op, kind, ws, x, true, std::string(c.name) + " (conj)", N);
+        CHECK_OK(fp_prox_conj(op, 0.0, &x.a, &z.a, &o, ws, nullptr));
+        int64_t nfixed = -1;
+        CHECK_OK(fp_workspace_states(ws, nullptr, &nfixed));
+        CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, nreg.data(), R));
+        CHECK(nfixed == m && nreg == std::vector<int64_t>(static_cast<size_t>(R), 0));
+        fp_workspace_free(ws);
+
+        // A NaN in image 1: -1 regions there, labels -1 and signs 0; the
+        // others as with one thread, for 1, 2 and 15 threads, into labels in
+        // C order and column-major (int32).
+        Vec xn = xv;
+        xn[static_cast<size_t>(N + 2)] = NAN;
+        Arr y(c.shape, xn), yz(c.shape);
+        std::vector<int64_t> ref, rref;
+        std::vector<int64_t> cm(c.shape.size());
+        int64_t stc = 1;
+        for (size_t d = 0; d < c.shape.size(); ++d) {
+            cm[d] = stc;
+            stc *= c.shape[d];
+        }
+        for (int nt : {1, 2, 15}) {
+            fp_options on = opts(-1, nt, 1);
+            on.tol = 1e-10;
+            on.max_iter = 20000;
+            CHECK_OK(fp_workspace_create(op, &y.a, &on, &ws));
+            CHECK_OK(fp_prox(op, 0.6, &y.a, &yz.a, &on, ws, nullptr));
+            IntArr<int64_t> lab(c.shape, FP_I64, 9);
+            IntArr<int32_t> lt(c.shape, FP_I32, 9, cm);
+            IntArr<int8_t> sg(c.shape, FP_I8, 9);
+            std::vector<int64_t> nr(static_cast<size_t>(R));
+            std::vector<int8_t> act(static_cast<size_t>(R), 9);
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nr.data(), R));
+            CHECK_OK(fp_workspace_regions(ws, &lt.a, nullptr, nullptr, 0));
+            CHECK_OK(fp_workspace_constraint(ws, nullptr, act.data(), R));
+            CHECK(nr[1] == -1 && lab.data[static_cast<size_t>(N)] == -1 && sg.data[static_cast<size_t>(N)] == 0);
+            CHECK(nr[0] >= 0 && act == std::vector<int8_t>(static_cast<size_t>(R), 0));
+            if (nt == 1) {
+                ref = lab.data;
+                rref = nr;
+            }
+            CHECK(lab.data == ref && nr == rref);
+            bool same = true;  // C index i against its column-major offset
+            for (int64_t i = 0; i < m; ++i) {
+                int64_t rem = i, off = 0;
+                for (int d = static_cast<int>(c.shape.size()) - 1; d >= 0; --d) {
+                    off += (rem % c.shape[static_cast<size_t>(d)]) * cm[static_cast<size_t>(d)];
+                    rem /= c.shape[static_cast<size_t>(d)];
+                }
+                same = same && lt.data[static_cast<size_t>(off)] == lab.data[static_cast<size_t>(i)];
+            }
+            CHECK(same);
+            fp_workspace_free(ws);
+        }
+
+        // No allocation.
+        {
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_prox(op, 0.6, &x.a, &z.a, &o, ws, nullptr));
+            IntArr<int8_t> st(c.shape, FP_I8), sg(c.shape, FP_I8);
+            IntArr<int32_t> lab(c.shape, FP_I32);
+            Arr coef(c.shape);
+            std::vector<int8_t> act(static_cast<size_t>(R));
+            int64_t nf = -1;
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nreg.data(), R));  // warm up the thread pool
+            const long before = g_allocs.load();
+            CHECK_OK(fp_workspace_states(ws, &st.a, &nf));
+            CHECK_OK(fp_workspace_regions(ws, &lab.a, &sg.a, nreg.data(), R));
+            CHECK_OK(fp_workspace_constraint(ws, &coef.a, act.data(), R));
+            CHECK(g_allocs.load() == before && nf == 0);
+            fp_workspace_free(ws);
+        }
+        fp_op_free(op);
+    }
+    // Branch overrides rebuild the saved structure. Two entries 0 and 1 on one
+    // edge at gamma = 0.5 meet at z = (0.5, 0.5) with the dual on its bound: a
+    // kink. Graph and tree TV join them by default (one region) and side +1
+    // keeps them apart; anisotropic TV, whose edges are flat only with the
+    // dual strictly inside, keeps them apart (two regions) and side -1 joins
+    // them. Clearing the override restores the default.
+    {
+        const int64_t edge[2] = {0, 1};
+        for (int which = 0; which < 3; ++which) {
+            fp_op *op;
+            CHECK_OK(which == 0   ? fp_op_tv_aniso(2, nullptr, &op)
+                     : which == 1 ? fp_op_graph_tv(2, 1, edge, nullptr, &op)
+                                  : fp_op_tree_tv(2, 1, edge, nullptr, &op));
+            const std::vector<int64_t> shape = which == 0 ? std::vector<int64_t>{1, 2} : std::vector<int64_t>{2};
+            const std::vector<int64_t> sshape = which == 0 ? shape : std::vector<int64_t>{1};  // graphs: per edge
+            const int64_t def = which == 0 ? 2 : 1, other = 3 - def;
+            Arr x(shape, {0.0, 1.0}), z(shape);
+            fp_options o = opts(-1, 1, 1);
+            o.tol = 1e-12;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+            CHECK_OK(fp_prox(op, 0.5, &x.a, &z.a, &o, ws, nullptr));
+            int64_t nreg = -1;
+            CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
+            CHECK(nreg == def);
+            IntArr<int8_t> side(sshape, FP_I8, static_cast<int8_t>(which == 0 ? -1 : 1));
+            CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-9));
+            CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
+            CHECK(nreg == other);
+            check_row_structure(op, FP_STRUCT_PROJECTOR, ws, x, false, "image override", 2);
+            CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+            CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
+            CHECK(nreg == def);
+            fp_workspace_free(ws);
+            fp_op_free(op);
+        }
+    }
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -5071,6 +5237,7 @@ int main() {
     test_no_allocation();
     test_structure_elementwise();
     test_structure_rows();
+    test_structure_images();
     test_concurrent_callers();
     test_errors_and_special_values();
     test_kept_empty_and_identity();

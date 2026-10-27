@@ -395,6 +395,14 @@ struct fp_op {
                                void *) const noexcept { return 0; }
     virtual int64_t struct_row(const double *, const double *, const uint8_t *, int64_t, double, fp::RowStruct &,
                                void *) const noexcept { return 0; }
+    // Image operators (since 1.0.2): the region label of each entry (C order)
+    // in the image's saved structure, after any override, and their number;
+    // every entry FREE with sign +1, no constraint. The driver renumbers the
+    // labels canonically.
+    virtual const int32_t *image_labels(const char *, const int64_t *, int64_t *nreg) const noexcept {
+        *nreg = 0;
+        return nullptr;
+    }
 
     // ---- image interface -------------------------------------------------
     // Image operators (multi-dimensional TV) act on the last image_ndim() axes

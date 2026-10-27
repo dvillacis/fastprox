@@ -989,6 +989,61 @@ int64_t image_kinks_driver(const fp_op &op, const fp_workspace &ws, double tol, 
     return count;
 }
 
+// Structure of the derivative of image operators (since 1.0.2): image by
+// image, in parallel over at most image_sets threads, the saved labels
+// renumbered in C order of their first entries, scattered to the arrays
+// given (each may be null; x's shape, any strides) as in
+// row_structure_driver: every entry FREE with sign +1 and coefficient 0, no
+// constraint. An image whose input holds a NaN has -1 regions and labels -1,
+// signs 0. Every entry is FREE: returns 0.
+template <class T>
+int64_t image_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr *state, const Arr *labels,
+                               const Arr *sign, const Arr *coef, int64_t *nregions, int8_t *active) {
+    const int64_t cstr[FP_MAX_NDIM] = {};
+    const int64_t *st[4] = {state ? state->strides : cstr, labels ? labels->strides : cstr,
+                            sign ? sign->strides : cstr, coef ? coef->strides : cstr};
+    const ImagePlan p = make_image_plan(ws.ndim, ws.shape, op.image_ndim(), 4, st);
+    const int64_t N = ws.image_numel;
+    const int64_t *ishape = ws.shape + p.nlead;
+    int8_t *sd = state ? reinterpret_cast<int8_t *>(state->data) : nullptr;
+    int8_t *gd = sign ? reinterpret_cast<int8_t *>(sign->data) : nullptr;
+    char *ld = labels ? labels->data : nullptr;
+    T *cd = coef ? reinterpret_cast<T *>(coef->data) : nullptr;
+    const bool l64 = labels && labels->dtype == FP_I64;
+    const int nt = static_cast<int>(std::min<int64_t>(ws.image_sets, p.images));
+    parallel_for(nt, p.images, 1, [&](int tid, int64_t r0, int64_t r1) {
+        int32_t *map = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(ws.struct_scratch.data()) +
+                                                   static_cast<size_t>(tid) * ws.struct_thread_bytes);
+        for (int64_t r = r0; r < r1; ++r) {
+            const T *x = ws.xs<T>() + r * N;
+            bool nan = false;
+            for (int64_t i = 0; i < N; ++i) nan = nan || x[i] != x[i];
+            int64_t nreg = 0;
+            const int32_t *lab = nan ? nullptr : op.image_labels(ws.image_struct(r), ishape, &nreg);
+            int64_t next = 0;
+            if (lab) {
+                for (int64_t C = 0; C < nreg; ++C) map[C] = -1;
+                for (int64_t i = 0; i < N; ++i)
+                    if (map[lab[i]] < 0) map[lab[i]] = static_cast<int32_t>(next++);
+            }
+            if (nregions) nregions[r] = lab ? next : -1;
+            if (active) active[r] = 0;
+            int64_t off[4];
+            p.offsets(r, off);
+            if (sd) p.for_each(0, [&](int64_t, int64_t o) { sd[off[0] + o] = FP_ENTRY_FREE; });
+            if (ld)
+                p.for_each(1, [&](int64_t i, int64_t o) {
+                    const int64_t l = lab ? map[lab[i]] : -1;
+                    if (l64) reinterpret_cast<int64_t *>(ld)[off[1] + o] = l;
+                    else reinterpret_cast<int32_t *>(ld)[off[1] + o] = static_cast<int32_t>(l);
+                });
+            if (gd) p.for_each(2, [&](int64_t, int64_t o) { gd[off[2] + o] = lab ? 1 : 0; });
+            if (cd) p.for_each(3, [&](int64_t, int64_t o) { cd[off[3] + o] = T(0); });
+        }
+    });
+    return 0;
+}
+
 // The relative error of the image the kernel solved, x(i, o) its entry i
 // (offset o in the input), that the gap certifies (feedback U1): r =
 // sqrt(2 gap) / |x|, since |z - z*|^2 <= 2 gap, plus the rounding of the

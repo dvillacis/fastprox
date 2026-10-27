@@ -104,6 +104,13 @@ struct Base : ImageOp<D> {
         double *inv;
         int8_t *sgn;
     };
+    // Structure (since 1.0.2): the saved regions, over which the jvp averages.
+    int struct_kind() const noexcept override { return FP_STRUCT_PROJECTOR; }
+    const int32_t *image_labels(const char *save, const int64_t *, int64_t *nreg) const noexcept override {
+        const View v = view(const_cast<char *>(save));
+        *nreg = *v.nreg;
+        return v.label;
+    }
     View view(char *save) const noexcept {
         View v;
         v.nreg = reinterpret_cast<int64_t *>(save);
