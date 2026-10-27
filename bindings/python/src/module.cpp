@@ -65,6 +65,24 @@ using I8In = nb::ndarray<nb::ro, const int8_t, nb::device::cpu>;
 using I8Out = nb::ndarray<int8_t, nb::device::cpu>;
 using F64Out = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using I32Out = nb::ndarray<int32_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using I64Vec = nb::ndarray<int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using I8Vec = nb::ndarray<int8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+// An int32 or int64 label array as an fp_array (since 1.0.2).
+template <class A>
+fp_array view_label(const A &a) {
+    fp_array v;
+    v.data = const_cast<void *>(static_cast<const void *>(a.data()));
+    const nb::dlpack::dtype dt = a.dtype();
+    if (dt == nb::dtype<int32_t>()) v.dtype = FP_I32;
+    else if (dt == nb::dtype<int64_t>()) v.dtype = FP_I64;
+    else throw nb::type_error("labels are int32 or int64");
+    v.ndim = static_cast<int>(a.ndim());
+    v.shape = a.shape_ptr();
+    v.strides = a.stride_ptr();
+    v.device = FP_DEVICE_CPU;
+    return v;
+}
 
 // An int8 kink or branch array as an fp_array.
 template <class A>
@@ -469,6 +487,46 @@ NB_MODULE(_fastprox, m) {
         }
         check(s, "fp_workspace_set_branch");
     }, "ws"_a, "side"_a.none(), "tol"_a);
+    // Structure of the derivative (since 1.0.2).
+    m.def("struct_kind", [](const Op &op) {
+        int kind = 0;
+        check(fp_op_struct_kind(op.p, &kind), "fp_op_struct_kind");
+        return kind;
+    }, "op"_a);
+    m.def("ws_units", [](const Workspace &ws) {
+        int64_t count = 0, size = 0;
+        check(fp_workspace_units(ws.p, &count, &size), "fp_workspace_units");
+        return nb::make_tuple(count, size);
+    }, "ws"_a);
+    m.def("ws_states", [](const Workspace &ws, I8Out state) {
+        fp_array sa = view_i8(state);
+        int64_t nfixed = 0;
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_states(ws.p, &sa, &nfixed);
+        }
+        check(s, "fp_workspace_states");
+        return nfixed;
+    }, "ws"_a, "state"_a);
+    m.def("ws_regions", [](const Workspace &ws, OutArr labels, I8Out sign, I64Vec nregions) {
+        fp_array la = view_label(labels), ga = view_i8(sign);
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_regions(ws.p, &la, &ga, nregions.data(), static_cast<int64_t>(nregions.shape(0)));
+        }
+        check(s, "fp_workspace_regions");
+    }, "ws"_a, "labels"_a, "sign"_a, "nregions"_a);
+    m.def("ws_constraint", [](const Workspace &ws, OutArr coef, I8Vec active) {
+        fp_array ca = view(coef);
+        fp_status s;
+        {
+            nb::gil_scoped_release release;
+            s = fp_workspace_constraint(ws.p, &ca, active.data(), static_cast<int64_t>(active.shape(0)));
+        }
+        check(s, "fp_workspace_constraint");
+    }, "ws"_a, "coef"_a, "active"_a);
     m.def("value", [](const Op &op, const InArr &x, OutArr &out, int axis, double tol) {
         const fp_array xa = view(x);
         fp_array oa = view(out);

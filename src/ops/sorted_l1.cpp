@@ -135,17 +135,19 @@ struct SortedL1 final : RowOp<SortedL1> {
     // Structure (since 1.0.2): ZERO on the block at 0, FREE on the others,
     // each block a region with signs sign(x_i). The blocks come in sorted
     // order: each takes the label of its first entry in row order, and the
-    // labels are then renumbered in that order (the scratch past the keys).
+    // labels are then renumbered in that order (the scratch past the keys:
+    // the labels there when not asked for, then the map).
     template <class T>
     int64_t structure(const T *x, const T *z, const uint8_t *code, int64_t n, double, RowStruct &s,
                       void *scr) const noexcept {
+        int64_t *label = s.label ? s.label : reinterpret_cast<int64_t *>(static_cast<Key *>(scr) + n);
+        int64_t *map = reinterpret_cast<int64_t *>(static_cast<Key *>(scr) + n) + n;
         for (int64_t i = 0; i < n; ++i) {
             s.state[i] = FP_ENTRY_ZERO;
-            s.label[i] = -1;
-            s.sign[i] = 0;
-            s.coef[i] = 0.0;
+            label[i] = -1;
         }
-        s.active = false;
+        if (s.sign) std::fill(s.sign, s.sign + n, int8_t{0});
+        no_constraint(s, n);
         // label[i]: the smallest row position among the FREE entries of i's
         // block, the block's key.
         active_blocks(x, z, code, n, scr, [&](const Key *key, int64_t b, int64_t e) {
@@ -157,16 +159,16 @@ struct SortedL1 final : RowOp<SortedL1> {
                 const double v = static_cast<double>(x[i]);
                 if (v == 0.0) continue;  // sign 0: dz_i = 0 (not reached: such an entry is thresholded)
                 s.state[i] = FP_ENTRY_FREE;
-                s.label[i] = first;
-                s.sign[i] = v > 0 ? 1 : -1;
+                label[i] = first;
+                if (s.sign) s.sign[i] = v > 0 ? 1 : -1;
             }
         });
-        int64_t *map = reinterpret_cast<int64_t *>(static_cast<Key *>(scr) + n);
         int64_t r = 0;
         for (int64_t i = 0; i < n; ++i)
-            if (s.label[i] == i) map[i] = r++;
-        for (int64_t i = 0; i < n; ++i)
-            if (s.label[i] >= 0) s.label[i] = map[s.label[i]];
+            if (label[i] == i) map[i] = r++;
+        if (s.label)
+            for (int64_t i = 0; i < n; ++i)
+                if (label[i] >= 0) label[i] = map[label[i]];
         return r;
     }
 

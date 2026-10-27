@@ -69,9 +69,10 @@ struct GroupRadial final : RowOp<GroupRadial> {
         return (gid.empty() || static_cast<int64_t>(gid.size()) == n) ? FP_OK : FP_ESHAPE;
     }
     fp_status check_step(double gamma) const noexcept override { return h->check_step(gamma * cmax); }
-    // Three arrays of G: norms, dots and the scales of safe_group_norms.
+    // Six arrays of G: norms, dots, the scales of safe_group_norms, and the
+    // derivatives' largest |x_i| and |v_i| and sums of squares (norms_dots).
     size_t scratch_bytes(int64_t) const noexcept override {
-        return 3 * static_cast<size_t>(G) * sizeof(double);
+        return 6 * static_cast<size_t>(G) * sizeof(double);
     }
 
     int64_t group(int64_t i) const noexcept { return gid.empty() ? 0 : gid[i]; }
@@ -89,6 +90,16 @@ struct GroupRadial final : RowOp<GroupRadial> {
         for (int64_t k = 0; k < Ph + 2; ++k) d[k] = 0.0;
         h->vjp_run(&s, &one, 1, &j, 1, 1, step, d, 0, 0, false, 1.0, FP_TIE_NONZERO, nullptr, 0.0);
         return phi(s, step);
+    }
+
+    // phi(s) / s, from p = phi(s) and j = phi'(s). Near 0 every scalar map
+    // here is linear through 0 (Huber's quadratic piece) or 0 (a dead zone,
+    // where j = 0 too), so p = 0 with j != 0 means that j s underflowed, as for
+    // a subnormal norm, and the ratio is j (found by fuzzing guarantee 1 in
+    // 1.0.2: group Huber's derivative and structure took it as 0).
+    static double ratio(double p, double s, double j) noexcept {
+        const double r = p / s;
+        return r == 0.0 && j != 0.0 ? j : r;
     }
 
     bool has_value() const noexcept override { return true; }
@@ -133,30 +144,13 @@ struct GroupRadial final : RowOp<GroupRadial> {
     static double norm(double m, double t) noexcept {
         return std::min(m / t, std::numeric_limits<double>::max());
     }
-    // nrm[g] = m_g and M[g] = t_g, ||x_g|| = m_g / t_g (safe_group_norms), and
-    // dot[g] = <t_g x_g, v_g>. The derivatives read u_g = (t_g x_g) / m_g.
+    // nrm[g] = m_g and M[g] = t_g, ||x_g|| = m_g / t_g, and ud[g] = <u_g, v_g>
+    // with u_g = (t_g x_g) / m_g (group_unit_dots in core/op.hpp); s holds the
+    // three arrays of G after M that it needs.
     template <class T>
-    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *dot, double *M) const noexcept {
-        for (int64_t g = 0; g < G; ++g) nrm[g] = dot[g] = 0.0;
-        for (int64_t i = 0; i < n; ++i) {
-            const double xi = static_cast<double>(x[i]);
-            nrm[group(i)] += xi * xi;
-            dot[group(i)] += xi * static_cast<double>(v[i]);
-        }
-        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, nrm, M);
-        // Where the norm keeps a scale t (it overflows, or 1 / norm does), the
-        // dot is taken on t x, which cannot overflow through x: <u_g, v_g> =
-        // dot[g] / nrm[g] either way.
-        bool scaled = false;
-        for (int64_t g = 0; g < G; ++g) scaled = scaled || M[g] != 1.0;
-        if (scaled) {
-            for (int64_t g = 0; g < G; ++g)
-                if (M[g] != 1.0) dot[g] = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                const int64_t g = group(i);
-                if (M[g] != 1.0) dot[g] += static_cast<double>(x[i]) * M[g] * static_cast<double>(v[i]);
-            }
-        }
+    void norms_dots(const T *x, const T *v, int64_t n, double *nrm, double *ud, double *M) const noexcept {
+        group_unit_dots(n, G, [x](int64_t i) { return x[i]; }, [v](int64_t i) { return v[i]; },
+                        [this](int64_t i) { return group(i); }, nrm, ud, M, M + G, M + 2 * G, M + 3 * G);
     }
 
     // Structure (since 1.0.2): ZERO on a group set to 0, where the jvp's
@@ -174,7 +168,7 @@ struct GroupRadial final : RowOp<GroupRadial> {
             const double sg = norm(nrm[g], M[g]);
             double j;
             const double p = deriv(sg, gamma * c[ci(g)], j, d);
-            nrm[g] = (sg > 0.0 ? p / sg != 0.0 : j != 0.0) ? 1.0 : 0.0;
+            nrm[g] = (sg > 0.0 ? ratio(p, sg, j) != 0.0 : j != 0.0) ? 1.0 : 0.0;
         }
         for (int64_t i = 0; i < n; ++i) s.state[i] = nrm[group(i)] != 0.0 ? FP_ENTRY_FREE : FP_ENTRY_ZERO;
         return singletons(s, n);
@@ -183,10 +177,10 @@ struct GroupRadial final : RowOp<GroupRadial> {
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double gamma,
              double dgamma, const double *dparams, void *scr) const noexcept {
-        double *a = static_cast<double *>(scr);  // coefficient of dx
-        double *b = a + G;                       // coefficient of x
-        const double *M = b + G;
-        norms_dots(x, dx, n, a, b, b + G);
+        double *a = static_cast<double *>(scr);  // the norm, then the coefficient of dx
+        double *b = a + G;                       // <u, dx>, then the coefficient of t x
+        double *M = b + G;
+        norms_dots(x, dx, n, a, b, M);
         double d[4];
         for (int64_t g = 0; g < G; ++g) {
             const double m = a[g], t = M[g], s = norm(m, t), cg = c[ci(g)];
@@ -198,9 +192,9 @@ struct GroupRadial final : RowOp<GroupRadial> {
                     for (int64_t k = 0; k < Ph; ++k) dphi += d[k] * dparams[k];
                     dphi += d[Ph] * gamma * dparams[Ph + ci(g)];
                 }
-                const double r = p / s;
+                const double r = ratio(p, s, j);
                 a[g] = r;
-                b[g] = ((j - r) * (b[g] / m) + dphi) / m;  // times t x_i below: u_i = (t x_i) / m
+                b[g] = ((j - r) * b[g] + dphi) / m;  // times t x_i below: u_i = (t x_i) / m
             } else {
                 a[g] = j;
                 b[g] = 0.0;
@@ -219,19 +213,19 @@ struct GroupRadial final : RowOp<GroupRadial> {
         const int64_t P = nparams();
         double *a = static_cast<double *>(scr);
         double *b = a + G;
-        const double *M = b + G;
-        norms_dots(x, gv, n, a, b, b + G);
+        double *M = b + G;
+        norms_dots(x, gv, n, a, b, M);
         double d[4];
         for (int64_t g = 0; g < G; ++g) {
             const double m = a[g], t = M[g], s = norm(m, t), cg = c[ci(g)];
             double j;
             const double p = deriv(s, gamma * cg, j, d);
             if (s > 0.0) {
-                const double ug = b[g] / m;  // <u, g_g>
+                const double ug = b[g];  // <u, g_g>
                 for (int64_t k = 0; k < Ph; ++k) acc[k] += d[k] * ug;
                 acc[Ph + ci(g)] += d[Ph] * gamma * ug;
                 acc[P] += d[Ph] * cg * ug;
-                const double r = p / s;
+                const double r = ratio(p, s, j);
                 a[g] = r;
                 b[g] = (j - r) * ug / m;  // times t x_i below, as in jvp
             } else {
@@ -319,11 +313,12 @@ struct Soc final : RowOp<Soc> {
         const Region reg = with_ynorm(x, n, [=](double sn, double sc) { return region(t, sn, sc); });
         for (int64_t i = 0; i < n; ++i) s.state[i] = reg == kZero ? FP_ENTRY_ZERO : FP_ENTRY_FREE;
         const int64_t k = singletons(s, n);
-        if (reg == kMid) {
-            with_ynorm(x, n, [=, &s](double sn, double sc) {
-                s.coef[0] = -1.0;
-                for (int64_t i = 1; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * sc / sn;
-            });
+        if (reg == kMid && s.constraint) {
+            if (s.coef)
+                with_ynorm(x, n, [=, &s](double sn, double sc) {
+                    s.coef[0] = -1.0;
+                    for (int64_t i = 1; i < n; ++i) s.coef[i] = static_cast<double>(x[i]) * sc / sn;
+                });
             s.active = true;
         }
         return k;
@@ -344,9 +339,10 @@ struct Soc final : RowOp<Soc> {
             case kMid:
                 break;
             }
-            double uv = 0.0;
-            for (int64_t i = 1; i < n; ++i) uv += static_cast<double>(x[i]) * sc * static_cast<double>(v[i]);
-            uv /= s;
+            // <u, v[1:]> (unit_dot in core/op.hpp: scaled where x_i v_i would
+            // leave the range; found by fuzzing guarantee 1 in 1.0.2).
+            const double uv = unit_dot(n - 1, [x](int64_t k) { return x[k + 1]; },
+                                       [v](int64_t k) { return v[k + 1]; }, s, sc);
             const double r = 0.5 * (s + t * sc) / s;
             const double da = 0.5 * (uv + static_cast<double>(v[0]));
             out[0] = static_cast<T>(da);

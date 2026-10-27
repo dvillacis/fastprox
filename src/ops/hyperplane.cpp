@@ -396,8 +396,9 @@ struct HyperBox final : RowOp<HyperBox> {
             if (st == kFreeE) den += p.A(i) * p.A(i);
         }
         const int64_t k = singletons(s, n);
-        if ((code[0] & kInactive) || !(den > 0.0)) return k;
-        for (int64_t i = 0; i < n; ++i) s.coef[i] = s.state[i] == FP_ENTRY_FREE ? p.A(i) : 0.0;
+        if (!s.constraint || (code[0] & kInactive) || !(den > 0.0)) return k;
+        if (s.coef)
+            for (int64_t i = 0; i < n; ++i) s.coef[i] = s.state[i] == FP_ENTRY_FREE ? p.A(i) : 0.0;
         s.active = true;
         return k;
     }

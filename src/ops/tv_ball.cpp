@@ -30,7 +30,16 @@
 // so a row with max |x_i| outside [2^-960, 2^960] is solved as x 2^-k with radius
 // alpha 2^-k and the result scaled back by 2^k (as in hyperplane.cpp): the piece
 // sums of gamma_max and the TV of z overflowed from max |x_i| ~ 5e305 (nightly
-// fuzz, the conjugate at sigma = 1.8e-306).
+// fuzz, the conjugate at sigma = 1.8e-306). In the derivatives <q, z_gamma>
+// grows as w^2: they work on omega w and omega z_gamma, with omega the power of
+// two that brings the largest w_e at a jump of z to [1/2, 1) (only those
+// enter q and z_gamma; a larger weight inside a segment left the jumps'
+// terms subnormal), and undo the scale in the step along
+// z_gamma; dz0 and g are scaled likewise in their products with omega q and
+// omega z_gamma. The plain formulas lost the constraint's term to overflow
+// from w ~ 1e155, to underflow below w ~ 1e-155, and in the conjugate at
+// sigma ~ 1e298, where the inner dx is dx / sigma (found by fuzzing
+// guarantee 1 in 1.0.2).
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -91,13 +100,23 @@ struct TVBall final : RowOp<TVBall> {
             s += we(e) * std::fabs(static_cast<double>(z[e + 1]) - static_cast<double>(z[e]));
         return s;
     }
-    // <q, v> = sum_e w_e sign(Dz_e) (v_{e+1} - v_e).
+    // The derivatives' scale of w (Scale above): pow2_scale of the largest w_e
+    // where z jumps.
+    template <class T>
+    double jump_scale(const T *z, int64_t n) const noexcept {
+        double m = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e)
+            if (sgn_diff(z, e)) m = std::max(m, we(e));
+        return pow2_scale(m);
+    }
+    // <q, v> = sum_e w_e sign(Dz_e) (v_{e+1} - v_e), on sw w and sv v.
     template <class T, class V>
-    double tv_lin(const T *z, const V *v, int64_t n) const noexcept {
+    double tv_lin(const T *z, const V *v, int64_t n, double sw = 1.0, double sv = 1.0) const noexcept {
         double s = 0.0;
         for (int64_t e = 0; e + 1 < n; ++e) {
             const int sg = sgn_diff(z, e);
-            if (sg) s += sg * we(e) * (static_cast<double>(v[e + 1]) - static_cast<double>(v[e]));
+            if (sg)
+                s += sg * (sw * we(e)) * (sv * static_cast<double>(v[e + 1]) - sv * static_cast<double>(v[e]));
         }
         return s;
     }
@@ -250,11 +269,13 @@ struct TVBall final : RowOp<TVBall> {
             return singletons(s, n);
         }
         const int64_t k = runs(s, n, [code](int64_t i) { return code[i] != 0; });
+        if (!s.constraint) return k;  // the regions need no jvp
         T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
         tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr);
-        if (tv_lin(z, zg, n) == 0.0) return k;
-        for (int64_t i = 0; i < n; ++i) {
+        const double omega = jump_scale(z, n);
+        if (tv_lin(z, zg, n, omega, omega) == 0.0) return k;
+        for (int64_t i = 0; s.coef && i < n; ++i) {
             double q = 0.0;
             if (i > 0) q += we(i - 1) * sgn_diff(z, i - 1);
             if (i + 1 < n) q -= we(i) * sgn_diff(z, i);
@@ -276,17 +297,22 @@ struct TVBall final : RowOp<TVBall> {
         const double g = gamma_star(x, z, code, n);
         tv->jvp_row(x, z, code, dx, dz, n, g, 0.0, dp ? dp + 1 : nullptr, tscr);
         tv->jvp_row(x, z, code, zero, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
-        const double kappa = tv_lin(z, zg, n);
+        // omega^2 <q, z_gamma>, omega (dalpha - ... - <q, dz0>), and the step
+        // dgamma z_gamma as their ratio times omega z_gamma.
+        const double omega = jump_scale(z, n);
+        const double kappa = tv_lin(z, zg, n, omega, omega);
         if (kappa == 0.0) return;
-        double rhs = dp ? dp[0] : 0.0;
+        double rhs = dp ? dp[0] * omega : 0.0;
         if (dp)
             for (int64_t e = 0; e + 1 < n; ++e)
                 rhs -= std::fabs(static_cast<double>(z[e + 1]) - static_cast<double>(z[e])) *
-                       dp[1 + (w.size() == 1 ? 0 : e)];
-        rhs -= tv_lin(z, dz, n);
-        const double dg = rhs / kappa;
+                       (dp[1 + (w.size() == 1 ? 0 : e)] * omega);
+        double dmax = 0.0;
+        for (int64_t i = 0; i < n; ++i) dmax = std::fmax(dmax, std::fabs(static_cast<double>(dz[i])));
+        const double sd = pow2_scale(dmax);
+        const double dg = rhs / kappa - tv_lin(z, dz, n, omega, sd) / kappa / sd;
         for (int64_t i = 0; i < n; ++i)
-            dz[i] = static_cast<T>(static_cast<double>(dz[i]) + dg * static_cast<double>(zg[i]));
+            dz[i] = static_cast<T>(static_cast<double>(dz[i]) + dg * (omega * static_cast<double>(zg[i])));
     }
 
     template <class T>
@@ -303,19 +329,26 @@ struct TVBall final : RowOp<TVBall> {
         const double g = gamma_star(x, z, code, n);
         for (int64_t i = 0; i < n; ++i) h[i] = T(0);
         tv->jvp_row(x, z, code, h, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
-        const double kappa = tv_lin(z, zg, n);
-        double beta = 0.0;
+        // bs = beta / omega from omega z_gamma and omega^2 <q, z_gamma> (Scale).
+        const double omega = jump_scale(z, n);
+        const double kappa = tv_lin(z, zg, n, omega, omega);
+        double bs = 0.0;
         if (kappa != 0.0) {
+            double gmax = 0.0;
+            for (int64_t i = 0; i < n; ++i) gmax = std::fmax(gmax, std::fabs(static_cast<double>(gv[i])));
+            const double sg = pow2_scale(gmax);
             double gz = 0.0;
-            for (int64_t i = 0; i < n; ++i) gz += static_cast<double>(gv[i]) * static_cast<double>(zg[i]);
-            beta = gz / kappa;
+            for (int64_t i = 0; i < n; ++i)
+                gz += (sg * static_cast<double>(gv[i])) * (omega * static_cast<double>(zg[i]));
+            bs = gz / kappa / sg;
         }
+        const double beta = bs * omega;
         // h = g - beta q, q_i = v_{i-1} - v_i with v_e = w_e sign(Dz_e).
         for (int64_t i = 0; i < n; ++i) {
             double q = 0.0;
-            if (i > 0) q += we(i - 1) * sgn_diff(z, i - 1);
-            if (i + 1 < n) q -= we(i) * sgn_diff(z, i);
-            h[i] = static_cast<T>(static_cast<double>(gv[i]) - beta * q);
+            if (i > 0) q += (omega * we(i - 1)) * sgn_diff(z, i - 1);
+            if (i + 1 < n) q -= (omega * we(i)) * sgn_diff(z, i);
+            h[i] = static_cast<T>(static_cast<double>(gv[i]) - bs * q);
         }
         for (int64_t k = 0; k < nw + 1; ++k) ia[k] = 0.0;
         tv->vjp_row(x, z, code, h, gx, n, g, ia, tscr);
