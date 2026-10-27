@@ -9,7 +9,7 @@ section.
 
 Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
-**Where things stand (2026-10-27):** 1.0.2, the structure of the derivative, is being released (the version is set; the TestPyPI dry run and the tag follow). 1.0.1 is the current release on PyPI (2026-10-25). The GPU backend and the candidates follow as users need them.
+**Where things stand (2026-10-27):** 1.0.2, the structure of the derivative, is released on PyPI (2026-10-27). The GPU backend and the candidates follow as users need them.
 
 ## Next: 1.0.2 — structure of the derivative
 
@@ -51,7 +51,7 @@ Queries for the structure behind each operator's Jacobian at the kept point: a s
 
 **Release**
 
-- [ ] 1.0.2: the version in `project()`, `FASTPROX_VERSION_SUFFIX` and the header macros; CHANGELOG; the `abi` job (`abidiff`: additions only); full suites, the sanitizer build and a fuzz hour; a TestPyPI dry run, then the tag `v1.0.2` — In progress (2026-10-27): the version, CHANGELOG, README and conda recipe are set; the C suite (1094950 checks), the header test, the Python suite (2335 passed) and the strict docs build pass, as do ASan/UBSan and TSan. Three fuzz hours on 6 workers (71, 87 and 96 rounds of 3M inputs). The first found the hyperplane and half-space losing the constraint on tiny tangents; the second found the 1D TV ball taking jump signs from a z that rounds a jump away, and float32 coefficients underflowing (now scaled to max \|a\_i\| = 1); all fixed with regression tests, and the third hour was clean. The `abi` job runs on the release PR
+- [x] 1.0.2: the version in `project()`, `FASTPROX_VERSION_SUFFIX` and the header macros; CHANGELOG; the `abi` job (`abidiff`: additions only); full suites, the sanitizer build and a fuzz hour; a TestPyPI dry run, then the tag `v1.0.2` — Done (2026-10-27): the version, CHANGELOG, README and conda recipe are set; the C suite (1094950 checks), the header test, the Python suite (2335 passed) and the strict docs build pass, as do ASan/UBSan and TSan. Three fuzz hours on 6 workers (71, 87 and 96 rounds of 3M inputs). The first found the hyperplane and half-space losing the constraint on tiny tangents; the second found the 1D TV ball taking jump signs from a z that rounds a jump away, and float32 coefficients underflowing (now scaled to max \|a\_i\| = 1); all fixed with regression tests, and the third hour was clean. The `abi` job passed on the release PR (#138); the TestPyPI dry run installed and ran, and the tag `v1.0.2` published to PyPI
 
 ## 1.x — GPU backend
 
