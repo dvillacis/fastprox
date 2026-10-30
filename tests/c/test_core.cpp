@@ -5017,6 +5017,40 @@ static void test_structure_rows() {
         fp_op_free(op);
     }
 
+    // The cone's Jacobian at a subnormal y (fuzz 2026-10-28: x = (0, 4e-315),
+    // where <u, dx> lost all but 17 bits): J is homogeneous of degree 0 in x,
+    // so J dx equals its value at x 2^1000, to rounding and a few subnormals.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_soc(&op));
+        for (double y : {3.9507868906275526e-315, 1.5e-323, 1e-310})
+            for (double d : {3.845639164674685e-312, 1e-300, 1.0})
+                for (int64_t n : {2, 4}) {
+                    Vec xs(static_cast<size_t>(n), 0.0), dxv(static_cast<size_t>(n), 0.0);
+                    for (int64_t i = 1; i < n; ++i) {
+                        xs[static_cast<size_t>(i)] = i % 2 ? y : -y;
+                        dxv[static_cast<size_t>(i)] = i == 1 ? d : 0.25 * d;
+                    }
+                    Vec jv[2];
+                    for (int k = 0; k < 2; ++k) {
+                        Vec xk = xs;
+                        for (double &v : xk) v = std::ldexp(v, 1000 * k);
+                        Arr x({n}, xk), z({n}), dx({n}, dxv), out({n});
+                        fp_options o = opts(-1, 1, 1);
+                        fp_workspace *ws;
+                        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+                        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+                        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.0, nullptr, &out.a));
+                        jv[k] = out.data;
+                        fp_workspace_free(ws);
+                    }
+                    for (int64_t i = 0; i < n; ++i)
+                        CHECK(std::fabs(jv[0][static_cast<size_t>(i)] - jv[1][static_cast<size_t>(i)]) <=
+                              1e-14 * d + 2e-323);  // 4 subnormals
+                }
+        fp_op_free(op);
+    }
+
     // No allocation with a workspace.
     for (int which = 0; which < 3; ++which) {
         fp_op *op;

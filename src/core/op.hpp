@@ -1311,8 +1311,10 @@ FP_COLD double unit_dot_slow(int64_t n, X x, V v) noexcept {
 }
 
 // <u, v>, u = (t x) / m, for the norm ||x|| = m / t of safe_norm: the plain
-// <t x, v> / m unless t = 1 and m max|v_k| leaves 2^+-900, as for
-// group_unit_dots.
+// <t x, v> / m unless m max|v_k| leaves 2^+-900, as for group_unit_dots.
+// That holds for t != 1 too: t caps at 2^1022, so a deep subnormal x keeps
+// m far below 1 (fuzz 2026-10-28: the cone at x = (0, 4e-315), dx near
+// 4e-312, where <t x, dx> was a subnormal of 17 bits).
 template <class X, class V>
 double unit_dot(int64_t n, X x, V v, double m, double t) noexcept {
     double d = 0.0, vm = 0.0;
@@ -1321,7 +1323,7 @@ double unit_dot(int64_t n, X x, V v, double m, double t) noexcept {
         vm = std::fmax(vm, std::fabs(static_cast<double>(v(k))));
     }
     const double P = m * vm;
-    if (t != 1.0 || vm == 0.0 || (0x1p-900 <= P && P <= 0x1p900)) return d / m;
+    if (vm == 0.0 || (0x1p-900 <= P && P <= 0x1p900)) return d / m;
     return unit_dot_slow(n, x, v);
 }
 

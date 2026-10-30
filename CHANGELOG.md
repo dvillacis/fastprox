@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The derivatives of the second-order cone and the tree-structured norms at a subnormal x (fuzz, 2026-10-28): where ‖x‖² underflows, the norm is rescaled, by at most 2^1022, and ⟨u, dx⟩ took the plain sum whenever it was, though for a deep subnormal x the rescaled x stays far below 1 and the products still underflow. At x = (0, 4e-315) and dx near 4e-312 the cone's J dx was 1.6e-6 off and left its constraint. The dot now goes to its scaled path by the range of ‖x‖ · max |dxᵢ| alone, rescaled or not, which leaves every result in range unchanged.
+
 ## [1.0.2] — 2026-10-27
 
 A patch release with the structure of the derivative: queries for what the Jacobian behind `fp_jvp` and `fp_vjp` is built from (the entries held fixed, the regions that move together, and at most one linear constraint per unit), for reduced systems in implicit differentiation and the subspaces of SCD semismooth\* Newton steps. It adds C functions, enums and the dtypes `FP_I32` and `FP_I64`, changing none (the ABI grows, as 1.x allows; decision of 2026-10-27). The fuzz harness now checks the structure's range guarantee, and with the sweeps that followed found derivatives that lost digits or overflowed at extreme scales in the ℓ2 and ℓ1 balls, the second-order cone, the group and tree-structured norms, the 1D TV ball, and the hyperplane and half-space with a box, fixed here; results at ordinary scales change at most in the last ulp, in three JVPs.
