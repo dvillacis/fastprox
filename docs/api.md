@@ -327,6 +327,21 @@ image-by-image calls, for any thread count.
   regions (here from a gap tolerance of 1e-10, or sooner where the polish
   succeeds) the derivative is the exact one; at 1e-8 on 128² images its error
   was 2–5%, against 7–19% from a threshold on the jumps of $z$.
+  An edge with a positive bound whose jump in the saved $z$ is at the rounding
+  level, at most $64\varepsilon(\max\lvert x \rvert + 2\sum_a \max_e \gamma w_a
+  \beta_e)$, is joined as well, whatever its dual (*since 1.1*, SCD review
+  S3): graph TV's rule. In 2D and 3D the dual is not unique (only the sum of
+  the axes' duals is fixed), and the dual the solver returns can saturate
+  every edge between two parts of one flat region; before 1.1 the region then
+  split, and on a tied 6 × 6 image the derivative was 0.54 off central
+  differences while reported exact. For an exact solution with exactly zero
+  jumps the joined piece is a B-Jacobian (it is the Jacobian wherever the prox
+  is differentiable). The allowance can also join parts whose values differ
+  by a few ulps: a numerical selection convention, not a proof that their
+  values are equal. `deriv.exact` keeps its meaning, that the polish certified
+  the regions; it does not certify SCD membership or a zero jump in real
+  arithmetic. Edges without a bound (a zero axis or edge weight, $\gamma = 0$)
+  are never joined.
 - **Special values.** A NaN anywhere in an image makes that whole image NaN,
   and its dual; ±Inf is rejected with `FP_EINVAL`. Such an image is not
   solved (*since 1.0*): it reports a NaN gap and 0 iterations and does not
@@ -574,7 +589,7 @@ convention; see "Why these are valid derivatives" below):
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | sorted ℓ1 | adjacent blocks with equal values; a block at 0 | blocks not pooled; the block at 0 thresholded |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
-| anisotropic TV | an edge with no jump whose dual is on its bound | not joined: its two sides averaged apart, with the sign of the dual |
+| anisotropic TV | an edge with no jump whose dual is on its bound | joined: its two sides averaged together (*since 1.1*; before, apart with the sign of the dual) |
 | ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | *branch:* the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
 | log penalty at $\gamma\lambda = \varepsilon^2$ | $\lvert x_i \rvert = \varepsilon$ (continuous, Hölder-½) | *branch:* thresholded: 0 |
 | SCAD, MCP | $\lvert x_i \rvert$ at a breakpoint | the branch below it (at $\gamma\lambda$: thresholded) |
@@ -705,9 +720,13 @@ SCD subspaces of each entry:
   smooth there, with Jacobian $\mathbf 1 \mathbf 1^\top / 3$, which the
   library returns, but the first flow saturates an edge and the mask flags
   it. A branch override on such an edge may select no piece the prox
-  actually has. For tree TV, 1D TV and anisotropic TV, where the dual of a
-  region is unique, each side of a flagged edge is the derivative of the
-  one-sided difference in a direction that keeps its piece.
+  actually has. Anisotropic TV's dual is not unique either in 2D and 3D
+  (only the sum of the axes' duals is fixed; *corrected in 1.1*, SCD review
+  S3, where this said it was), so its mask is likewise a superset of the
+  prox's kinks and its side +1 may select no piece. For tree TV and 1D TV,
+  where the dual of a region is unique, each side of a flagged edge is the
+  derivative of the one-sided difference in a direction that keeps its
+  piece.
 - **Isotropic TV** has masks but no branch overrides (`fp_workspace_set_branch`
   returns `FP_EINVAL`): keeping a pixel with zero gradient apart from its
   neighbours has infinite curvature $\gamma / \lVert g_p \rVert$, which its
@@ -726,12 +745,14 @@ SCD subspaces of each entry:
 - **TV branch overrides** (*since 0.3*, 1D and anisotropic TV):
   `fp_workspace_set_branch(ws, side, tol)` (`branch=` and `kink_tol=` in
   Python) chooses at each kink within `tol` whether the derivative treats
-  the edge as joined (side −1 at its tail: its two sides averaged together)
-  or apart (+1: averaged separately, the jump taking the sign of the edge's
-  dual). These are the two pieces of the piecewise-affine prox that meet
-  there, so each is the derivative of the one-sided difference in a
-  direction that keeps it: closing the gap keeps the edge joined, opening it
-  or lowering $\gamma$ keeps it apart. 1D TV rewrites its saved segment codes;
+  the edge as joined (side −1 at its tail: its two sides averaged together;
+  the default) or apart (+1: averaged separately, the jump taking the sign of
+  the edge's dual). For 1D TV these are the two pieces of the
+  piecewise-affine prox that meet there, so each is the derivative of the
+  one-sided difference in a direction that keeps it: closing the gap keeps
+  the edge joined, opening it or lowering $\gamma$ keeps it apart. For
+  anisotropic TV the mask depends on the saved dual (see graph and tree TV
+  above), and side +1 may select no piece. 1D TV rewrites its saved segment codes;
   anisotropic TV rebuilds its saved regions from the kept $z$ and dual (one
   pass over the image, as in the prox call). Isotropic TV has none yet:
   apart, a pixel with zero gradient is the limit of curvatures
@@ -2002,7 +2023,12 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   `vmap` too) in `x`, `gamma` and `weights`: the C kernels' systems on the flat
   regions of the solution, with the flat pixels and edges read off the dual and
   the isotropic curvature capped as there (the bound's margin is
-  $\max(10^{-9}, 64\varepsilon)$). Anisotropic TV averages over the regions
+  $\max(10^{-9}, 64\varepsilon)$). A pixel (isotropic) or, *since 1.1*, an
+  edge (anisotropic) with a positive radius is also flat when $\lvert G z
+  \rvert$ there is at most $w_{\max} 64\varepsilon \max\lvert x \rvert$. That
+  allowance is not the C kernel's, and this path has no polish, so its $z$
+  keeps jumps at the solver's accuracy: at loose tolerances, or with jumps
+  near either threshold, the two backends can select different pieces. Anisotropic TV averages over the regions
   exactly; isotropic TV solves one unknown per region by conjugate gradients
   with the C kernel's Jacobi preconditioner, stopped as there at the relative
   error of $z$ that each image's gap certifies (`deriv_tol` sets a fixed

@@ -387,3 +387,160 @@ def test_derivative_bits(name):
     op = fp.TVAniso(x.ndim)
     _, ctx = op.prox(x, 0.2, keep=True, tol=1e-9, max_iter=10**5)
     assert _derivatives(op, ctx, np.random.default_rng(7)) == DERIVATIVE_BITS[name]
+
+
+# ---- flat regions at the rounding level (since 1.1, SCD review S3) ----------
+#
+# An edge with a positive bound is flat when its dual is strictly inside the
+# bound or when its jump in the saved z is within the rounding allowance
+# tau0 = 64 eps (max |x| + 2 sum_a max_e lam_e), graph TV's rule. Before, a
+# flat edge whose (non-unique) dual saturated split its region.
+
+# The review's counterexample: graph TV on the same grid has 12 regions, and
+# the prox has one Jacobian at every sampled nearby point.
+S3_X = np.array([[2, 2, 2, 2, 1, 0], [2, -1, 1, 0, 1, 0], [0, 1, 2, 1, 1, 1],
+                 [1, 0, 1, 1, 1, 0], [1, 2, 0, 2, 1, 2], [2, 1, 1, 2, 0, 0]], dtype=float)
+TIGHT = dict(tol=1e-20, max_iter=100000)
+
+
+def _grid_edges(shape):
+    """The edges (p, p + e_a) of a grid in C order, axis by axis."""
+    i = np.arange(int(np.prod(shape))).reshape(shape)
+    out = []
+    for a in range(len(shape)):
+        lo = tuple(slice(None, -1) if b == a else slice(None) for b in range(len(shape)))
+        hi = tuple(slice(1, None) if b == a else slice(None) for b in range(len(shape)))
+        out.append(np.c_[i[lo].ravel(), i[hi].ravel()])
+    return np.concatenate(out)
+
+
+def _jac(op, ctx, shape):
+    n = int(np.prod(shape))
+    return np.column_stack([np.ravel(op.jvp(ctx, e.reshape(shape))) for e in np.eye(n)])
+
+
+def _nreg(ctx):
+    return int(np.ravel(ctx.structure().nregions)[0])
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")  # tol 1e-20 is below the gap's rounding
+def test_counterexample_joins_flat_regions():
+    aniso, graph = fp.TVAniso(), fp.GraphTV(36, _grid_edges((6, 6)))
+    za, ca = aniso.prox(S3_X, 0.3, keep=True, **TIGHT)
+    zg, cg = graph.prox(S3_X.ravel(), 0.3, keep=True)
+    np.testing.assert_allclose(za.ravel(), zg, atol=1e-15)
+    assert _nreg(ca) == _nreg(cg) == 12
+    np.testing.assert_allclose(_jac(aniso, ca, (6, 6)), _jac(graph, cg, (36,)), atol=1e-14)
+    rng = np.random.default_rng(0)
+    h = 1e-6
+    for _ in range(10):
+        d = rng.normal(size=(6, 6))
+        fd = (aniso.prox(S3_X + h * d, 0.3, **TIGHT) - aniso.prox(S3_X - h * d, 0.3, **TIGHT)) / (2 * h)
+        np.testing.assert_allclose(aniso.jvp(ca, d), fd, atol=1e-8)
+        dg = (aniso.prox(S3_X, 0.3 + h, **TIGHT) - aniso.prox(S3_X, 0.3 - h, **TIGHT)) / (2 * h)
+        np.testing.assert_allclose(aniso.jvp(ca, None, 1.0), dg, atol=1e-8)
+    assert ca.deriv.exact
+
+
+def _ambiguous(z, edges, scale):
+    """Jumps of a solution neither at the rounding level (below 1e3 times the
+    allowance) nor clearly apart: none on integer data at tol 1e-20."""
+    j = np.abs(z[edges[:, 0]] - z[edges[:, 1]])
+    tau0 = 64 * np.finfo(float).eps * scale
+    return int(((j > tau0) & (j < 1e3 * tau0)).sum())
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")  # tol 1e-20 is below the gap's rounding
+@pytest.mark.parametrize("shape,levels,count", [((6, 6), 3, 200), ((16, 16), 3, 50), ((16, 16), 8, 50),
+                                                ((5, 5, 5), 3, 30), ((4, 6, 7), 4, 30)])
+def test_tied_images_agree_with_graph_tv(shape, levels, count):
+    """Same grid and penalties, tight solves: the same piece on every image,
+    certified by the polish (deriv.exact) or not (about a third at tol 1e-20,
+    whose target is below the rounding of the gap). Before 1.1
+    the Jacobians differed on 101 of 200 tied 6 x 6 images and on 21 of 30
+    5 x 5 x 5 volumes (most of them other valid pieces at kinks)."""
+    rng = np.random.default_rng(len(shape) * 100 + levels)
+    E = _grid_edges(shape)
+    aniso, graph = fp.TVAniso(len(shape)), fp.GraphTV(int(np.prod(shape)), E)
+    for _ in range(count):
+        x = rng.integers(0, levels, size=shape).astype(float)
+        gamma = float(rng.choice([0.1, 0.3, 0.7]))
+        za, ca = aniso.prox(x, gamma, keep=True, **TIGHT)
+        zg, cg = graph.prox(x.ravel(), gamma, keep=True)
+        assert _ambiguous(zg, E, np.abs(x).max() + 4 * len(shape) * gamma) == 0
+        d, r = rng.normal(size=shape), rng.normal(size=shape)
+        np.testing.assert_allclose(aniso.jvp(ca, d, 0.7).ravel(), graph.jvp(cg, d.ravel(), 0.7), atol=1e-10)
+        gxa, gra = aniso.vjp(ca, r)
+        gxg, grg = graph.vjp(cg, r.ravel())
+        np.testing.assert_allclose(gxa.ravel(), gxg, atol=1e-10)
+        assert gra.gamma == pytest.approx(grg.gamma, abs=1e-10)
+        assert _nreg(ca) == _nreg(cg)
+
+
+def _pair(delta, k=2, w=None):
+    """Rows (0, 1 + delta) at gamma = 1/2 along the last axis, (2 rows in
+    2D): z = (1/2, 1/2 + delta) with the dual on its bound."""
+    x = np.array([0.0, 1.0 + delta])
+    return np.tile(x, (2, 1)) if k == 2 else np.tile(x, (2, 2, 1))
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")  # tol 1e-20 is below the gap's rounding
+@pytest.mark.parametrize("k", [2, 3])
+def test_rounding_allowance(k):
+    """Jumps of z below, near and above tau0 = 64 eps (max |x| + 2 sum_a
+    max_e lam_e): joined below, apart above; a jump measured on the
+    returned z, at the solver's scale."""
+    op = fp.TVAniso(k)
+    eps = np.finfo(float).eps
+    for f, joined in ((0.0, True), (0.25, True), (0.9, True), (1.5, False), (4.0, False)):
+        tau0 = 64 * eps * (1.0 + 2 * 0.5 * k)  # max |x| ~ 1 (1 + delta)
+        z, ctx = op.prox(_pair(f * tau0, k), 0.5, keep=True, **TIGHT)
+        jump = float(np.abs(np.diff(z, axis=-1)).max())
+        if 0.8 * tau0 < jump < 1.2 * tau0:
+            continue  # the measured jump rounds onto the threshold
+        assert (jump <= tau0) == joined, (f, jump, tau0)
+        n = int(np.prod(z.shape))
+        assert _nreg(ctx) == (1 if joined else 2)
+        J = _jac(op, ctx, z.shape)
+        np.testing.assert_allclose(J, np.full((n, n), 1 / n) if joined else J, atol=1e-15)
+        if joined:
+            np.testing.assert_allclose(op.jvp(ctx, None, 1.0), 0 * z, atol=1e-15)  # the mean does not move
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")  # tol 1e-20 is below the gap's rounding
+def test_rounding_allowance_is_scale_free():
+    """Positive rescalings of (x, gamma): the same regions and Jacobian,
+    powers of two or not."""
+    rng = np.random.default_rng(1)
+    op = fp.TVAniso()
+    x = rng.integers(0, 3, size=(8, 8)).astype(float)
+    _, c0 = op.prox(x, 0.3, keep=True, **TIGHT)
+    J0, l0 = _jac(op, c0, x.shape), c0.structure().labels
+    for s in (2.0 ** -40, 2.0 ** 30, 3.7e5, 1e-6, 1 / 3):
+        _, c = op.prox(s * x, 0.3 * s, keep=True, **TIGHT)
+        np.testing.assert_array_equal(c.structure().labels, l0)
+        np.testing.assert_allclose(_jac(op, c, x.shape), J0, atol=1e-13)
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")  # tol 1e-20 is below the gap's rounding
+def test_no_join_without_a_penalty():
+    """Equal values join only across edges with a positive bound: zero edge
+    weights, a zero axis weight and gamma = 0 keep them apart."""
+    x = np.zeros((3, 4))
+    beta = np.ones((2, 3, 4))
+    beta[1, 1, 1] = 0.0  # the edge (1,1)-(1,2)
+    beta[0, :, 2] = 0.0  # the edges (r,2)-(r+1,2)
+    _, ctx = fp.TVAniso(2, edge_weights=beta).prox(x, 0.5, keep=True, **TIGHT)
+    assert _nreg(ctx) == 1  # still connected around the cut edges
+    beta[1, :, 1] = 0.0  # the column of edges (r,1)-(r,2) as well
+    beta[0, :, :] = 0.0
+    _, ctx = fp.TVAniso(2, edge_weights=beta).prox(x, 0.5, keep=True, **TIGHT)
+    assert _nreg(ctx) == 2 * 3  # rows split at column 1 | 2, axis 0 cut
+    _, ctx = fp.TVAniso(2, [1.0, 0.0]).prox(x, 0.5, keep=True, **TIGHT)
+    assert _nreg(ctx) == 4  # one region per column
+    for k in (2, 3):
+        xx, op = np.zeros((3,) * k), fp.TVAniso(k)
+        _, ctx = op.prox(xx, 0.0, keep=True)
+        assert _nreg(ctx) == xx.size
+        np.testing.assert_array_equal(_jac(op, ctx, xx.shape), np.eye(xx.size))
+
