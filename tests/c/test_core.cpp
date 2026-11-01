@@ -5817,14 +5817,14 @@ static void test_tv_aniso_flat_ties() {
         CHECK_OK(fp_op_graph_tv(N, static_cast<int64_t>(e.size()) / 2, e.data(), nullptr, &g));
         Arr x(sh, xv), z(sh), xg({N}, xv), zg({N});
         fp_options oa = opts(-1, 1, 1), og = opts(-1, 1, 1);
-        oa.tol = 1e-20;
-        oa.max_iter = 100000;
+        oa.tol = 1e-16;  // the polish's exact z; 1e-20 ran 100000 iterations on half the images
+        oa.max_iter = 5000;
         og.tol = 0.0;
         fp_workspace *wa, *wg;
         CHECK_OK(fp_workspace_create(a, &x.a, &oa, &wa));
         CHECK_OK(fp_workspace_create(g, &xg.a, &og, &wg));
         const fp_status sa = fp_prox(a, gamma, &x.a, &z.a, &oa, wa, nullptr);
-        CHECK(sa == FP_OK || sa == FP_ENOTCONV);  // tol 1e-20 is below the gap's rounding
+        CHECK(sa == FP_OK || sa == FP_ENOTCONV);  // 1e-16 can be below the gap's rounding
         CHECK_OK(fp_prox(g, gamma, &xg.a, &zg.a, &og, wg, nullptr));
         int64_t na = -1, ng = -1;
         CHECK_OK(fp_workspace_regions(wa, nullptr, nullptr, &na, 1));
@@ -5873,8 +5873,8 @@ static void test_tv_aniso_flat_ties() {
             const double tau0 = 64.0 * eps * (1.0 + 2.0 * 0.5 * 2), d = f * tau0;
             Arr x({2, 2}, {0.0, 1.0 + d, 0.0, 1.0 + d}), z({2, 2});
             fp_options o = opts(-1, 1, 1);
-            o.tol = 1e-20;
-            o.max_iter = 100000;
+            o.tol = 1e-16;
+            o.max_iter = 5000;
             fp_workspace *ws;
             CHECK_OK(fp_workspace_create(a, &x.a, &o, &ws));
             const fp_status st = fp_prox(a, 0.5, &x.a, &z.a, &o, ws, nullptr);
