@@ -954,13 +954,35 @@ struct TVAniso final : ImageOp<TVAniso> {
 
     // ---- structure ----------------------------------------------------------
 
+    // The thresholds on the jumps of z (jump_bound).
+    struct Bounds {
+        double tau, tau0;
+    };
+
     // Saved for jvp/vjp: the components of the graph of flat edges and the
     // boundary sign sums S_{C,a} on every axis. Along an active axis an edge
     // is flat when its 1D dual is strictly inside its bound, |p_e| <
-    // lam_a (1 - kPolishEta), as in the polish, and a boundary edge takes the
+    // lam_a (1 - kPolishEta), as in the polish, or (since 1.1, SCD review S3)
+    // when its bound is positive and its jump in z is within tau0 below,
+    // whatever its dual; a boundary edge takes the
     // sign of its jump at the solution, sign(z_i - z_j) = -sign(p_e) for
     // p_e = lam_a sign(z_j - z_i); the derivatives are
-    // those of the polish's closed form on these components. A threshold on
+    // those of the polish's closed form on these components.
+    //
+    // Why the jump test: in 2D and 3D the dual is not unique (only sum_a q_a
+    // is fixed), and the dual a solve returns can saturate every edge between
+    // two parts of one flat region, which the dual test alone then split (on
+    // a tied 6 x 6 image of the review, 13 components against graph TV's 12
+    // and a jvp 0.54 off central differences). The polish's z is the closed
+    // form on the dual's components, so parts with equal values agree to
+    // rounding and the jump test joins them: graph TV's rule (edge_tv.hpp),
+    // with the same allowance. For an exact solution with exactly zero jumps
+    // the joined piece is a B-Jacobian: x' = x - t gamma D^T p_J (0 < t < 1)
+    // has the same z with every joined edge strictly inside its bound, so the
+    // prox is affine near x', and x' -> x (docs/scd-review-2026-10.md, "What
+    // holds"). A rounding-level merge of parts that differ by a few ulps is a
+    // selection convention, not such a proof; edges without a bound never
+    // join, as zero weights impose no equality. A threshold on
     // the jumps of z instead (8 times the rms error that the gap certifies)
     // gave errors of 0.07-0.19 against the exact derivative on 128^2 images
     // at a gap tolerance of 1e-8. Along other axes the components do not
@@ -999,14 +1021,14 @@ struct TVAniso final : ImageOp<TVAniso> {
         double *part = u + 3 * N;
         // No jump exceeds tau when tau is above the range of z (the usual case
         // but at tiny lam_e), and then the test is skipped.
-        const double tau = jump_bound(g, c, lam, z, part);
+        const Bounds tb = jump_bound(g, c, lam, z, part);
         // The flat edges as bit a of flag[i] (in label's memory, as in the
         // polish), and the signs of the others in code[i].
         uint8_t *flag = reinterpret_cast<uint8_t *>(label);
         std::memset(flag, 0, static_cast<size_t>(N));
         std::memset(code, 0, static_cast<size_t>(N));
         for (int a = 0; a < g.k; ++a)
-            if (g.L[a] > 1) edge_codes(g, c, a, lam, z, tau, side, stol, flag, code);
+            if (g.L[a] > 1) edge_codes(g, c, a, lam, z, tb, side, stol, flag, code);
         // Union-find, roots at the smallest index (deterministic labels).
         const Slabs sl = slabs(g);
         const int64_t nslab = sl.count;
@@ -1066,7 +1088,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     }
 
     struct CodeRule {
-        double lam, tau, stol;
+        double lam, tau, tau0, stol;
         uint8_t bit;  // of flag
         int shift;    // of the sign in code
     };
@@ -1074,13 +1096,13 @@ struct TVAniso final : ImageOp<TVAniso> {
     // flag[i] when the edge is flat, and otherwise its sign in bits 2a and
     // 2a + 1 of code[i] (1 for +1, 2 for -1; 0 for 0, as for a flat edge or
     // none). In the fixed chunks of fibers of mark_edges.
-    void edge_codes(const Geom &g, const ImageCall &c, int a, const double *lam, const double *z, double tau,
+    void edge_codes(const Geom &g, const ImageCall &c, int a, const double *lam, const double *z, Bounds tb,
                     const int8_t *side, double stol, uint8_t *flag, uint8_t *code) const {
         constexpr int64_t W = kEdgeChunk;
         const int64_t N = g.N, s = g.S[a], L = g.L[a], outer = N / (L * s);
         const int64_t per = s == 1 ? 1 : (s + W - 1) / W;
         const double la = lam[a], *ba = bw(a, N), *qa = c.dual + a * N;
-        const CodeRule rule{la, tau, stol, static_cast<uint8_t>(1u << a), 2 * a};
+        const CodeRule rule{la, tb.tau, tb.tau0, stol, static_cast<uint8_t>(1u << a), 2 * a};
         parallel_for(c.nt, outer * per, std::max<int64_t>(1, kChunk / (L * std::min(s, W))),
                      [&](int, int64_t u0, int64_t u1) {
             for (int64_t u = u0; u < u1; ++u) {
@@ -1104,7 +1126,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     static void code_chunk(const double *__restrict q, const double *__restrict z, const double *__restrict wt,
                            const int8_t *__restrict side, uint8_t *__restrict flag, uint8_t *__restrict code,
                            int64_t w, int64_t L, int64_t s, CodeRule rule) {
-        const double lam = rule.lam, tau = rule.tau, stol = rule.stol;
+        const double lam = rule.lam, tau = rule.tau, tau0 = rule.tau0, stol = rule.stol;
         const bool cert = tau == tau;
         const int sh = rule.shift;
         const uint8_t bit = rule.bit;
@@ -1130,7 +1152,11 @@ struct TVAniso final : ImageOp<TVAniso> {
                     if constexpr (Wt) le = lam * wt[i];
                     const double jump = std::fabs(z[i + s] - z[i]);
                     const bool certified = cert & (le > 0.0) & (jump > tau);  // a jump at the solution too
-                    bool flat = (std::fabs(pe) < le * (1.0 - kPolishEta)) & !certified;
+                    // Flat: the dual strictly inside its bound, or (since 1.1,
+                    // SCD review S3) a jump of z within the rounding allowance
+                    // tau0, whatever the dual; only edges with a bound (le > 0).
+                    // tau0 <= tau, so a certified jump is never within it.
+                    bool flat = ((std::fabs(pe) < le * (1.0 - kPolishEta)) & !certified) | ((le > 0.0) & (jump <= tau0));
                     if constexpr (Side) {  // the side at a kink, else 0
                         const bool kink = (side[i] != 0) & (le > 0.0) & (jump <= stol) & (std::fabs(pe) >= le - stol);
                         flat = kink ? side[i] < 0 : flat;
@@ -1228,17 +1254,18 @@ struct TVAniso final : ImageOp<TVAniso> {
         return m;
     }
 
-    // tau of structure(): above it, a jump of z is a jump of the solution.
-    // In rows, summed in a fixed order (part: 4 rows() doubles). NaN, so that
-    // no edge is certified, without an active axis or when tau is above the
-    // range of z.
-    double jump_bound(const Geom &g, const ImageCall &c, const double *lam, const double *z, double *part) const {
+    // The thresholds of structure() on the jumps of z: above tau a jump of z
+    // is a jump of the solution, and at most tau0 (the rounding allowance,
+    // tau0 <= tau) it is flat. In rows, summed in a fixed order (part: 4
+    // rows() doubles). Both NaN without an active axis; tau NaN, so that no
+    // edge is certified, when it is above the range of z.
+    Bounds jump_bound(const Geom &g, const ImageCall &c, const double *lam, const double *z, double *part) const {
         const int64_t N = g.N, R = g.rows(), n = g.L[g.k - 1];
         double lmax = 0.0;
         for (int a = 0; a < g.k; ++a)
             if (lam[a] != 0.0 && g.L[a] > 1) lmax += lam[a] * (beta.empty() ? 1.0 : bmax_[a]);
         const double none = std::numeric_limits<double>::quiet_NaN();
-        if (!(lmax > 0.0)) return none;
+        if (!(lmax > 0.0)) return {none, none};
         // Per row: the terms of A, and the range of z and max |d| in lo, hi, dm.
         double *lo = part + R, *hi = lo + R, *dm = hi + R;
         const double A = row_sum(g, c, part, [&](int64_t r) {
@@ -1264,12 +1291,13 @@ struct TVAniso final : ImageOp<TVAniso> {
             dmax = std::max(dmax, dm[r]);
         }
         const double range = zhi - zlo;
-        if (!(2.0 * std::sqrt(2.0 * std::max(c.gap, 0.0)) < range)) return none;  // tau is larger
         const double eps = std::numeric_limits<double>::epsilon();
+        const double tau0 = 64.0 * eps * (dmax + 2.0 * lmax);
+        if (!(2.0 * std::sqrt(2.0 * std::max(c.gap, 0.0)) < range)) return {none, tau0};  // tau is larger
         const double M = static_cast<double>((g.k + 1) * N);
         const double gp = std::max(c.gap, 0.0) + (M + 4.0) * eps * A;
-        const double tau = 2.0 * std::sqrt(2.0 * gp) + 64.0 * eps * (dmax + 2.0 * lmax);
-        return tau < range ? tau : none;
+        const double tau = 2.0 * std::sqrt(2.0 * gp) + tau0;
+        return {tau < range ? tau : none, tau0};
     }
 
     // ---- kinks (since 0.3) ----------------------------------------------------

@@ -547,3 +547,86 @@ def test_torch_gpu(iso):
     assert ((zw.detach().cpu().numpy() - zcw) ** 2).sum() <= 2 * iw.gap * 1.01 + 1e-6
     zw.sum().backward()
     assert st.grad.device.type == dev and torch.isfinite(st.grad).all()
+
+
+# ---- anisotropic flat edges at the rounding level (since 1.1, SCD review S3)
+
+def _grid_edges(shape):
+    i = np.arange(int(np.prod(shape))).reshape(shape)
+    out = []
+    for a in range(len(shape)):
+        lo = tuple(slice(None, -1) if b == a else slice(None) for b in range(len(shape)))
+        hi = tuple(slice(1, None) if b == a else slice(None) for b in range(len(shape)))
+        out.append(np.c_[i[lo].ravel(), i[hi].ravel()])
+    return np.concatenate(out)
+
+
+def _device_jacobian(fw, x, gamma):
+    """The dense Jacobian of the device anisotropic TV of one image x, by the
+    framework's own reverse mode, on CPU."""
+    n = x.size
+    tight = dict(ndim=2, tol=1e-20, max_iter=10 ** 5, warn=False)
+    if fw.name == "torch":
+        torch = fw.mod
+        xt = torch.tensor(x, requires_grad=True)
+        z = fw.f.tv_aniso(xt, gamma, **tight).reshape(-1)
+        return np.stack([torch.autograd.grad(z[i], xt, retain_graph=True)[0].numpy().ravel() for i in range(n)])
+    import jax
+    import jax.numpy as jnp
+    f = lambda v: fw.f.tv_aniso(v, gamma, **tight).reshape(-1)
+    return np.asarray(jax.jacrev(f)(jnp.asarray(x))).reshape(n, n)
+
+
+# A kink (rows (0, 1) at gamma = 1/2 meet at their mean with the dual on its
+# bound), a tied 3 x 3 image whose device dual saturates on a flat edge
+# (both split their region before 1.1), and the review's counterexample.
+S3_DEVICE = [(np.array([[0.0, 1.0], [0.0, 1.0]]), 0.5),
+             (np.array([[0.0, 2.0, 0.0], [1.0, 1.0, 1.0], [0.0, 0.0, 2.0]]), 0.5),
+             (np.array([[2, 2, 2, 2, 1, 0], [2, -1, 1, 0, 1, 0], [0, 1, 2, 1, 1, 1],
+                        [1, 0, 1, 1, 1, 0], [1, 2, 0, 2, 1, 2], [2, 1, 1, 2, 0, 0]], dtype=float), 0.3)]
+
+
+@pytest.mark.parametrize("case", range(len(S3_DEVICE)))
+def test_aniso_flat_edges_match_graph_tv(fw, case):
+    """With a tight solve, the device backward selects graph TV's fully
+    joined piece on the same grid."""
+    x, gamma = S3_DEVICE[case]
+    graph = fp.GraphTV(x.size, _grid_edges(x.shape))
+    _, cg = graph.prox(x.ravel(), gamma, keep=True)
+    Jg = np.column_stack([graph.jvp(cg, e) for e in np.eye(x.size)])
+    np.testing.assert_allclose(_device_jacobian(fw, x, gamma), Jg, atol=1e-10)
+
+
+def test_aniso_join_threshold(fw):
+    """The device rule itself, on a hand-made (z, u): an edge whose dual is on
+    its bound joins when its jump |w_a (z_j - z_i)| is at most w_max 64 eps
+    max|x| and its radius is positive; above it, or with a zero edge weight
+    or gamma = 0, it stays apart."""
+    eps = np.finfo(np.float64).eps
+    floor = 64 * eps * 1.0  # w_max = 1, max |x| = 1
+    x = np.array([[[0.0, 1.0], [0.0, 1.0]]])  # one image (B = 1)
+    u = np.zeros((2, 1, 2, 2))
+    u[1, 0, :, 0] = 0.5  # the axis-1 edges, on their bound gamma = 1/2
+    cases = [(0.0, 0.5, None, 1), (0.5 * floor, 0.5, None, 1), (2 * floor, 0.5, None, 2),
+             (0.0, 0.5, "cut", 2), (0.0, 0.0, None, 4)]
+    for delta, gamma, sw, want in cases:
+        z = np.array([[[0.5, 0.5 + delta], [0.5, 0.5 + delta]]])
+        uu = u * (gamma / 0.5)
+        ew = None
+        if sw == "cut":
+            ew = np.ones((2, 1, 2, 2))
+            ew[1, 0, :, 0] = 0.0
+        if fw.name == "torch":
+            from fastprox._tv_torch import Structure
+            t = fw.mod.tensor
+            s = Structure(t(x), t(z), t(uu), t([0.0]), gamma, [1.0, 1.0], False,
+                          None if ew is None else t(ew))
+            got = int(s.R.end.sum())
+        else:
+            import jax.numpy as jnp
+            from fastprox._tv_jax import _structure
+            *_, R = _structure(jnp.asarray(x), jnp.asarray(z), jnp.asarray(uu), jnp.asarray([0.0]),
+                               jnp.asarray([gamma]), jnp.asarray([1.0, 1.0]), False,
+                               None if ew is None else jnp.asarray(ew))
+            got = int(R.end.sum())
+        assert got == want, (delta, gamma, sw)

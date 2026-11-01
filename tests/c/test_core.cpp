@@ -5751,10 +5751,10 @@ static void test_structure_images() {
     }
     // Branch overrides rebuild the saved structure. Two entries 0 and 1 on one
     // edge at gamma = 0.5 meet at z = (0.5, 0.5) with the dual on its bound: a
-    // kink. Graph and tree TV join them by default (one region) and side +1
-    // keeps them apart; anisotropic TV, whose edges are flat only with the
-    // dual strictly inside, keeps them apart (two regions) and side -1 joins
-    // them. Clearing the override restores the default.
+    // kink. All three join them by default (one region) and side +1 keeps
+    // them apart; before 1.1 anisotropic TV, whose edges were flat only with
+    // the dual strictly inside, kept them apart (SCD review S3). Clearing the
+    // override restores the default.
     {
         const int64_t edge[2] = {0, 1};
         for (int which = 0; which < 3; ++which) {
@@ -5764,7 +5764,7 @@ static void test_structure_images() {
                                   : fp_op_tree_tv(2, 1, edge, nullptr, &op));
             const std::vector<int64_t> shape = which == 0 ? std::vector<int64_t>{1, 2} : std::vector<int64_t>{2};
             const std::vector<int64_t> sshape = which == 0 ? shape : std::vector<int64_t>{1};  // graphs: per edge
-            const int64_t def = which == 0 ? 2 : 1, other = 3 - def;
+            const int64_t def = 1, other = 2;
             Arr x(shape, {0.0, 1.0}), z(shape);
             fp_options o = opts(-1, 1, 1);
             o.tol = 1e-12;
@@ -5774,7 +5774,7 @@ static void test_structure_images() {
             int64_t nreg = -1;
             CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
             CHECK(nreg == def);
-            IntArr<int8_t> side(sshape, FP_I8, static_cast<int8_t>(which == 0 ? -1 : 1));
+            IntArr<int8_t> side(sshape, FP_I8, 1);
             CHECK_OK(fp_workspace_set_branch(ws, &side.a, 1e-9));
             CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
             CHECK(nreg == other);
@@ -5788,6 +5788,108 @@ static void test_structure_images() {
     }
 }
 
+// SCD review S3 (since 1.1): an anisotropic edge with a positive bound is flat
+// when its dual is strictly inside the bound or its jump in the saved z is
+// within the rounding allowance tau0 = 64 eps (max |x| + 2 sum_a max_e lam_e),
+// graph TV's rule. Before, a flat edge whose non-unique dual saturated split
+// its region: on the review's counterexample (13 regions against graph TV's
+// 12) the jvp was 0.54 off central differences.
+static void test_tv_aniso_flat_ties() {
+    // The grid edges (p, p + e_a) in C order.
+    auto grid = [](const std::vector<int64_t> &sh) {
+        std::vector<int64_t> e;
+        int64_t N = 1, S[3] = {1, 1, 1};
+        for (int64_t v : sh) N *= v;
+        for (int a = static_cast<int>(sh.size()) - 2; a >= 0; --a) S[a] = S[a + 1] * sh[static_cast<size_t>(a + 1)];
+        for (size_t a = 0; a < sh.size(); ++a)
+            for (int64_t p = 0; p < N; ++p)
+                if ((p / S[a]) % sh[a] + 1 < sh[a]) e.insert(e.end(), {p, p + S[a]});
+        return e;
+    };
+    // The aniso and graph TV jvp/vjp (in x and gamma) and region counts
+    // agree at x; returns the largest difference.
+    auto compare = [&](const std::vector<int64_t> &sh, const Vec &xv, double gamma, uint64_t seed) {
+        const int k = static_cast<int>(sh.size());
+        int64_t N = 1;
+        for (int64_t v : sh) N *= v;
+        const std::vector<int64_t> e = grid(sh);
+        fp_op *a = make_aniso(k, {1.0}), *g;
+        CHECK_OK(fp_op_graph_tv(N, static_cast<int64_t>(e.size()) / 2, e.data(), nullptr, &g));
+        Arr x(sh, xv), z(sh), xg({N}, xv), zg({N});
+        fp_options oa = opts(-1, 1, 1), og = opts(-1, 1, 1);
+        oa.tol = 1e-20;
+        oa.max_iter = 100000;
+        og.tol = 0.0;
+        fp_workspace *wa, *wg;
+        CHECK_OK(fp_workspace_create(a, &x.a, &oa, &wa));
+        CHECK_OK(fp_workspace_create(g, &xg.a, &og, &wg));
+        const fp_status sa = fp_prox(a, gamma, &x.a, &z.a, &oa, wa, nullptr);
+        CHECK(sa == FP_OK || sa == FP_ENOTCONV);  // tol 1e-20 is below the gap's rounding
+        CHECK_OK(fp_prox(g, gamma, &xg.a, &zg.a, &og, wg, nullptr));
+        int64_t na = -1, ng = -1;
+        CHECK_OK(fp_workspace_regions(wa, nullptr, nullptr, &na, 1));
+        CHECK_OK(fp_workspace_regions(wg, nullptr, nullptr, &ng, 1));
+        CHECK(na == ng);
+        std::mt19937_64 r(seed);
+        std::normal_distribution<double> nd;
+        Vec dv(static_cast<size_t>(N));
+        for (double &v : dv) v = nd(r);
+        Arr dx(sh, dv), dz(sh), gx(sh), dxg({N}, dv), dzg({N}), gxg({N});
+        double err = 0.0, gga = 0.0, ggg = 0.0;
+        CHECK_OK(fp_jvp(a, wa, &dx.a, 0.7, nullptr, &dz.a));
+        CHECK_OK(fp_jvp(g, wg, &dxg.a, 0.7, nullptr, &dzg.a));
+        CHECK_OK(fp_vjp(a, wa, &dx.a, &gx.a, &gga, nullptr));
+        CHECK_OK(fp_vjp(g, wg, &dxg.a, &gxg.a, &ggg, nullptr));
+        for (int64_t i = 0; i < N; ++i)
+            err = std::max({err, std::fabs(dz.data[i] - dzg.data[i]), std::fabs(gx.data[i] - gxg.data[i])});
+        err = std::max(err, std::fabs(gga - ggg));
+        fp_workspace_free(wa);
+        fp_workspace_free(wg);
+        fp_op_free(a);
+        fp_op_free(g);
+        return err;
+    };
+    const Vec cex = {2, 2, 2, 2, 1, 0, 2, -1, 1, 0, 1, 0, 0, 1, 2, 1, 1, 1,
+                     1, 0, 1, 1, 1, 0, 1, 2, 0, 2, 1, 2, 2, 1, 1, 2, 0, 0};
+    CHECK(compare({6, 6}, cex, 0.3, 1) <= 1e-12);
+    // Tied images and volumes (before 1.1 most differed: other valid pieces
+    // at kinks, and on the counterexample a wrong one).
+    std::mt19937_64 r(31);
+    for (int t = 0; t < 60; ++t) {
+        const std::vector<int64_t> sh = t < 40 ? std::vector<int64_t>{6, 6} : std::vector<int64_t>{4, 5, 4};
+        int64_t N = 1;
+        for (int64_t v : sh) N *= v;
+        Vec xv(static_cast<size_t>(N));
+        for (double &v : xv) v = static_cast<double>(r() % 3);
+        const double gamma = (t % 3 == 0) ? 0.1 : (t % 3 == 1 ? 0.3 : 0.7);
+        CHECK(compare(sh, xv, gamma, 100 + t) <= 1e-10);
+    }
+    // The allowance: rows (0, 1 + delta) at gamma = 1/2 meet at a jump delta
+    // with the dual on its bound; joined at or below tau0, apart above.
+    {
+        fp_op *a = make_aniso(2, {1.0});
+        const double eps = std::numeric_limits<double>::epsilon();
+        for (double f : {0.0, 0.25, 0.75, 1.5, 4.0}) {
+            const double tau0 = 64.0 * eps * (1.0 + 2.0 * 0.5 * 2), d = f * tau0;
+            Arr x({2, 2}, {0.0, 1.0 + d, 0.0, 1.0 + d}), z({2, 2});
+            fp_options o = opts(-1, 1, 1);
+            o.tol = 1e-20;
+            o.max_iter = 100000;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(a, &x.a, &o, &ws));
+            const fp_status st = fp_prox(a, 0.5, &x.a, &z.a, &o, ws, nullptr);
+            CHECK(st == FP_OK || st == FP_ENOTCONV);
+            const double jump = std::fabs(z.data[1] - z.data[0]);
+            int64_t nr = -1;
+            CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nr, 1));
+            if (jump < 0.8 * tau0 || jump > 1.2 * tau0) CHECK(nr == (jump <= tau0 ? 1 : 2));
+            CHECK(f > 1.0 || nr == 1);
+            fp_workspace_free(ws);
+        }
+        fp_op_free(a);
+    }
+}
+
 int main() {
     test_tv1d();
     test_projections();
@@ -5798,6 +5900,7 @@ int main() {
     test_tv_iso();
     test_tv_spatial_weights();
     test_graph_tv();
+    test_tv_aniso_flat_ties();
     test_tree_tv();
     test_nonconvex();
     test_kinks();

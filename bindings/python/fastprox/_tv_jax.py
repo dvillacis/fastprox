@@ -269,7 +269,10 @@ def _structure(x, z, u, gap, gamma, w, iso, sw=None):
         mu = _bimg(0.1 * jnp.max(w) * jnp.sqrt(2 * jnp.maximum(gap, 0) / z[0].size), nd)  # _tv_torch.CURV_RMS
         h = jnp.where(flat | (rad <= 0), 0.0, rad / jnp.maximum(safe, mu))
     else:
-        flat = jnp.abs(u) < inside
+        # As in _tv_torch.Structure: also a jump at the rounding level of x on
+        # an edge with a positive radius (since 1.1, SCD review S3).
+        floor = jnp.max(w) * 64 * eps * jnp.abs(x).reshape(B, -1).max(1)
+        flat = (jnp.abs(u) < inside) | ((jnp.abs(g) <= _bimg(floor, nd)) & (inside > 0))
         join = [flat[a] & live[a] for a in range(k)]
         sg = jnp.sign(u) if sw is None else jnp.where(sw == 0, jnp.sign(g), jnp.sign(u))
         n = jnp.where(flat, 0.0, sg)

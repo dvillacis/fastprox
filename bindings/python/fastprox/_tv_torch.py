@@ -15,8 +15,11 @@ method: slower to tight tolerances, certified by the same gap.
 Backward: the C kernels' derivative systems on the flat regions. As in
 the C kernels, an entry is flat where its dual is strictly inside its bound,
 |u| < gamma (1 - eta) (complementary slackness), with eta = max(1e-9,
-64 eps) above the projection's rounding; isotropic TV also counts pixels
-with |g| = |G z| at the rounding level of x, w_max 64 eps max|x|. A flat
+64 eps) above the projection's rounding, or where |g| = |G z| (the pixel's
+norm, or the edge's jump) is at the rounding level of x, w_max 64 eps
+max|x|, and its radius is positive (anisotropic edges since 1.1, SCD review
+S3). This allowance is not the C kernel's: the backends can select
+differently at jumps near either threshold. A flat
 pixel (isotropic) or flat edge (anisotropic) joins its pixels into a region,
 and dz is constant on each region. The isotropic curvature gamma / |g_p| is
 capped at gamma / mu, mu = 0.1 w_max rms with rms = sqrt(2 gap / N), as in
@@ -412,7 +415,11 @@ class Structure:
             self.h = torch.where(flat, torch.zeros_like(gn), gimg / torch.maximum(safe, mu)) \
                 if bool((self.gamma > 0).any()) else None
         else:
-            flat = u.abs() < inside
+            # Flat: the dual strictly inside its bound, or (since 1.1, SCD
+            # review S3) a jump |g_e| at the rounding level of x, on edges with
+            # a positive radius only.
+            floor = max(prob.w) * 64 * eps * x.reshape(prob.B, -1).abs().amax(1)
+            flat = (u.abs() < inside) | ((g.abs() <= _img(prob, floor)) & (inside > 0))
             join = [flat[a] & live[a] for a in range(prob.k)]
             sg = torch.sign(u)
             if self.sw is not None:  # an edge without weight takes the sign of its jump
