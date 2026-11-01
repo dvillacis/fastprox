@@ -419,3 +419,261 @@ def test_weighted_isotonic_euclidean_pair():
             # The graph of N_C's SCD subspace: J u in L, D_w (I - J) u in L^perp.
             U = rng.normal(size=(n, 5))
             np.testing.assert_allclose(P @ (np.diag(w) @ (I - J) @ U), 0, atol=1e-12)
+
+
+# ------------------------------------- exact kinks and boundaries (S6, since 1.1)
+#
+# Every operator with kink masks, at inputs built exactly on its kinks from
+# representable values (steps are powers of two, so that the conjugate's
+# y = x / gamma and step 1 / sigma = gamma are exact too): at kink_tol 0 on
+# the kink, and a 2^-30 on either side of it within kink_tol 2^-26, for the
+# sides -1, 0 and +1, after prox and prox_conj. On each side whose structure
+# query succeeds, guarantees 1 and 2 and the rank (where J's positive
+# singular values are resolved); a refused query fails atomically. J's
+# spectrum: symmetric in [0, 1] for the convex operators (weighted isotonic
+# after the change of metric D_w^1/2 J D_w^-1/2), [0, slope bound] for SCAD
+# and MCP, nothing for l0 (its jump is a convention). After prox_conj, J_conj
+# = I - J_inner against a separate inner call at y / sigma with step
+# 1 / sigma, the Moreau relation and the chain rule in (y, sigma, theta).
+# B-Jacobian membership by analytic limits: each side's J at the kink is the
+# J of nearby points on that side's piece, and the default is one of them.
+
+KINK_DELTA, KINK_TOL = 2.0 ** -30, 2.0 ** -26
+
+
+def _tv_open(x):
+    """For rows of 1D TV with edges at every jump: the direction that moves
+    the two ends of each edge apart (the first along the row's step)."""
+    d = np.sign(np.diff(x, axis=-1))
+    t = np.zeros_like(x)
+    t[..., :-1] -= d
+    t[..., 1:] += d
+    return t
+
+
+def kink_fixtures():
+    """name: dict(make, x on the kinks at gamma, gamma, d: {side: a direction
+    into that side's piece}, spec: "convex", "jump", ("slope", bound) or
+    ("weighted", w), and flags: overrides (kink masks and branches), conj,
+    live (side +1 has no structure: group l2 kept live at its kink, S1),
+    curved (J varies within a piece), tol0 (the kink tolerance at x itself))."""
+    one = lambda x: {1: np.ones_like(x), -1: -np.ones_like(x)}  # noqa: E731
+    pm = lambda d: {1: d, -1: -d}  # noqa: E731
+    f = {}
+    x = np.array([[0.5, -0.5, 1.0, 0.25], [-0.5, 0.75, 0.5, -2.0]])
+    f["soft"] = dict(make=lambda: fp.Soft(0.5), x=x, gamma=1.0, d=one(x), spec="convex")
+    x = np.array([[0.5, -0.5, -1.25, 1.5]])  # |x| = gamma lam, soft(x) = lower, soft(x) = upper
+    f["l1_box"] = dict(make=lambda: fp.L1Box(0.5, -0.75, 1.0), x=x, gamma=1.0, d=one(x), spec="convex")
+    x = np.array([[-1.0, 2.0, 0.5, 3.0]])
+    f["box"] = dict(make=lambda: fp.Box(-1.0, 2.0), x=x, gamma=1.0, d=one(x), spec="convex")
+    x = np.array([[0.0, 1.0, -1.0, 0.0]])
+    f["nonneg"] = dict(make=lambda: fp.NonNeg(), x=x, gamma=1.0, d=one(x), spec="convex")
+    x = np.array([[0.5, -1.0, 2.0, 1.5]])  # gamma lam, (1 + gamma) lam, a lam
+    f["scad"] = dict(make=lambda: fp.SCAD(0.5, 4.0), x=x, gamma=1.0, d=one(x), spec=("slope", 3.0 / 2.0),
+                     curved=True)
+    x = np.array([[0.5, -1.5, 1.0, -0.5]])  # gamma lam, b lam
+    f["mcp"] = dict(make=lambda: fp.MCP(0.5, 3.0), x=x, gamma=1.0, d=one(x), spec=("slope", 3.0 / 2.0),
+                    curved=True)
+    x = np.array([[1.0, -1.0, 0.5, 2.0]])  # the tie sqrt(2 gamma lam) = 1
+    f["l0"] = dict(make=lambda: fp.L0(0.5), x=x, gamma=1.0, d=one(x), spec="jump", conj=False)
+    # The simplex of radius 3 at (3, 2, 1, 1): tau = 1, entries 2 and 3 on it.
+    x = np.array([[3.0, 2.0, 1.0, 1.0]])
+    f["simplex"] = dict(make=lambda: fp.Simplex(3.0), x=x, gamma=1.0, d=pm(np.array([[0, 0, 1.0, 1.0]])),
+                        spec="convex")
+    # The l1 ball of radius 2 at (3, 1, -1, 0.5): tau = 1, entries 1 and 2 on it.
+    x = np.array([[3.0, 1.0, -1.0, 0.5]])
+    f["l1_ball_tau"] = dict(make=lambda: fp.L1Ball(2.0), x=x, gamma=1.0, d=pm(np.array([[0, 1.0, -1.0, 0]])),
+                            spec="convex")
+    # On the sphere |x|_1 = 4: inside (-1) or projected with tau = 0 (+1).
+    x = np.array([[1.0, 2.0, -1.0]])
+    f["l1_ball_sphere"] = dict(make=lambda: fp.L1Ball(4.0), x=x, gamma=1.0, d=pm(x.copy()), spec="convex")
+    # Group l2 with tau = 3 at ||(1, 2, 2)|| = 3, beside a live group.
+    x = np.array([[1.0, 2.0, 2.0, 4.0, 4.0, 2.0]])
+    f["group_l2"] = dict(make=lambda: fp.GroupL2(3.0, GIDS), x=x, gamma=1.0,
+                         d=pm(np.array([[1.0, 2.0, 2.0, 0, 0, 0]])), spec="convex", live=True, curved=True)
+    # 1D TV at gamma = 1/2: (0, 1/2, 3, 7/2) solves to (1/2, 1/2, 3, 3), with
+    # the duals of edges 0 and 2 on their bound and no jump there; the
+    # second row mirrored. Side +1 opens those edges, -1 closes them.
+    x = np.array([[0.0, 0.5, 3.0, 3.5], [3.5, 3.0, 0.5, 0.0]])
+    f["tv1d"] = dict(make=lambda: fp.TV1D(), x=x, gamma=0.5, d=pm(np.array([[-1.0, 1, -1, 1], [1, -1, 1, -1]])),
+                     spec="convex")
+    x = np.array([[0.0, 1.0], [0.0, 1.0]])
+    f["tv_aniso"] = dict(make=lambda: fp.TVAniso(2), x=x, gamma=0.5, d={1: _tv_open(x), -1: -_tv_open(x)},
+                         spec="convex")
+    # Tree TV on the chain 0-1-2 at (2, -1, 5): the flow on edge (0, 1) at its bound.
+    x = np.array([2.0, -1.0, 5.0])
+    f["tree_tv"] = dict(make=lambda: fp.TreeTV(3, np.array([[0, 1], [1, 2]])), x=x, gamma=1.0,
+                        d=pm(np.array([1.0, -1.0, 0.0])), spec="convex")
+    # Graph TV on the 4-cycle at (1, 1, -1, -1): two edges saturated; the
+    # solver's flow is exact only to its accuracy.
+    x = np.array([1.0, 1.0, -1.0, -1.0])
+    f["graph_tv"] = dict(make=lambda: fp.GraphTV(4, np.array([[0, 1], [1, 2], [2, 3], [3, 0]])), x=x,
+                         gamma=1.0, d=pm(x.copy()), spec="convex", tol0=1e-10)
+    # No kink masks or overrides: the default piece at an exact kink. The
+    # hyperplane sum z = 1 over [0, 1]^3 at (1, 1/2, 1/4): mu = 1/4 puts
+    # entry 2 exactly on its bound; weighted isotonic regression at a tie of
+    # two pools, (1, 0) of mean 1/2 beside 1/2.
+    x = np.array([[1.0, 0.5, 0.25]])
+    f["hyperplane_box"] = dict(make=lambda: fp.Hyperplane(np.ones(3), 1.0, np.zeros(3), np.ones(3)), x=x,
+                               gamma=1.0, d=pm(np.array([[0, 0, 1.0]])), spec="convex", overrides=False)
+    w = np.array([1.0, 1.0, 2.0])
+    x = np.array([[1.0, 0.0, 0.5]])
+    f["isotonic_w"] = dict(make=lambda: fp.Isotonic(w), x=x, gamma=1.0, d=pm(np.array([[0, 0, 1.0]])),
+                           spec=("weighted", w), overrides=False, conj=False)
+    return f
+
+
+KINKS = sorted(kink_fixtures())
+
+
+def _dense_J(f, shape):
+    n = int(np.prod(shape))
+    return np.column_stack([np.ravel(f(np.eye(n)[j].reshape(shape))) for j in range(n)])
+
+
+def _check_spectrum(J, spec, conj, shape):
+    """J of the prox (conj False) or of the conjugate's prox (True)."""
+    eps = 1e-12
+    if spec == "jump":
+        return
+    if spec[0] == "slope":  # diagonal, J in [0, b]; the conjugate's I - J in [1 - b, 1]
+        np.testing.assert_array_equal(J, np.diag(np.diag(J)))
+        lo, hi = (1 - spec[1], 1.0) if conj else (0.0, spec[1])
+        assert np.all(np.diag(J) >= lo - eps) and np.all(np.diag(J) <= hi + eps), np.diag(J)
+        return
+    if spec[0] == "weighted":
+        sw = np.sqrt(np.broadcast_to(spec[1], shape)).ravel()
+        J = sw[:, None] * J / sw[None, :]
+    np.testing.assert_allclose(J, J.T, atol=eps)
+    ev = np.linalg.eigvalsh(0.5 * (J + J.T))
+    assert ev.min() >= -eps and ev.max() <= 1 + eps, ev
+
+
+def _check_rank(Jin, s):
+    """rank J_inner = dim L, when J's positive singular values are resolved
+    (none between 1e-10 and 1e-6: 2^-30 from a curved kink they are not)."""
+    sv = np.linalg.svd(Jin, compute_uv=False)
+    if np.any((sv > 1e-10) & (sv < 1e-6)):
+        return
+    ok = np.asarray(s.nregions).reshape(-1) >= 0
+    assert np.linalg.matrix_rank(Jin, tol=1e-8) == int(np.asarray(s.dim).reshape(-1)[ok].sum())
+
+
+def _sides(fx):
+    return (-1, 0, 1) if fx.get("overrides", True) else (None,)
+
+
+def _kw(side, tol):
+    return {} if side is None else {"branch": side, "kink_tol": tol}
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")
+@pytest.mark.parametrize("name", KINKS)
+def test_exact_kinks(name):
+    fx = kink_fixtures()[name]
+    op, x0, gamma = fx["make"](), fx["x"], fx["gamma"]
+    shape = x0.shape
+    solve = {"tol": 1e-14, "max_iter": 10 ** 5} if name == "tv_aniso" else {}
+    rng = np.random.default_rng(12)
+    tol0 = fx.get("tol0", 0.0)
+    points = [(x0, tol0, 0)] + [(x0 + KINK_DELTA * fx["d"][s], KINK_TOL, s) for s in (1, -1)]
+    for x, tol, at in points:
+        _, ctx = op.prox(x, gamma, keep=True, **solve)
+        if fx.get("overrides", True):
+            assert ctx.kinks(tol).any(), name
+        else:
+            with pytest.raises(ValueError):
+                ctx.kinks(tol)
+        for conj in (False, True) if fx.get("conj", True) else (False,):
+            sigma = 1.0 / gamma
+            if conj:  # y = sigma x: the inner prox at x with step 1 / sigma = gamma
+                y = sigma * x
+                zc, ctx = op.prox_conj(y, sigma, keep=True, **solve)
+                p, inner = op.prox(x, gamma, keep=True, **solve)
+                np.testing.assert_allclose(zc, y - sigma * p, atol=1e-13)  # Moreau
+            for side in _sides(fx):
+                kw = _kw(side, sigma * tol if conj else tol)
+                ikw = _kw(side, tol)
+                J = _dense_J(lambda v: op.jvp(ctx, v, **kw), shape)
+                _check_spectrum(J, fx["spec"], conj, shape)
+                Jin = np.eye(J.shape[0]) - J if conj else J
+                if conj:
+                    Jinner = _dense_J(lambda v: op.jvp(inner, v, **ikw), shape)
+                    np.testing.assert_allclose(Jin, Jinner, atol=1e-12)
+                    # Off the kink under an override, the piece's linearisation
+                    # and p itself differ by O(distance) in the dsigma p term.
+                    slack = 0.0 if at == 0 or not side else 4 * KINK_TOL
+                    _check_conj_chain_rule(op, ctx, inner, x, sigma, kw, ikw, rng, slack)
+                before = op.jvp(ctx, x)
+                if side == 1 and fx.get("live") and at != 1:
+                    # The live piece at or below the kink has no descriptor
+                    # (S1): refused, and nothing changes.
+                    with pytest.raises(ValueError, match="span"):
+                        ctx.structure(**kw)
+                    np.testing.assert_array_equal(op.jvp(ctx, x), before)
+                    check_structure(op, ctx, ctx.structure(), conj, rng, rank=False)
+                    continue
+                s = ctx.structure(**kw)
+                check_structure(op, ctx, s, conj, rng, rank=False, **kw)
+                _check_rank(Jin, s)
+                np.testing.assert_array_equal(op.jvp(ctx, x), before)  # one call only
+
+
+def _check_conj_chain_rule(op, ctx, inner, x, sigma, kw, ikw, rng, slack):
+    """z_c = y - sigma p(y / sigma, 1 / sigma, theta) at y = sigma x:
+    dz_c = dy - dsigma p - sigma Dp(dy / sigma - y dsigma / sigma^2,
+    -dsigma / sigma^2, dtheta)."""
+    y = sigma * x
+    dy, ds = rng.normal(size=x.shape), 0.37
+    dth = rng.normal(size=op.nparams) if op.nparams else None
+    p = op.prox(x, 1.0 / sigma)
+    lhs = op.jvp(ctx, dy, ds, dth, **kw)
+    rhs = dy - ds * p - sigma * op.jvp(inner, dy / sigma - y * ds / sigma ** 2, -ds / sigma ** 2, dth, **ikw)
+    np.testing.assert_allclose(lhs, rhs, atol=1e-12 * (1 + np.abs(rhs).max()) + slack)
+
+
+@pytest.mark.filterwarnings("ignore::fastprox.ConvergenceWarning")
+@pytest.mark.parametrize("name", KINKS)
+def test_exact_kinks_are_limits(name):
+    """B-Jacobian membership: at the kink, side s's J (and parameter and step
+    tangents) is the default J at x + t d_s, strictly inside s's piece, in the
+    limit t -> 0 (exactly on a polyhedral piece, to O(t) on a curved one);
+    the default is one of the sides (entry by entry for the elementwise
+    maps, whose kinks are independent). Without overrides, the default is
+    the J of one side."""
+    fx = kink_fixtures()[name]
+    op, x0, gamma = fx["make"](), fx["x"], fx["gamma"]
+    shape = x0.shape
+    solve = {"tol": 1e-14, "max_iter": 10 ** 5} if name == "tv_aniso" else {}
+    tol0 = fx.get("tol0", 0.0)
+    t = 2.0 ** -20
+    atol = 4 * t if fx.get("curved") else 1e-9
+
+    def tangents(ctx, **kw):
+        J = _dense_J(lambda v: op.jvp(ctx, v, **kw), shape)
+        dg = op.jvp(ctx, None, 1.0, None, **kw)
+        dp = op.jvp(ctx, None, 0.0, np.ones(op.nparams), **kw) if op.nparams else np.zeros(shape)
+        return J, dg, dp
+
+    _, ctx = op.prox(x0, gamma, keep=True, **solve)
+    limits = {}
+    for s in (1, -1):
+        _, c = op.prox(x0 + t * fx["d"][s], gamma, keep=True, **solve)
+        limits[s] = tangents(c)
+    default = tangents(ctx)
+    if op._elementwise:
+        flat = [np.stack([np.diag(a), np.ravel(b), np.ravel(c)]) for a, b, c in (default, limits[1], limits[-1])]
+        near = [np.all(np.isclose(flat[0], flat[k], atol=atol), axis=0) for k in (1, 2)]
+        assert np.all(near[0] | near[1]), name
+    else:
+        assert any(all(np.allclose(a, b, atol=atol) for a, b in zip(default, limits[s])) for s in (1, -1)), name
+    if not fx.get("overrides", True):
+        return
+    for s in (1, -1):
+        got = tangents(ctx, branch=s, kink_tol=tol0)
+        for a, b in zip(got, limits[s]):
+            np.testing.assert_allclose(a, b, atol=atol, err_msg=f"{name} side {s}")
+    if fx["spec"] == "jump":  # the convention: the zero piece and the branch
+        J = {s: tangents(ctx, branch=s, kink_tol=tol0)[0] for s in (1, -1)}
+        np.testing.assert_array_equal(np.diag(J[-1]), [0, 1, 0, 1])  # x = (1, -1, 1/2, 2)
+        np.testing.assert_array_equal(np.diag(J[1]), [1, 0, 0, 1])
