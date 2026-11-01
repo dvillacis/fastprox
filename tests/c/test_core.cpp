@@ -4147,6 +4147,217 @@ static void test_descriptor_bounds() {
     fp_op_free(op);
 }
 
+// Group l2 kept live at its kink (SCD review S1). With tau = gamma lambda c
+// and a group exactly at ||x_g|| = tau, or within kink_tol below it, the
+// override +1 gives the live piece's Jacobian at the kink, u u^T (it gave
+// (1 - c) I + c u u^T with c >= 1: rank one at the kink, an eigenvalue 1 - c
+// < 0 below it), dz/dtau = -u, and the structure queries refuse the point
+// atomically. A zero-norm group cannot be kept live; tau = 0 is the identity.
+static fp_array i8_view(std::vector<int8_t> &v, std::vector<int64_t> &shape) {
+    fp_array a{};
+    a.data = v.data();
+    a.dtype = FP_I8;
+    a.ndim = static_cast<int>(shape.size());
+    a.shape = shape.data();
+    a.strides = nullptr;
+    a.device = FP_DEVICE_CPU;
+    return a;
+}
+
+// The dense Jacobian of one row (x of shape (1, n)) at the kept point.
+static Vec dense_jacobian(fp_op *op, fp_workspace *ws, int64_t n) {
+    Vec J(static_cast<size_t>(n * n));
+    for (int64_t j = 0; j < n; ++j) {
+        Arr e({1, n}), col({1, n});
+        e.data[j] = 1.0;
+        CHECK_OK(fp_jvp(op, ws, &e.a, 0.0, nullptr, &col.a));
+        for (int64_t i = 0; i < n; ++i) J[i * n + j] = col.data[i];
+    }
+    return J;
+}
+
+static void test_group_l2_live_kink() {
+    const int64_t n = 6;
+    static const int64_t gid[] = {0, 0, 0, 1, 1, 1};
+    const double g0[3] = {0.25, 0.375, 0.75};  // norm 0.875, exactly
+    const double u0[3] = {2.0 / 7, 3.0 / 7, 6.0 / 7}, u1[3] = {2.0 / 3, 1.0 / 3, 2.0 / 3};
+    const double gamma = 0.875;  // tau = gamma lambda c = 0.875
+    fp_op *op;
+    CHECK_OK(fp_op_group_l2(1.0, n, gid, 2, nullptr, &op));
+    std::vector<int64_t> rs = {1, n};
+    std::vector<int8_t> plus(static_cast<size_t>(n), 1), minus(static_cast<size_t>(n), -1);
+    fp_array sp = i8_view(plus, rs), sm = i8_view(minus, rs);
+
+    // (scale of group 0, kink_tol): at the kink, just below and just above.
+    const double cases[3][2] = {{1.0, 0.0}, {1.0 - 1e-6, 1e-5}, {1.0 + 1e-6, 1e-5}};
+    for (const auto &cs : cases) {
+        const double s = cs[0], tol = cs[1];
+        const bool above = s > 1.0;
+        Arr x({1, n}, {g0[0] * s, g0[1] * s, g0[2] * s, 2.0, 1.0, 2.0}), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, gamma, &x.a, &z.a, &o, ws, nullptr));
+        const Vec Jdef = dense_jacobian(op, ws, n);
+        // The default: group 0 killed at and below the kink.
+        if (!above) CHECK(Jdef[0] == 0.0 && Jdef[1] == 0.0 && Jdef[n + 1] == 0.0);
+        CHECK_OK(fp_workspace_set_branch(ws, &sp, tol));
+        const Vec J = dense_jacobian(op, ws, n);
+        const double c0 = above ? 0.875 / (0.875 * s) : 1.0, c1 = 0.875 / 3.0;
+        double err = 0.0, asym = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j) {
+                double want = 0.0;
+                if (i < 3 && j < 3) want = (i == j ? 1.0 - c0 : 0.0) + c0 * u0[i] * u0[j];
+                if (i >= 3 && j >= 3) want = (i == j ? 1.0 - c1 : 0.0) + c1 * u1[i - 3] * u1[j - 3];
+                err = std::max(err, std::fabs(J[i * n + j] - want));
+                asym = std::max(asym, std::fabs(J[i * n + j] - J[j * n + i]));
+            }
+        CHECK(err <= 1e-12);
+        CHECK(asym <= 1e-15);
+        if (err > 1e-12) std::fprintf(stderr, "  group l2 kink s=%.9g: J off by %.3g\n", s, err);
+        // The radius column: dz/dtheta = -gamma lambda u on every live group.
+        Arr dp({1}, {1.0}), dz({1, n});
+        CHECK_OK(fp_jvp(op, ws, nullptr, 0.0, &dp.a, &dz.a));
+        double perr = 0.0;
+        for (int64_t i = 0; i < 3; ++i) {
+            perr = std::max(perr, std::fabs(dz.data[i] + gamma * u0[i]));
+            perr = std::max(perr, std::fabs(dz.data[3 + i] + gamma * u1[i]));
+        }
+        CHECK(perr <= 1e-12);
+        // Adjointness.
+        Arr dx({1, n}, randn(n)), g({1, n}, randn(n)), dpr({1}, {0.3}), gx({1, n}), gp({1});
+        CHECK_OK(fp_jvp(op, ws, &dx.a, 0.4, &dpr.a, &dz.a));
+        double gg = 0.0;
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
+        const double lhs = dot(g.data, dz.data), rhs = dot(gx.data, dx.data) + 0.4 * gg + 0.3 * gp.data[0];
+        CHECK(std::fabs(lhs - rhs) <= 1e-13 * (1 + std::fabs(lhs)));
+        // The structure: refused at and below the kink, nothing written.
+        std::vector<int8_t> st(static_cast<size_t>(n), 7);
+        fp_array sa = i8_view(st, rs);
+        Arr coef({1, n}, Vec(static_cast<size_t>(n), 7.0));
+        int64_t nreg = 7;
+        int8_t act = 7;
+        if (above) {
+            CHECK_OK(fp_workspace_states(ws, &sa, nullptr));
+        } else {
+            CHECK(fp_workspace_states(ws, &sa, nullptr) == FP_EINVAL);
+            CHECK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1) == FP_EINVAL);
+            CHECK(fp_workspace_constraint(ws, &coef.a, &act, 1) == FP_EINVAL);
+            bool untouched = nreg == 7 && act == 7;
+            for (int64_t i = 0; i < n; ++i) untouched = untouched && st[i] == 7 && coef.data[i] == 7.0;
+            CHECK(untouched);
+            int64_t count = -1;
+            CHECK_OK(fp_workspace_units(ws, &count, nullptr));  // unchanged
+            CHECK(count == 1);
+        }
+        // Side -1 and no override: the default, and a structure.
+        CHECK_OK(fp_workspace_set_branch(ws, &sm, tol));
+        if (!above) CHECK(dense_jacobian(op, ws, n) == Jdef);
+        CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+        CHECK(dense_jacobian(op, ws, n) == Jdef);
+        CHECK_OK(fp_workspace_states(ws, &sa, nullptr));
+        fp_workspace_free(ws);
+    }
+
+    // A batch whose unsupported row is the last: nothing written to any row.
+    {
+        Vec xv = randn(3 * n, 3.0);
+        for (int64_t i = 0; i < 3; ++i) {
+            xv[2 * n + i] = g0[i];
+            xv[2 * n + 3 + i] = 2.0;
+        }
+        Arr x({3, n}, xv), z({3, n});
+        std::vector<int64_t> bs = {3, n};
+        std::vector<int8_t> side(static_cast<size_t>(3 * n), 0), st(static_cast<size_t>(3 * n), 7);
+        for (int64_t i = 0; i < n; ++i) side[2 * n + i] = 1;
+        fp_array sa = i8_view(side, bs), so = i8_view(st, bs);
+        fp_options o = opts(-1, 2, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, gamma, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_states(ws, &so, nullptr));  // default: fine
+        std::fill(st.begin(), st.end(), int8_t{7});
+        CHECK_OK(fp_workspace_set_branch(ws, &sa, 0.0));
+        CHECK(fp_workspace_states(ws, &so, nullptr) == FP_EINVAL);
+        bool untouched = true;
+        for (int8_t v : st) untouched = untouched && v == 7;
+        CHECK(untouched);
+        fp_workspace_free(ws);
+    }
+
+    // tau = 0 (lambda = 0): the identity, also at x_g = 0, and a structure.
+    {
+        fp_op *id;
+        CHECK_OK(fp_op_group_l2(0.0, n, gid, 2, nullptr, &id));
+        Arr x({1, n}, {0, 0, 0, 1, 2, 3}), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(id, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(id, gamma, &x.a, &z.a, &o, ws, nullptr));
+        const Vec J = dense_jacobian(id, ws, n);
+        bool eye = true;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j) eye = eye && J[i * n + j] == (i == j ? 1.0 : 0.0);
+        CHECK(eye);
+        std::vector<int8_t> st(static_cast<size_t>(n));
+        fp_array sa = i8_view(st, rs);
+        CHECK_OK(fp_workspace_states(ws, &sa, nullptr));
+        fp_workspace_free(ws);
+        fp_op_free(id);
+    }
+
+    // x_g = 0 with tau > 0 within kink_tol: cannot be kept live, and a
+    // rejected call keeps the previous override (group 1 kept live at its kink).
+    {
+        const double t = std::ldexp(0.625, -20);
+        Arr x({1, n}, {0, 0, 0, std::ldexp(0.375, -20), std::ldexp(0.5, -20), 0}), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, t, &x.a, &z.a, &o, ws, nullptr));
+        std::vector<int8_t> mixed = {-1, -1, -1, 1, 1, 1};
+        fp_array sx = i8_view(mixed, rs);
+        CHECK_OK(fp_workspace_set_branch(ws, &sx, 1e-5));
+        const Vec J1 = dense_jacobian(op, ws, n);
+        CHECK(std::fabs(J1[3 * n + 3] - 0.36) <= 1e-15 && std::fabs(J1[4 * n + 4] - 0.64) <= 1e-15);  // u u^T
+        CHECK(fp_workspace_set_branch(ws, &sp, 1e-5) == FP_EINVAL);
+        CHECK(dense_jacobian(op, ws, n) == J1);
+        std::vector<int8_t> st(static_cast<size_t>(n));
+        fp_array sa = i8_view(st, rs);
+        CHECK(fp_workspace_states(ws, &sa, nullptr) == FP_EINVAL);  // the kept override's
+        fp_workspace_free(ws);
+    }
+
+    // After fp_prox_conj (positively homogeneous: the inner prox at y with
+    // step 1, tau = lambda): J_conj = I - J_inner = I - u u^T on the group,
+    // and the structure, which describes J_inner, is refused.
+    {
+        fp_op *cop;
+        CHECK_OK(fp_op_group_l2(0.875, n, gid, 2, nullptr, &cop));
+        Arr y({1, n}, {g0[0], g0[1], g0[2], 2.0, 1.0, 2.0}), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(cop, &y.a, &o, &ws));
+        CHECK_OK(fp_prox_conj(cop, 2.0, &y.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_workspace_set_branch(ws, &sp, 0.0));
+        const Vec J = dense_jacobian(cop, ws, n);
+        double err = 0.0;
+        for (int64_t i = 0; i < 3; ++i)
+            for (int64_t j = 0; j < 3; ++j)
+                err = std::max(err, std::fabs(J[i * n + j] - ((i == j ? 1.0 : 0.0) - u0[i] * u0[j])));
+        CHECK(err <= 1e-12);
+        std::vector<int8_t> st(static_cast<size_t>(n));
+        fp_array sa = i8_view(st, rs);
+        CHECK(fp_workspace_states(ws, &sa, nullptr) == FP_EINVAL);
+        CHECK_OK(fp_workspace_set_branch(ws, nullptr, 0.0));
+        CHECK_OK(fp_workspace_states(ws, &sa, nullptr));
+        fp_workspace_free(ws);
+        fp_op_free(cop);
+    }
+    fp_op_free(op);
+}
+
 // The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.1): each
 // row is fp_op_l2_ball with its radius on that row alone, bit for bit (prox,
 // conjugate, steps per row, jvp with the row's radius tangent, vjp with the
@@ -5518,6 +5729,7 @@ int main() {
     test_float32();
     test_row_scratch_bytes();
     test_l2_ball_radii();
+    test_group_l2_live_kink();
     test_thread_cap();  // last: it grows the pool
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;

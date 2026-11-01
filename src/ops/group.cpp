@@ -4,7 +4,11 @@
 // On a live group (||x_g|| > tau_g = gamma lambda c_g) the prox is
 // z_g = (1 - tau_g/||x_g||) x_g and its Jacobian is (1 - c) I + c u u^T with
 // c = tau_g/||x_g||, u = x_g/||x_g||; killed groups have zero Jacobian. A
-// group with tau_g = 0 is the identity, also at x_g = 0.
+// group with tau_g = 0 is the identity, also at x_g = 0. A group forced live
+// by a branch override at 0 < ||x_g|| <= tau_g takes the live piece's
+// Jacobian at the kink, c = 1: u u^T, rank one, and dz/dtau = -u (SCD review
+// S1). Its range span(u) has no structure descriptor, so the structure
+// queries refuse such a point; a zero-norm group cannot be forced live.
 //
 // Tree-structured group norms: g(z) = l1 ||z||_1 + sum_g eta_g ||z_g||_2 for
 // groups that are pairwise nested or disjoint. The prox is the composition of
@@ -44,6 +48,7 @@ inline double sgn(double x) noexcept { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 
 
 struct GroupL2 final : RowOp<GroupL2> {
     static constexpr int kStruct = FP_STRUCT_CURVED;
+    static constexpr bool kStructCheck = true;
     double lambda;
     std::vector<int64_t> gid;  // empty: one group
     int64_t G;
@@ -121,8 +126,10 @@ struct GroupL2 final : RowOp<GroupL2> {
 
     // Kinks (since 0.3): code 1 at every entry of a group whose norm ||x_g|| is
     // within tol of its threshold tau_g = gamma lambda c_g > 0. Overrides: the
-    // side at the group's first entry keeps it live (+1, the shrink, its
-    // formula taken at x) or kills it (-1).
+    // side at the group's first entry keeps it live (+1, the shrink's
+    // Jacobian at the kink, u u^T, when ||x_g|| <= tau_g) or kills it (-1).
+    // A zero-norm group at a kink (tau_g <= tol) cannot be kept live: it has
+    // no direction u (branch_ok_row).
     bool has_kinks() const noexcept override { return true; }
     bool has_branches() const noexcept override { return true; }
     // Per group at a kink: in the row scratch, the norm, the first entry (as
@@ -167,9 +174,38 @@ struct GroupL2 final : RowOp<GroupL2> {
         for (int64_t i = 0; i < n; ++i)
             if (set[group(i)] != 0) code[i] = set[group(i)] > 0;
     }
+    bool branch_ok_row(const double *x, const double *, int64_t n, double gamma, double tol, const int8_t *side,
+                       void *scr) const noexcept override {
+        const int8_t *at = group_kinks(x, n, gamma, tol, side, scr);
+        const double *m = static_cast<const double *>(scr);  // the norms' m (zero iff x_g = 0)
+        for (int64_t g = 0; g < G; ++g)
+            if (at[g] > 0 && m[g] == 0.0) return false;
+        return true;
+    }
 
     // Structure (since 1.0.2): ZERO on the killed groups, the saved codes'.
     // On a live group J = (1 - c) I + c u u^T with c < 1, positive definite.
+    // A group forced live at ||x_g|| <= tau_g (tau_g > 0) has J = u u^T, of
+    // range span(u), which the descriptor cannot express: struct_ok refuses
+    // the row. Its norm is the prox's, bit for bit, so a default point,
+    // live only where ||x_g|| > tau_g, is never refused.
+    template <class T>
+    bool struct_ok(const T *x, const T *, const uint8_t *code, int64_t n, double gamma, void *scr) const noexcept {
+        double *s = static_cast<double *>(scr);
+        uint8_t *live = reinterpret_cast<uint8_t *>(s + 6 * G);
+        for (int64_t g = 0; g < G; ++g) s[g] = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            const double v = static_cast<double>(x[i]);
+            s[group(i)] += v * v;
+        }
+        safe_group_norms(n, G, [x](int64_t i) { return x[i]; }, [this](int64_t i) { return group(i); }, s, s + G);
+        live_groups(code, n, live);
+        for (int64_t g = 0; g < G; ++g) {
+            const double tau = prod3(gamma, lambda, c[ci(g)]);
+            if (live[g] && tau > 0.0 && !(s[g] > tau * s[G + g])) return false;
+        }
+        return true;
+    }
     template <class T>
     int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
                       void *) const noexcept {
@@ -202,7 +238,10 @@ struct GroupL2 final : RowOp<GroupL2> {
                 a[g] = 1.0;
                 b[g] = 0.0;
             } else if (live[g]) {
-                const double cc = tau * t / m;
+                // At most 1: a group forced live at ||x_g|| <= tau_g takes the
+                // live piece's value at the kink (S1); also where this norm
+                // and the prox's differ in the last bit.
+                const double cc = std::min(tau * t / m, 1.0);
                 double coef = cc * b[g] - lambda * c[ci(g)] * dgamma;
                 if (dparams) coef -= gamma * lambda * dparams[ci(g)];
                 a[g] = 1.0 - cc;
@@ -235,7 +274,7 @@ struct GroupL2 final : RowOp<GroupL2> {
                 a[g] = 1.0;
                 b[g] = 0.0;
             } else if (live[g]) {
-                const double cc = tau * t / m;
+                const double cc = std::min(tau * t / m, 1.0);  // as in jvp
                 const double ug = b[g];  // <u, g_g>
                 acc[ci(g)] += -gamma * lambda * ug;
                 acc[P] += -lambda * c[ci(g)] * ug;

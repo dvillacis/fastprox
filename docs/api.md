@@ -658,9 +658,18 @@ SCD subspaces of each entry:
   and group ℓ2 every entry of a group whose norm is at its threshold
   $\gamma\lambda c_g$ (1). These row-level kinks take the side given at the
   row's or group's first entry: −1 the inside piece (the identity) or the
-  zeroed group, +1 the projection with $\tau = 0$ or the live shrink, its
-  formula taken at $x$. Each side is the derivative of the one-sided
-  difference in a direction that keeps its piece.
+  zeroed group, +1 the projection with $\tau = 0$ or the live shrink. A
+  group kept live at or below its threshold takes the shrink's Jacobian at
+  the kink, $u u^\top$ with $u = x_g / \lVert x_g \rVert_2$, and
+  $\partial z_g / \partial \tau_g = -u$: the limit along the live piece,
+  which below the threshold is a convention for the nearby kink rather than
+  a derivative at $x$, where the prox is locally zero (*revised in 1.1*, SCD
+  review S1: it took the formula at $x$, whose eigenvalue $1 - \tau_g /
+  \lVert x_g \rVert_2$ is negative there). A group with $x_g = 0$ has no
+  direction and cannot be kept live: `fp_workspace_set_branch` returns
+  `FP_EINVAL` (ValueError in Python) and keeps the previous override. Each
+  side is the derivative of the one-sided difference in a direction that
+  keeps its piece.
 - **Graph and tree TV** (*since 0.4*): their kinks are edges, so
   `ctx.kinks(tol)` and `branch=` have the shape of $x$ with the last axis
   over the edges, in the order of `edges`. An edge is at a kink when its
@@ -918,6 +927,14 @@ the per-unit counts (Python: `s.offsets`, `s.global_labels()`).
   `fp_workspace_set_branch` they read the overridden piece (side −1 at the
   tail of a 1D TV kink edge joins two segments; +1 at a simplex threshold
   makes the entry FREE); clearing the override restores the default.
+- **Ranges without a descriptor** (*since 1.1*): a group of group ℓ2 kept
+  live (+1) at or below its threshold has $J_g = u u^\top$, of range
+  $\operatorname{span}(x_g)$, which states, regions and one constraint per
+  unit cannot express. The three queries then return `FP_EINVAL` and write
+  nothing to any output, for every unit of the batch (Python's
+  `ctx.structure` raises ValueError); `fp_workspace_units` still answers.
+  Side −1 or no override gives a structure. A successful query always
+  describes range $J$.
 - **The identity case** ($\gamma = 0$, a zero weight everywhere): every entry
   FREE and its own region, no constraint.
 - **`fp_prox_conj` at $\sigma = 0$** ($J_{\text{conj}} = I$): the inner $J$

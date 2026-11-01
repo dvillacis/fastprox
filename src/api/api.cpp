@@ -892,6 +892,26 @@ void apply_structure(fp_workspace &ws, const int8_t *side, double tol) {
     }
 }
 
+// Whether every row accepts its sides (fp_op::branch_ok_row; SCD review S1),
+// from the saved x and z in double, before apply_structure changes a code.
+template <class T>
+bool branch_valid(const fp_workspace &ws, const int8_t *side, double tol) {
+    const fp_op &op = *ws.op;
+    const double t = ws.conj ? tol / ws.sigma : tol;
+    const int64_t n = ws.n;
+    std::vector<double> xb(static_cast<size_t>(n)), zb(static_cast<size_t>(n));
+    std::vector<std::max_align_t> scr(op.scratch_bytes(n) / sizeof(std::max_align_t) + 1);
+    for (int64_t r = 0; r < ws.rows; ++r) {
+        const T *xs = ws.xs<T>() + r * n, *zs = ws.zs<T>() + r * n;
+        for (int64_t i = 0; i < n; ++i) {
+            xb[static_cast<size_t>(i)] = static_cast<double>(xs[i]);
+            zb[static_cast<size_t>(i)] = static_cast<double>(zs[i]);
+        }
+        if (!op.branch_ok_row(xb.data(), zb.data(), n, ws.step(r), t, side + r * n, scr.data())) return false;
+    }
+    return true;
+}
+
 void restore_structure(fp_workspace &ws) {
     if (ws.dtype == FP_F32) apply_structure<float>(ws, nullptr, 0.0);
     else apply_structure<double>(ws, nullptr, 0.0);
@@ -930,6 +950,8 @@ fp_status set_structure_branch(fp_workspace &ws, const Arr &a, double tol) {
         }
     }
     if (!ok) return FP_EPARAM;
+    if (!ws.image_ndim && !(ws.dtype == FP_F32 ? branch_valid<float>(ws, dst, tol) : branch_valid<double>(ws, dst, tol)))
+        return FP_EINVAL;  // before any code changes: the previous override stays
     if (ws.dtype == FP_F32) apply_structure<float>(ws, dst, tol);
     else apply_structure<double>(ws, dst, tol);
     ws.override_on = true;
@@ -988,6 +1010,16 @@ int64_t struct_units(const fp_workspace &ws) noexcept {
     return ws.op->elementwise() ? 1 : ws.rows;
 }
 int64_t struct_size(const fp_workspace &ws) noexcept { return ws.op->elementwise() ? ws.numel : ws.n; }
+
+// FP_EINVAL when a saved row has a structure the descriptor cannot express
+// (fp_op::has_struct_check; SCD review S1), checked over every row before a
+// query writes anything.
+fp_status struct_supported(const fp_workspace &ws) {
+    const fp_op &op = *ws.op;
+    if (ws.numel == 0 || ws.identity || op.elementwise() || op.image_ndim() || !op.has_struct_check()) return FP_OK;
+    const bool ok = ws.dtype == FP_F32 ? row_struct_supported<float>(op, ws) : row_struct_supported<double>(op, ws);
+    return ok ? FP_OK : FP_EINVAL;
+}
 
 // An output array of the queries: x's shape, of the dtype class kind (Float:
 // x's dtype), writable.
@@ -1049,6 +1081,7 @@ fp_status states_impl(const fp_workspace *ws, fp_array *sa, int64_t *nfixed) {
     Arr st;
     if (sa)
         if (fp_status s = struct_out(*ws, sa, st, Dt::Int8)) return s;
+    if (fp_status s = struct_supported(*ws)) return s;
     const int64_t nf = structure(*ws, sa ? &st : nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, true);
     if (nfixed) *nfixed = nf;
     return FP_OK;
@@ -1064,6 +1097,7 @@ fp_status regions_impl(const fp_workspace *ws, fp_array *la, fp_array *ga, int64
     }
     if (ga)
         if (fp_status s = struct_out(*ws, ga, sg, Dt::Int8)) return s;
+    if (fp_status s = struct_supported(*ws)) return s;
     structure(*ws, nullptr, la ? &lab : nullptr, ga ? &sg : nullptr, nullptr, nregions, nullptr);
     return FP_OK;
 }
@@ -1074,6 +1108,7 @@ fp_status constraint_impl(const fp_workspace *ws, fp_array *ca, int8_t *active, 
     Arr c;
     if (ca)
         if (fp_status s = struct_out(*ws, ca, c, Dt::Float)) return s;
+    if (fp_status s = struct_supported(*ws)) return s;
     structure(*ws, nullptr, nullptr, nullptr, ca ? &c : nullptr, nullptr, active);
     return FP_OK;
 }

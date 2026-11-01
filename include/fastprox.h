@@ -500,7 +500,9 @@ FP_API fp_status fp_workspace_deriv_info(const fp_workspace *ws, double *residua
  * 0.4) +1 at a threshold entry puts it on the support and -1 off it; a row
  * on the l1 sphere, and a group of group l2 at its threshold, follow the
  * side at their first entry (-1: inside, or the group zeroed; +1: the
- * projection with tau = 0, or the shrink). It applies to the fp_jvp and fp_vjp calls
+ * projection with tau = 0, or the shrink's Jacobian at the kink, u u^T with
+ * u = x_g / ||x_g||, when ||x_g|| <= tau; FP_EINVAL for a group with x_g = 0,
+ * which has no direction u). It applies to the fp_jvp and fp_vjp calls
  * on this workspace until the next prox call or fp_workspace_set_branch(ws,
  * NULL, 0). On failure (FP_EPARAM for a value outside -1..1 or a bad tol,
  * FP_ESHAPE, FP_EINVAL) the workspace is unchanged: an override set earlier

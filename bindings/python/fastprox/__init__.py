@@ -276,7 +276,13 @@ class Context:
             count, size = _C.ws_units(self.ws)
             labels = np.empty(self.shape, np.int64 if size > 2**31 - 1 else np.int32)
             nreg = np.empty(count, np.int64)
-            nfixed = _C.ws_states(self.ws, state)
+            try:
+                nfixed = _C.ws_states(self.ws, state)
+            except ValueError as e:  # FP_EINVAL: a point without a descriptor (group l2)
+                refused = getattr(op, "_struct_refused", None)
+                if refused and "invalid argument" in str(e):
+                    raise ValueError(refused) from None
+                raise
             _C.ws_regions(self.ws, labels, sign, nreg)
             if op._constraint:
                 coef = np.empty(self.shape, self.dtype)
@@ -457,6 +463,7 @@ class _branch:
 
     def __init__(self, ctx, branch, tol):
         self.ws = ctx.ws
+        self.refused = getattr(ctx.op, "_branch_refused", None)
         self.side = None
         if branch is not None:
             side = np.asarray(branch)
@@ -472,7 +479,12 @@ class _branch:
 
     def __enter__(self):
         if self.side is not None:
-            _C.set_branch(self.ws, self.side, self.tol)
+            try:
+                _C.set_branch(self.ws, self.side, self.tol)
+            except ValueError as e:  # FP_EINVAL: a side the operator refuses
+                if self.refused and "invalid argument" in str(e):
+                    raise ValueError(self.refused) from None
+                raise
 
     def __exit__(self, *exc):
         if self.side is not None:
@@ -1066,7 +1078,20 @@ class Huber(Operator):
 class GroupL2(Operator):
     r"""$g(z) = \lambda \sum_g c_g \lVert z_g \rVert_2$ along the axis. ``groups`` gives a
     group id per entry (None: one group, the l2 norm). Parameters:
-    group_weights."""
+    group_weights.
+
+    A group at its kink, $\lVert x_g \rVert_2 = \tau_g = \gamma \lambda c_g$ (within
+    ``kink_tol``), kept live with ``branch`` +1 takes the live piece's Jacobian
+    at the kink, $u u^T$ with $u = x_g / \lVert x_g \rVert_2$. Its range
+    $\operatorname{span}(x_g)$ has no structure descriptor, so
+    ``ctx.structure`` raises ValueError there; a group with $x_g = 0$ cannot be
+    kept live (ValueError)."""
+
+    _struct_refused = ("a group kept live (branch +1) at or below its threshold has the derivative "
+                       "u u^T, u = x_g / ||x_g||, whose range span(x_g) on the group has no structure "
+                       "descriptor; pass branch -1 there, or no branch")
+    _branch_refused = ("a group with x_g = 0 cannot be kept live (branch +1) at its kink: it has no "
+                       "direction x_g / ||x_g||")
 
     def __init__(self, lam=1.0, groups=None, group_weights=None):
         if groups is not None:
