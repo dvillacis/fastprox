@@ -321,7 +321,64 @@ struct OpCase {
     bool smooth_away_from_kinks = true;
     int64_t zero_entry = -1;  // set this entry of every row to exactly 0
     bool has_conj = true;  // false: fp_prox_conj returns FP_EINVAL (math audit M2)
+    // Since 1.1 (SCD review S6): puts row r (n entries) on a kink or boundary
+    // of the operator at its step; central differences are then not the
+    // derivative, and check_derivatives checks J's spectrum instead.
+    std::function<void(double *row, int64_t r, int64_t n)> place = nullptr;
 };
+
+// x of rows x n entries as the case wants it: zero_entry, then place.
+static void prepare(const OpCase &c, Vec &x, int64_t rows, int64_t n) {
+    if (c.zero_entry >= 0)
+        for (int64_t r = 0; r < rows; ++r) x[static_cast<size_t>(r * n + c.zero_entry)] = 0.0;
+    if (c.place)
+        for (int64_t r = 0; r < rows; ++r) c.place(x.data() + r * n, r, n);
+}
+
+// The group l2 kink at tau = 5: each group's first four entries +-(1, 2, 2, 4)
+// in an order and with signs set by the row, the rest 0, so that ||x_g|| = 5
+// exactly; row 2 a relative 2^-20 above it (live, c just below 1).
+static void place_group_kink(double *x, int64_t r, int64_t n, const std::vector<int64_t> &gid, int64_t G) {
+    static const double pat[4] = {1.0, 2.0, 2.0, 4.0};
+    for (int64_t g = 0; g < G; ++g) {
+        int64_t k = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            if ((gid.empty() ? 0 : gid[static_cast<size_t>(i)]) != g) continue;
+            const double v = k < 4 ? pat[(k + r) % 4] * (((i + r) % 3) ? 1.0 : -1.0) : 0.0;
+            x[i] = r == 2 ? v * (1.0 + 0x1p-20) : v;
+            ++k;
+        }
+    }
+}
+
+// The 1D TV with l2 boundary at gamma: x centred and scaled so that the
+// dual minimiser u0 = W^-1 (D D^T)^-1 D x (positive weights w, n - 1 of
+// them, or none) has ||u0|| = gamma, to rounding: the boundary of S2.
+static void place_tv1d_l2_boundary(double *x, int64_t n, double gamma, const Vec &w) {
+    double mean = 0.0;
+    for (int64_t i = 0; i < n; ++i) mean += x[i];
+    mean /= static_cast<double>(n);
+    for (int64_t i = 0; i < n; ++i) x[i] -= mean;
+    const int64_t m = n - 1;  // D D^T: 2 on the diagonal, -1 off it (Thomas)
+    Vec c(static_cast<size_t>(m)), d(static_cast<size_t>(m));
+    for (int64_t e = 0; e < m; ++e) d[e] = x[e + 1] - x[e];
+    double b = 2.0;
+    c[0] = -1.0 / b;
+    d[0] /= b;
+    for (int64_t e = 1; e < m; ++e) {
+        b = 2.0 + c[e - 1];
+        c[e] = -1.0 / b;
+        d[e] = (d[e] + d[e - 1]) / b;
+    }
+    for (int64_t e = m - 2; e >= 0; --e) d[e] -= c[e] * d[e + 1];
+    double nn = 0.0;
+    for (int64_t e = 0; e < m; ++e) {
+        const double u = d[e] / (w.empty() ? 1.0 : w[static_cast<size_t>(e)]);
+        nn += u * u;
+    }
+    const double s = gamma / std::sqrt(nn);
+    for (int64_t i = 0; i < n; ++i) x[i] *= s;
+}
 
 static std::vector<OpCase> derivative_cases(int64_t n) {
     static std::deque<Arr> keep;  // stable addresses: parameter arrays outlive the constructors
@@ -417,6 +474,17 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"tv1d_ball_w", [=](fp_op **o) { return fp_op_tv1d_ball(1.5, wm, o); }, 1.0},
         {"tv1d_l2", [](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, 0.6},
         {"tv1d_l2_w", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6},
+        // On kinks and boundaries (since 1.1, SCD review S6): group l2 at
+        // ||x_g|| = tau = gamma lam = 5, and 1D TV with l2 at ||u0|| = gamma.
+        {"l2_kink", [](fp_op **o) { return fp_op_group_l2(5.0, 0, nullptr, 1, nullptr, o); }, 1.0, true, -1, true,
+         [](double *x, int64_t r, int64_t n) { place_group_kink(x, r, n, {}, 1); }},
+        {"group_l2_kink",
+         [=](fp_op **o) { return fp_op_group_l2(5.0, n, groups.data(), 3, nullptr, o); }, 1.0, true, -1, true,
+         [=](double *x, int64_t r, int64_t nn) { place_group_kink(x, r, nn, groups, 3); }},
+        {"tv1d_l2_boundary", [](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, 0.6, true, -1, true,
+         [](double *x, int64_t, int64_t nn) { place_tv1d_l2_boundary(x, nn, 0.6, {}); }},
+        {"tv1d_l2_w_boundary", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6, true, -1, true,
+         [=](double *x, int64_t, int64_t nn) { place_tv1d_l2_boundary(x, nn, 0.6, we); }},
         {"isotonic", [](fp_op **o) { return fp_op_isotonic(nullptr, 1, o); }, 1.0},
         {"isotonic_w", [=](fp_op **o) { return fp_op_isotonic(wn, 0, o); }, 1.0, true, -1, false},
         {"sorted_l1", [=](fp_op **o) { return fp_op_sorted_l1(wdec, o); }, 0.4},
@@ -442,16 +510,21 @@ static double dot(const Vec &a, const Vec &b) {
     return s;
 }
 
+static bool firm(const Vec &J, int64_t n, double tol);
+
 // Checks adjointness of (dx, dgamma, dtheta) -> dz, and the jvp against
-// central differences, for one operator on a batch of rows.
+// central differences, for one operator on a batch of rows. On a kink or
+// boundary (c.place) the differences are one-sided at best; there J, formed
+// densely, is checked to be symmetric with its spectrum in [0, 1] (all such
+// cases are convex), after fp_prox and fp_prox_conj.
 static void check_derivatives(const OpCase &c, bool conj) {
     const int64_t rows = 3, n = 12;
     fp_op *op;
     CHECK_OK(c.make(&op));
     const int64_t P = fp_op_nparams(op);
-    Arr x({rows, n}, randn(rows * n, 1.5)), z({rows, n});
-    if (c.zero_entry >= 0)
-        for (int64_t r = 0; r < rows; ++r) x.data[r * n + c.zero_entry] = 0.0;
+    Vec xv = randn(rows * n, 1.5);
+    prepare(c, xv, rows, n);
+    Arr x({rows, n}, xv), z({rows, n});
     fp_options o = opts(-1, 0, 1);
     fp_workspace *ws;
     CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
@@ -477,6 +550,22 @@ static void check_derivatives(const OpCase &c, bool conj) {
     const bool adj = std::fabs(lhs - rhs) <= 1e-10 * (1 + std::fabs(lhs));
     CHECK(adj);
     if (!adj) std::fprintf(stderr, "  adjoint %s conj=%d: %.15g vs %.15g\n", c.name.c_str(), conj, lhs, rhs);
+    if (c.place) {
+        const int64_t N = rows * n;
+        Vec J(static_cast<size_t>(N * N));
+        for (int64_t j = 0; j < N; ++j) {
+            Arr e({rows, n}), col({rows, n});
+            e.data[j] = 1.0;
+            CHECK_OK(fp_jvp(op, ws, &e.a, 0.0, nullptr, &col.a));
+            for (int64_t i = 0; i < N; ++i) J[i * N + j] = col.data[i];
+        }
+        const bool ok = firm(J, N, 1e-12);
+        CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  spectrum %s conj=%d\n", c.name.c_str(), conj);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+        return;
+    }
 
     // Central differences in x and gamma (theta through a rebuilt operator is
     // covered on the Python side).
@@ -5294,8 +5383,7 @@ static void test_structure_rows() {
             xv[i] *= 0.05;
             xv[n + i] *= 4.0;
         }
-        if (c.zero_entry >= 0)
-            for (int64_t r = 0; r < R; ++r) xv[r * n + c.zero_entry] = 0.0;
+        prepare(c, xv, R, n);
         Arr x({R, n}, xv), z({R, n});
         fp_options o = opts(-1, 2, 1);
         fp_workspace *ws;
@@ -5322,7 +5410,7 @@ static void test_structure_rows() {
         fp_workspace_free(ws);
         fp_op_free(op);
     }
-    CHECK(tested == 30);
+    CHECK(tested == 34);
 
     // The kinds of the spec's table.
     {

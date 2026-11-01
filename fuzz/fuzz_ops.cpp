@@ -9,7 +9,13 @@
 //   * at any scale (since 1.0.1, math audit M3-M6): the shrinkage maps keep
 //     |z_i| <= |x_i| with x's sign (l0: z_i in {0, x_i}), the log barrier
 //     stays in its domain, z > 0 and z >= x, and the exact norm-like proxes
-//     and cone projections keep |z| <= |x|.
+//     and cone projections keep |z| <= |x|;
+//   * since 1.1 (SCD review S6), on one input in 1000 and on every input
+//     placed on a kink or boundary (snap below: ||x_g|| = tau, entries at
+//     the thresholds, the boundary of 1D TV with l2), J formed densely on
+//     units of up to 8 entries is symmetric with its spectrum in [0, 1] for
+//     the convex operators (weighted isotonic after the change of metric
+//     D_w^1/2 J D_w^-1/2), and in [0, slope bound] for SCAD and MCP.
 //
 // Built as a libFuzzer target where the compiler supports -fsanitize=fuzzer,
 // and otherwise as a standalone driver (fuzz/standalone.cpp) that replays
@@ -106,6 +112,13 @@ struct Case {
     std::vector<int64_t> groups;
     std::vector<float> fparams;  // float32 copy of params[1] (spatial weights)
     int64_t sites = -1;          // kinks on m edges (tree TV): masks of shape (..., m)
+    // Since 1.1 (SCD review S6), for snap() and check_jacobian: the map's
+    // lambda and SCAD's a or MCP's b, and whether params[0] are its weights
+    // (entry weights, group weights of group l2, edge weights of TV with l2).
+    enum Snap { NONE, SOFT, SCAD, MCP, GROUP, TVL2 } snap = NONE;
+    double lam = 0.0, conc = 0.0;
+    bool weighted = false;
+    bool grouped = false;  // group l2: c.groups are the group ids (else one group)
 };
 
 fp_array vec(std::vector<double> &v) {
@@ -152,10 +165,14 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
     static int64_t s0[1], s1[1];
     fp_array a0, a1;
     switch (kind) {
-        case 0:
+        case 0: {
             fill(c.params[0], pick);
             a0 = vec(c.params[0]);
-            return fp_op_soft(b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+            c.snap = Case::SOFT;
+            c.lam = b.param();
+            c.weighted = b.u8() % 2;
+            return fp_op_soft(c.lam, c.weighted ? &a0 : nullptr, &c.op);
+        }
         case 1: return fp_op_elastic_net(b.param(), b.param(), &c.op);
         case 2: return fp_op_huber(b.param(), b.param(), &c.op);
         case 3: {
@@ -164,8 +181,12 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
             for (auto &g : c.groups) g = b.u8() % (G + (b.u8() % 8 == 0));  // occasionally out of range
             fill(c.params[0], b.u8() % 2 ? G : 1);
             a0 = vec(c.params[0]);
-            return fp_op_group_l2(b.param(), static_cast<int64_t>(c.groups.size()),
-                                  b.u8() % 3 ? c.groups.data() : nullptr, G, &a0, &c.op);
+            c.snap = Case::GROUP;
+            c.lam = b.param();
+            c.grouped = b.u8() % 3;
+            c.weighted = true;
+            return fp_op_group_l2(c.lam, static_cast<int64_t>(c.groups.size()),
+                                  c.grouped ? c.groups.data() : nullptr, G, &a0, &c.op);
         }
         case 4: {
             fill(c.params[0], pick);
@@ -190,7 +211,8 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
         case 10:
             fill(c.params[0], n);
             a0 = vec(c.params[0]);
-            return fp_op_isotonic(b.u8() % 2 ? &a0 : nullptr, b.u8() % 2, &c.op);
+            c.weighted = b.u8() % 2;
+            return fp_op_isotonic(c.weighted ? &a0 : nullptr, b.u8() % 2, &c.op);
         case 13: {  // anisotropic TV on the last 2 or 3 axes
             const int k = 2 + b.u8() % 2;
             fill(c.params[0], b.u8() % 2 ? k : 1);
@@ -229,12 +251,20 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
         case 17: {
             fill(c.params[0], pick);
             a0 = vec(c.params[0]);
-            return fp_op_scad(b.param(), 1.0 + b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+            c.snap = Case::SCAD;
+            c.lam = b.param();
+            c.conc = 1.0 + b.param();
+            c.weighted = b.u8() % 2;
+            return fp_op_scad(c.lam, c.conc, c.weighted ? &a0 : nullptr, &c.op);
         }
         case 18: {
             fill(c.params[0], pick);
             a0 = vec(c.params[0]);
-            return fp_op_mcp(b.param(), b.param(), b.u8() % 2 ? &a0 : nullptr, &c.op);
+            c.snap = Case::MCP;
+            c.lam = b.param();
+            c.conc = b.param();
+            c.weighted = b.u8() % 2;
+            return fp_op_mcp(c.lam, c.conc, c.weighted ? &a0 : nullptr, &c.op);
         }
         case 19: return fp_op_log_penalty(b.param(), b.param(), &c.op);
         case 20: return fp_op_max(b.param(), &c.op);
@@ -368,7 +398,9 @@ fp_status make_op(Bytes &b, int64_t n, Case &c, int xnd, const int64_t *xs) {
                 for (auto &w : c.params[0])
                     if (b.u8() % 3 == 0) w = 0.0;
             a0 = vec(c.params[0]);
-            return fp_op_tv1d_l2(b.u8() % 2 ? &a0 : nullptr, &c.op);
+            c.snap = Case::TVL2;
+            c.weighted = b.u8() % 2;
+            return fp_op_tv1d_l2(c.weighted ? &a0 : nullptr, &c.op);
         }
         default:
             fill(c.params[0], pick == 1 ? 1 : n - 1);
@@ -505,6 +537,278 @@ void check_structure(const fp_op *op, fp_workspace *ws, const char *opname, fp_d
         }
 }
 
+// ---- exact kinks, boundaries and dense Jacobians (since 1.1, SCD review S6)
+
+// Entry i (C order) of the strided view x as a double, and assignment.
+struct View {
+    void *x0;
+    bool f32;
+    int ndim;
+    const int64_t *shape, *strides;
+    unsigned char *at(int64_t i) const {
+        int64_t off = 0;
+        for (int d = ndim - 1; d >= 0; --d) {
+            off += (i % shape[d]) * strides[d];
+            i /= shape[d];
+        }
+        return static_cast<unsigned char *>(x0) + off * static_cast<int64_t>(f32 ? 4 : 8);
+    }
+    double get(int64_t i) const {
+        if (f32) {
+            float f;
+            std::memcpy(&f, at(i), 4);
+            return f;
+        }
+        double v;
+        std::memcpy(&v, at(i), 8);
+        return v;
+    }
+    void set(int64_t i, double v) const {
+        if (f32) {
+            const float f = static_cast<float>(v);
+            std::memcpy(at(i), &f, 4);
+        } else {
+            std::memcpy(at(i), &v, 8);
+        }
+    }
+};
+
+// Places x on kinks of its operator at the step gamma (after fp_prox_conj:
+// the inner prox's at y / sigma with step 1 / sigma, so y = sigma x_kink):
+// entries at the thresholds of soft thresholding, SCAD and MCP; groups of
+// group l2 at ||x_g|| = tau_g; rows of 1D TV with l2 at the boundary ||u0|| =
+// gamma, u0 = W^-1 (D D^T)^-1 D x (positive weights only). Groups and rows
+// sometimes a relative 2^-40 or 2^-20 off, either way: the scale-degenerate
+// cases of S2 at any step the bytes give. Returns whether x changed.
+bool snap(Bytes &b, const Case &c, const View &x, int axis, double gamma, bool conj) {
+    if (c.snap == Case::NONE || !(gamma > 0.0) || !std::isfinite(gamma) || b.u8() % 4) return false;
+    const double gin = conj ? 1.0 / gamma : gamma, out = conj ? gamma : 1.0;
+    const int nd = x.ndim, a = nd ? (axis + nd) % nd : 0;
+    const int64_t n = nd ? x.shape[a] : 1;
+    int64_t inner = 1, numel = 1;
+    for (int d = a + 1; d < nd; ++d) inner *= x.shape[d];
+    for (int d = 0; d < nd; ++d) numel *= x.shape[d];
+    if (numel == 0 || n == 0) return false;
+    const int64_t outer = numel / (n * inner);
+    const std::vector<double> &w = c.params[0];
+    auto wt = [&](int64_t k) { return c.weighted ? w[w.size() == 1 ? 0 : static_cast<size_t>(k)] : 1.0; };
+    static const double factors[8] = {1.0, 1.0, 1.0, 1.0 + 0x1p-40, 1.0 - 0x1p-40, 1.0 + 0x1p-20, 1.0 - 0x1p-20, 1.0};
+    if (c.snap == Case::SOFT || c.snap == Case::SCAD || c.snap == Case::MCP) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (b.u8() % 2) continue;
+            const double wk = wt((i / inner) % n), lam = c.lam;
+            double t[3] = {gin * lam * wk, (1.0 + gin * wk) * lam, c.conc * lam};
+            if (c.snap == Case::MCP) t[1] = c.conc * lam;
+            const int ncode = c.snap == Case::SOFT ? 1 : c.snap == Case::SCAD ? 3 : 2;
+            const int code = b.u8() % ncode;
+            x.set(i, (b.u8() % 2 ? -1.0 : 1.0) * t[code] * out);
+        }
+        return true;
+    }
+    for (int64_t o = 0; o < outer; ++o)
+        for (int64_t q = 0; q < inner; ++q) {
+            auto idx = [&](int64_t k) { return (o * n + k) * inner + q; };
+            const double f = factors[b.u8() % 8];
+            if (c.snap == Case::GROUP) {
+                int64_t G = 1;
+                if (c.grouped)
+                    for (int64_t k = 0; k < n; ++k) G = std::max<int64_t>(G, c.groups[static_cast<size_t>(k)] + 1);
+                std::vector<double> big(static_cast<size_t>(G), 0.0), ss(static_cast<size_t>(G), 0.0);
+                auto gid = [&](int64_t k) { return c.grouped ? c.groups[static_cast<size_t>(k)] : 0; };
+                for (int64_t k = 0; k < n; ++k) big[gid(k)] = std::fmax(big[gid(k)], std::fabs(x.get(idx(k))));
+                for (int64_t k = 0; k < n; ++k)
+                    if (big[gid(k)] > 0.0) {
+                        const double v = x.get(idx(k)) / big[gid(k)];
+                        ss[gid(k)] += v * v;
+                    }
+                for (int64_t k = 0; k < n; ++k) {
+                    const int64_t g = gid(k);
+                    if (!(big[g] > 0.0) || !std::isfinite(big[g])) continue;
+                    const double tau = gin * c.lam * w[w.size() == 1 ? 0 : static_cast<size_t>(g)];
+                    x.set(idx(k), x.get(idx(k)) / big[g] / std::sqrt(ss[g]) * (tau * f * out));
+                }
+                continue;
+            }
+            // TVL2: center, (D D^T)^-1 D x by the Thomas algorithm, scale.
+            if (n < 2) continue;
+            bool ok = true;
+            for (int64_t e = 0; e + 1 < n && c.weighted; ++e) ok = ok && wt(e) > 0.0 && std::isfinite(wt(e));
+            double mean = 0.0, big = 0.0;
+            for (int64_t k = 0; k < n; ++k) big = std::fmax(big, std::fabs(x.get(idx(k))));
+            if (!ok || !(big > 0.0) || !std::isfinite(big)) continue;
+            std::vector<double> v(static_cast<size_t>(n)), cc(static_cast<size_t>(n - 1)), d(static_cast<size_t>(n - 1));
+            for (int64_t k = 0; k < n; ++k) mean += (v[k] = x.get(idx(k)) / big);
+            mean /= static_cast<double>(n);
+            for (auto &vk : v) vk -= mean;
+            for (int64_t e = 0; e + 1 < n; ++e) d[e] = v[e + 1] - v[e];
+            double piv = 2.0;
+            cc[0] = -1.0 / piv;
+            d[0] /= piv;
+            for (int64_t e = 1; e + 1 < n; ++e) {
+                piv = 2.0 + cc[e - 1];
+                cc[e] = -1.0 / piv;
+                d[e] = (d[e] + d[e - 1]) / piv;
+            }
+            for (int64_t e = n - 3; e >= 0; --e) d[e] -= cc[e] * d[e + 1];
+            double un = 0.0, ubig = 0.0;
+            for (int64_t e = 0; e + 1 < n; ++e) ubig = std::fmax(ubig, std::fabs(d[e] / wt(e)));
+            if (!(ubig > 0.0) || !std::isfinite(ubig)) continue;
+            for (int64_t e = 0; e + 1 < n; ++e) {
+                const double u = d[e] / wt(e) / ubig;
+                un += u * u;
+            }
+            const double scale = gin * f * out / (ubig * std::sqrt(un));
+            for (int64_t k = 0; k < n; ++k) x.set(idx(k), v[k] * scale);
+        }
+    return true;
+}
+
+// Eigenvalues of a symmetric m x m matrix (m <= 8) by cyclic Jacobi rotations.
+void sym_eig(std::vector<double> A, int m, double *ev) {
+    double fro = 0.0;
+    for (double v : A) fro += v * v;
+    for (int sweep = 0; sweep < 64; ++sweep) {
+        double off = 0.0;
+        for (int p = 0; p < m; ++p)
+            for (int q = p + 1; q < m; ++q) off += A[p * m + q] * A[p * m + q];
+        if (!(off > 1e-32 * fro)) break;
+        for (int p = 0; p < m; ++p)
+            for (int q = p + 1; q < m; ++q) {
+                const double apq = A[p * m + q];
+                if (apq == 0.0) continue;
+                const double theta = (A[q * m + q] - A[p * m + p]) / (2.0 * apq);
+                const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+                const double cs = 1.0 / std::sqrt(t * t + 1.0), sn = t * cs;
+                for (int k = 0; k < m; ++k) {
+                    const double akp = A[k * m + p], akq = A[k * m + q];
+                    A[k * m + p] = cs * akp - sn * akq;
+                    A[k * m + q] = sn * akp + cs * akq;
+                }
+                for (int k = 0; k < m; ++k) {
+                    const double apk = A[p * m + k], aqk = A[q * m + k];
+                    A[p * m + k] = cs * apk - sn * aqk;
+                    A[q * m + k] = sn * apk + cs * aqk;
+                }
+            }
+    }
+    for (int k = 0; k < m; ++k) ev[k] = A[k * m + k];
+}
+
+// J (of the prox, or after fp_prox_conj of the conjugate) formed from the
+// unit tangents, on units of up to 8 entries (entries for the elementwise
+// maps): zero across units, symmetric, and with its spectrum in [0, 1] for
+// the convex operators (the conjugate's too), after the change of metric
+// D_w^1/2 J D_w^-1/2 for weighted isotonic regression; diagonal in [0, b_i]
+// for SCAD and MCP, b_i = (a - 1) / (a - 1 - g w_i) and b / (b - g w_i) at
+// the inner step g ([1 - b_i, 1] for the conjugate). The nonconvex maps with
+// jumps (l0, lq, the log penalty) and group SCAD and MCP are not checked.
+// Calls the library rejects (fp_jvp failing) are skipped, as are units with
+// a non-finite entry. Tolerances: rounding of float64 or float32 relative
+// to the bound.
+void check_jacobian(const fp_op *op, fp_workspace *ws, const Case &c, fp_dtype dt, int ndim, const int64_t *shape,
+                    int axis, int64_t numel, bool conj, double gamma) {
+    const char *name = fp_op_name(op);
+    auto is = [&](std::initializer_list<const char *> names) {
+        for (const char *nm : names)
+            if (std::strcmp(name, nm) == 0) return true;
+        return false;
+    };
+    const bool elementwise = is({"soft", "elastic_net", "huber", "box", "nonneg", "log_barrier", "l1_box", "scad", "mcp"});
+    const bool slope = is({"scad", "mcp"});
+    const bool convex = elementwise || is({"l2", "group_l2", "l2_ball", "simplex", "l1_ball", "linf", "isotonic", "max",
+                                           "sum_largest", "sum_largest_abs", "hyperplane", "halfspace", "soc", "tree_l2",
+                                           "tv1d_ball", "tv1d_l2", "tv1d", "sorted_l1", "tv_aniso", "tv_iso", "tree_tv",
+                                           "graph_tv", "group_huber"});
+    if (!convex || numel == 0 || numel > 64) return;
+    int64_t count = 0, size = 0;
+    if (!elementwise && (fp_workspace_units(ws, &count, &size) != FP_OK || size > 8)) return;
+    const bool f32 = dt == FP_F32;
+    const size_t m = static_cast<size_t>(numel), item = f32 ? 4 : 8;
+    std::vector<double> J(m * m);
+    std::vector<unsigned char> e(m * item), col(m * item);
+    fp_array ea{e.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    fp_array ca{col.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
+    for (size_t j = 0; j < m; ++j) {
+        std::fill(e.begin(), e.end(), 0);
+        if (f32) reinterpret_cast<float *>(e.data())[j] = 1.0f;
+        else reinterpret_cast<double *>(e.data())[j] = 1.0;
+        if (fp_jvp(op, ws, &ea, 0.0, nullptr, &ca) != FP_OK) return;
+        for (size_t i = 0; i < m; ++i)
+            J[i * m + j] = f32 ? static_cast<double>(reinterpret_cast<float *>(col.data())[i])
+                               : reinterpret_cast<double *>(col.data())[i];
+    }
+    const bool image = is({"tv_aniso", "tv_iso", "graph_tv", "tree_tv"});
+    const int a = ndim ? (axis + ndim) % ndim : 0;
+    int64_t inner = 1;
+    for (int d = a + 1; d < ndim; ++d) inner *= shape[d];
+    const int64_t n = ndim ? shape[a] : 1;
+    auto unit = [&](int64_t i) -> int64_t {
+        if (elementwise) return i;
+        if (count <= 1) return 0;
+        if (image) return i / size;
+        return i / (n * inner) * inner + i % inner;
+    };
+    const std::vector<double> &w = c.params[0];
+    auto wt = [&](int64_t i) {  // the weight of entry i along the axis
+        return c.weighted ? w[w.size() == 1 ? 0 : static_cast<size_t>((i / inner) % n)] : 1.0;
+    };
+    const bool metric = std::strcmp(name, "isotonic") == 0 && c.weighted;
+    const double eps = f32 ? 1e-4 : 1e-10;
+    std::map<int64_t, std::vector<int64_t>> units;
+    for (int64_t i = 0; i < numel; ++i) units[unit(i)].push_back(i);
+    auto dump = [&](const char *what) {
+        std::fprintf(stderr, "J (%lld x %lld):\n", static_cast<long long>(numel), static_cast<long long>(numel));
+        for (size_t i = 0; i < m; ++i) {
+            for (size_t j = 0; j < m; ++j) std::fprintf(stderr, " %.6g", J[i * m + j]);
+            std::fprintf(stderr, "\n");
+        }
+        std::fprintf(stderr, "params:");
+        for (double p : w) std::fprintf(stderr, " %.17g", p);
+        std::fprintf(stderr, "\n");
+        fail(what);
+    };
+    for (const auto &kv : units) {
+        const std::vector<int64_t> &ix = kv.second;
+        const int k = static_cast<int>(ix.size());
+        double lo = 0.0, hi = 1.0;
+        if (slope) {
+            const double g = conj ? 1.0 / gamma : gamma, wi = wt(ix[0]);
+            const double bnd = c.snap == Case::SCAD ? (c.conc - 1.0) / (c.conc - 1.0 - g * wi) : c.conc / (c.conc - g * wi);
+            if (!(bnd >= 1.0) || !std::isfinite(bnd)) continue;  // g w_i = 0: the identity; rounding in the bound
+            if (conj) lo = 1.0 - bnd;
+            else hi = bnd;
+        }
+        const double tol = eps * std::fmax(1.0, std::fabs(hi - lo)) * k;
+        std::vector<double> A(static_cast<size_t>(k * k));
+        bool finite = true;
+        for (int r = 0; r < k; ++r)
+            for (int s2 = 0; s2 < k; ++s2) {
+                double v = J[static_cast<size_t>(ix[r]) * m + static_cast<size_t>(ix[s2])];
+                if (metric) v *= std::sqrt(wt(ix[r])) / std::sqrt(wt(ix[s2]));
+                A[r * k + s2] = v;
+                finite = finite && std::isfinite(v);
+            }
+        if (!finite) continue;
+        for (int r = 0; r < k; ++r)
+            for (int s2 = 0; s2 < r; ++s2)
+                if (std::fabs(A[r * k + s2] - A[s2 * k + r]) > tol) dump("dense J: not symmetric on a unit");
+        std::vector<double> S(A), ev(static_cast<size_t>(k));
+        for (int r = 0; r < k; ++r)
+            for (int s2 = 0; s2 < k; ++s2) S[r * k + s2] = 0.5 * (A[r * k + s2] + A[s2 * k + r]);
+        sym_eig(S, k, ev.data());
+        for (double v : ev)
+            if (!(v >= lo - tol && v <= hi + tol)) {
+                std::fprintf(stderr, "eigenvalue %.17g outside [%.17g, %.17g]\n", v, lo, hi);
+                dump("dense J: spectrum outside its bounds");
+            }
+    }
+    // Zero across units (rows are independent).
+    for (int64_t i = 0; i < numel; ++i)
+        for (int64_t j = 0; j < numel; ++j)
+            if (unit(i) != unit(j) && std::isfinite(J[i * m + j]) && J[i * m + j] != 0.0)
+                dump("dense J: couples two units");
+}
+
 void run(const uint8_t *data, size_t size) {
     Bytes b{data, size};
 
@@ -593,6 +897,7 @@ void run(const uint8_t *data, size_t size) {
     fp_array o4{z4.data(), dt, ndim, shape, nullptr, FP_DEVICE_CPU};
 
     const bool conj = b.u8() % 3 == 0;
+    const bool snapped = snap(b, c, View{x0, f32, ndim, shape, strides}, axis, gamma, conj);
     std::strncat(g_case, conj ? " conj" : "", sizeof g_case - std::strlen(g_case) - 1);
     auto prox = conj ? fp_prox_conj : fp_prox;
     o.threads = 1;
@@ -796,6 +1101,9 @@ void run(const uint8_t *data, size_t size) {
             if (ps != FP_OK && ps != FP_ENOTCONV && (js == FP_OK || vs == FP_OK))
                 fail("derivative without structure");
             if (js == FP_OK) check_structure(c.op, ws, opname, dt, ndim, shape, axis, numel, conj, gamma, c.params[0], b);
+            const bool dense = snapped || (b.u8() << 8 | b.u8()) % 1000 == 0;
+            if (js == FP_OK && ps == FP_OK && dense)
+                check_jacobian(c.op, ws, c, dt, ndim, shape, axis, numel, conj, gamma);
         }
         fp_workspace_free(ws);
     }
