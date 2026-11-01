@@ -4147,6 +4147,234 @@ static void test_descriptor_bounds() {
     fp_op_free(op);
 }
 
+// The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.1): each
+// row is fp_op_l2_ball with its radius on that row alone, bit for bit (prox,
+// conjugate, steps per row, jvp with the row's radius tangent, vjp with the
+// row's radius gradient, value, structure); equal radii give the scalar
+// operator's bits; the result is the same for any thread count and layout;
+// other batch shapes are refused; and no call allocates with a workspace.
+static void test_l2_ball_radii() {
+    const int64_t R = 6, n = 7;
+    Vec xv = randn(R * n, 1.0), rv(static_cast<size_t>(R));
+    for (int64_t r = 0; r < R; ++r) rv[r] = 0.3 + 0.4 * static_cast<double>(r);  // rows inside and outside
+    rv[2] = 0.0;  // radius 0: the zero vector
+    for (int64_t i = 0; i < n; ++i) xv[3 * n + i] *= 0.01;  // well inside
+    Arr x({R, n}, xv), radii({R}, rv);
+    fp_op *op;
+    CHECK_OK(fp_op_l2_ball_radii(&radii.a, &op));
+    CHECK(fp_op_nparams(op) == R);
+    CHECK(fp_op_spectral_check(op, FP_SPECTRAL_SVD) == FP_EINVAL);
+    int kind = -1;
+    CHECK_OK(fp_op_struct_kind(op, &kind));
+    CHECK(kind == FP_STRUCT_CURVED);
+
+    const double gamma = 0.8, sigma = 0.6, dgamma = 0.37;
+    Vec dxv = randn(R * n), gv = randn(R * n), dpv = randn(R);
+    Arr dx({R, n}, dxv), g({R, n}, gv), dp({R}, dpv);
+    for (int conj = 0; conj < 2; ++conj) {
+        auto run = conj ? fp_prox_conj : fp_prox;
+        const double step = conj ? sigma : gamma;
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        Arr z({R, n}), dz({R, n}), gx({R, n}), gp({R}), coef({R, n});
+        CHECK_OK(run(op, step, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, dgamma, &dp.a, &dz.a));
+        double gg = 0;
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
+        std::vector<int8_t> active(static_cast<size_t>(R));
+        if (!conj) CHECK_OK(fp_workspace_constraint(ws, &coef.a, active.data(), R));
+        double gg_sum = 0;
+        for (int64_t r = 0; r < R; ++r) {
+            fp_op *one;
+            CHECK_OK(fp_op_l2_ball(rv[r], &one));
+            Arr x1({n}, Vec(xv.begin() + r * n, xv.begin() + (r + 1) * n)), z1({n}), dz1({n}), gx1({n}),
+                dx1({n}, Vec(dxv.begin() + r * n, dxv.begin() + (r + 1) * n)),
+                g1({n}, Vec(gv.begin() + r * n, gv.begin() + (r + 1) * n)), dp1({1}, {dpv[r]}), gp1({1}),
+                coef1({n});
+            fp_workspace *w1;
+            CHECK_OK(fp_workspace_create(one, &x1.a, &o, &w1));
+            CHECK_OK(run(one, step, &x1.a, &z1.a, &o, w1, nullptr));
+            CHECK_OK(fp_jvp(one, w1, &dx1.a, dgamma, &dp1.a, &dz1.a));
+            double gg1 = 0;
+            CHECK_OK(fp_vjp(one, w1, &g1.a, &gx1.a, &gg1, &gp1.a));
+            gg_sum += gg1;
+            bool same = std::memcmp(z1.data.data(), z.data.data() + r * n, n * 8) == 0 &&
+                        std::memcmp(dz1.data.data(), dz.data.data() + r * n, n * 8) == 0 &&
+                        std::memcmp(gx1.data.data(), gx.data.data() + r * n, n * 8) == 0 &&
+                        gp1.data[0] == gp.data[r];
+            if (!conj) {
+                int8_t act1 = 0;
+                CHECK_OK(fp_workspace_constraint(w1, &coef1.a, &act1, 1));
+                same = same && act1 == active[r] &&
+                       std::memcmp(coef1.data.data(), coef.data.data() + r * n, n * 8) == 0;
+                Arr v1({}), v({R});
+                fp_options vo = opts();
+                CHECK_OK(fp_value(one, &x1.a, &vo, &v1.a));
+                CHECK_OK(fp_value(op, &x.a, &vo, &v.a));
+                same = same && v1.data[0] == v.data[r];
+            }
+            CHECK(same);
+            if (!same) std::fprintf(stderr, "  l2_ball_radii row %lld conj=%d differs\n", (long long)r, conj);
+            fp_workspace_free(w1);
+            fp_op_free(one);
+        }
+        CHECK(std::fabs(gg - gg_sum) <= 1e-12 * (1 + std::fabs(gg_sum)));
+        // Adjointness with a tangent per radius.
+        double lhs = dot(g.data, dz.data), rhs = dot(gx.data, dx.data) + gg * dgamma + dot(gp.data, dp.data);
+        CHECK(std::fabs(lhs - rhs) <= 1e-12 * (1 + std::fabs(lhs)));
+        // No allocation with a workspace.
+        const long before = g_allocs.load();
+        CHECK_OK(run(op, step, &x.a, &z.a, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(op, ws, &dx.a, dgamma, &dp.a, &dz.a));
+        CHECK_OK(fp_vjp(op, ws, &g.a, &gx.a, &gg, &gp.a));
+        CHECK(g_allocs.load() == before);
+        fp_workspace_free(ws);
+    }
+
+    // One step per row.
+    {
+        Vec sv(static_cast<size_t>(R));
+        for (int64_t r = 0; r < R; ++r) sv[r] = 0.5 + 0.1 * static_cast<double>(r);
+        Arr steps({R}, sv), z({R, n}), z0({R, n});
+        CHECK_OK(fp_prox_steps(op, &steps.a, &x.a, &z.a, nullptr, nullptr));
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z0.a, nullptr, nullptr, nullptr));
+        CHECK(z.data == z0.data);  // a projection ignores its step
+    }
+
+    // Equal radii: the scalar operator's bits, and its radius gradient is the
+    // sum of the per-row ones.
+    {
+        Arr eq({R}, Vec(static_cast<size_t>(R), 0.9));
+        fp_op *ope, *ops;
+        CHECK_OK(fp_op_l2_ball_radii(&eq.a, &ope));
+        CHECK_OK(fp_op_l2_ball(0.9, &ops));
+        fp_options o = opts(-1, 0, 1);
+        Arr dp1({1}, {0.25}), dpe({R}, Vec(static_cast<size_t>(R), 0.25));
+        Vec res[2][4];
+        double ggs[2], gps[2];
+        for (int k = 0; k < 2; ++k) {
+            fp_op *p = k ? ops : ope;
+            fp_workspace *ws;
+            CHECK_OK(fp_workspace_create(p, &x.a, &o, &ws));
+            Arr z({R, n}), dz({R, n}), gx({R, n}), v({R}), gp({fp_op_nparams(p)});
+            CHECK_OK(fp_prox(p, gamma, &x.a, &z.a, &o, ws, nullptr));
+            CHECK_OK(fp_jvp(p, ws, &dx.a, dgamma, k ? &dp1.a : &dpe.a, &dz.a));
+            CHECK_OK(fp_vjp(p, ws, &g.a, &gx.a, &ggs[k], &gp.a));
+            fp_options vo = opts();
+            CHECK_OK(fp_value(p, &x.a, &vo, &v.a));
+            gps[k] = 0;
+            for (double a : gp.data) gps[k] += a;
+            res[k][0] = z.data;
+            res[k][1] = dz.data;
+            res[k][2] = gx.data;
+            res[k][3] = v.data;
+            fp_workspace_free(ws);
+        }
+        for (int i = 0; i < 4; ++i) CHECK(res[0][i] == res[1][i]);
+        CHECK(ggs[0] == ggs[1]);
+        CHECK(std::fabs(gps[0] - gps[1]) <= 1e-13 * (1 + std::fabs(gps[1])));
+        fp_op_free(ope);
+        fp_op_free(ops);
+    }
+
+    // Threads and layout: the same bits for 1, 3 and 8 threads, and along
+    // axis 0 (the strided tiles) as along the last axis.
+    {
+        const int64_t RB = 3000, nb = 9;
+        Vec bx = randn(RB * nb), br(static_cast<size_t>(RB)), bg(static_cast<size_t>(RB * nb));
+        for (int64_t r = 0; r < RB; ++r) br[r] = 0.5 + 3.0 * unif(0, 1);
+        for (size_t i = 0; i < bg.size(); ++i) bg[i] = std::sin(0.1 * static_cast<double>(i));
+        Arr xb({RB, nb}, bx), rb({RB}, br), gb({RB, nb}, bg);
+        Arr xt({nb, RB}), gt({nb, RB});
+        for (int64_t r = 0; r < RB; ++r)
+            for (int64_t i = 0; i < nb; ++i) {
+                xt.data[i * RB + r] = bx[r * nb + i];
+                gt.data[i * RB + r] = bg[r * nb + i];
+            }
+        fp_op *opb;
+        CHECK_OK(fp_op_l2_ball_radii(&rb.a, &opb));
+        std::vector<Vec> outs;
+        for (int t : {1, 3, 8}) {
+            for (int axis : {-1, 0}) {
+                fp_options o = opts(axis, t, 1);
+                const Arr &xi = axis ? xb : xt;
+                const Arr &gi = axis ? gb : gt;
+                std::vector<int64_t> sh = axis ? std::vector<int64_t>{RB, nb} : std::vector<int64_t>{nb, RB};
+                fp_workspace *ws;
+                CHECK_OK(fp_workspace_create(opb, &xi.a, &o, &ws));
+                Arr z(sh), gx(sh), gp({RB});
+                CHECK_OK(fp_prox(opb, 1.0, &xi.a, &z.a, &o, ws, nullptr));
+                double gg = 0;
+                CHECK_OK(fp_vjp(opb, ws, &gi.a, &gx.a, &gg, &gp.a));
+                Vec all(gp.data);
+                all.push_back(gg);
+                for (int64_t r = 0; r < RB; ++r)  // in row-major order
+                    for (int64_t i = 0; i < nb; ++i) {
+                        all.push_back(axis ? z.data[r * nb + i] : z.data[i * RB + r]);
+                        all.push_back(axis ? gx.data[r * nb + i] : gx.data[i * RB + r]);
+                    }
+                outs.push_back(all);
+                fp_workspace_free(ws);
+            }
+        }
+        for (size_t k = 1; k < outs.size(); ++k) CHECK(outs[k] == outs[0]);
+        fp_op_free(opb);
+    }
+
+    // Shapes and errors.
+    {
+        Arr x2({R + 1, n}), z2({R + 1, n}), xt({n, R}), zt({n, R}), v({R + 1});
+        fp_options o = opts(), o0 = opts(0), ok = opts(-1, 0, 1);
+        CHECK(fp_prox(op, 1.0, &x2.a, &z2.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        CHECK(fp_prox(op, 1.0, &xt.a, &zt.a, &o, nullptr, nullptr) == FP_ESHAPE);  // batch (n,)
+        CHECK_OK(fp_prox(op, 1.0, &xt.a, &zt.a, &o0, nullptr, nullptr));          // batch (R,)
+        CHECK(fp_value(op, &x2.a, &o, &v.a) == FP_ESHAPE);
+        fp_workspace *ws = nullptr;
+        CHECK(fp_workspace_create(op, &x2.a, &ok, &ws) == FP_ESHAPE);
+        CHECK(ws == nullptr);
+        Arr s2({R + 1});
+        CHECK(fp_prox_steps(op, &s2.a, &x2.a, &z2.a, nullptr, nullptr) == FP_ESHAPE);
+        // gparams and dparams have the batch's length.
+        CHECK_OK(fp_workspace_create(op, &x.a, &ok, &ws));
+        Arr z({R, n}), gx({R, n}), gbad({1}), dbad({1});
+        CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &ok, ws, nullptr));
+        CHECK(fp_vjp(op, ws, &g.a, &gx.a, nullptr, &gbad.a) == FP_ESHAPE);
+        CHECK(fp_jvp(op, ws, &dx.a, 0.0, &dbad.a, &z.a) == FP_ESHAPE);
+        fp_workspace_free(ws);
+        // Radii: finite and >= 0.
+        fp_op *bad = nullptr;
+        for (double b : {-1.0, static_cast<double>(NAN), static_cast<double>(INFINITY)}) {
+            Arr rb({2}, {1.0, b});
+            CHECK(fp_op_l2_ball_radii(&rb.a, &bad) == FP_EPARAM);
+            CHECK(bad == nullptr);
+        }
+        CHECK(fp_op_l2_ball_radii(nullptr, &bad) == FP_EINVAL);
+        // 0-d radii: one row; a 2-d batch; an empty batch.
+        Arr r0({}, {0.5}), x1({3}, {1.0, 2.0, 2.0}), z1({3});
+        fp_op *o1;
+        CHECK_OK(fp_op_l2_ball_radii(&r0.a, &o1));
+        CHECK_OK(fp_prox(o1, 1.0, &x1.a, &z1.a, nullptr, nullptr, nullptr));
+        CHECK(std::fabs(z1.data[0] - 0.5 / 3.0) < 1e-16 && std::fabs(z1.data[2] - 1.0 / 3.0) < 1e-16);
+        CHECK(fp_prox(o1, 1.0, &x.a, &z.a, nullptr, nullptr, nullptr) == FP_ESHAPE);
+        fp_op_free(o1);
+        Arr r2({2, 3}, {1, 2, 3, 4, 5, 6}), x3({2, 3, 2}, randn(12, 100.0)), z3({2, 3, 2});
+        CHECK_OK(fp_op_l2_ball_radii(&r2.a, &o1));
+        CHECK_OK(fp_prox(o1, 1.0, &x3.a, &z3.a, nullptr, nullptr, nullptr));
+        for (int64_t r = 0; r < 6; ++r) {
+            const double m = std::hypot(z3.data[2 * r], z3.data[2 * r + 1]);
+            CHECK(std::fabs(m - r2.data[r]) <= 1e-14 * r2.data[r]);  // every row outside: on the sphere
+        }
+        fp_op_free(o1);
+        Arr re({0}), xe({0, 4}), ze({0, 4});
+        CHECK_OK(fp_op_l2_ball_radii(&re.a, &o1));
+        CHECK(fp_op_nparams(o1) == 0);
+        CHECK_OK(fp_prox(o1, 1.0, &xe.a, &ze.a, nullptr, nullptr, nullptr));
+        fp_op_free(o1);
+    }
+    fp_op_free(op);
+}
+
 // Row scratch is sized for the threads the rows can use (audit C2).
 static void test_row_scratch_bytes() {
 #ifndef FP_TSAN
@@ -5289,6 +5517,7 @@ int main() {
     test_conj_extremes();
     test_float32();
     test_row_scratch_bytes();
+    test_l2_ball_radii();
     test_thread_cap();  // last: it grows the pool
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;

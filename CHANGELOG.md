@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The ℓ2 ball with one radius per row (planned for 1.1): `fp_op_l2_ball_radii(radii)` in C, `L2Ball(radius=array)` and `project_l2_ball(x, radius=array)` in Python, and `radius=` tensors in `fastprox.torch.prox` and `fastprox.jax.prox`. It is the dual step of TV with one weight per pixel, as in iteratively reweighted ℓ1, which until now needed a NumPy fallback. The radii have the batch shape (x's shape without the axis), and the operator is built for that shape: another batch shape gives `FP_ESHAPE` (ValueError in Python, where `project_l2_ball` broadcasts first). θ is the radii, with one gradient and one tangent per row and no sum across rows. Each row gives the bits of `fp_op_l2_ball` with its radius on that row alone, so equal radii give the bits of the single radius. No spectral use. In the core, row kernels now get their row's index, and operators can declare parameters per row (`fp_op::row_params`, `check_batch`, `value_row_at`). The vjp driver writes each row's gradient to its own slot, so the reduction blocks stay `k + 2` wide rather than one slot per row.
+
 ### Fixed
 
 - The derivatives of the second-order cone and the tree-structured norms at a subnormal x (fuzz, 2026-10-28): where ‖x‖² underflows, the norm is rescaled, by at most 2^1022, and ⟨u, dx⟩ took the plain sum whenever it was, though for a deep subnormal x the rescaled x stays far below 1 and the products still underflow. At x = (0, 4e-315) and dx near 4e-312 the cone's J dx was 1.6e-6 off and left its constraint. The dot now goes to its scaled path by the range of ‖x‖ · max |dxᵢ| alone, rescaled or not, which leaves every result in range unchanged.

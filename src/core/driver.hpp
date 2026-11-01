@@ -264,7 +264,7 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
                     const int64_t r = r0 + k;
                     T *res = keep ? ws.zs<T>() + r * n : buf.tout + k * n;
                     uint8_t *code = keep ? ws.code.data() + r * n : nullptr;
-                    if (int e = op.prox_row(dst + k * n, res, n, steps ? steps->at(r) : gamma, buf.kernel, code))
+                    if (int e = op.prox_row(dst + k * n, res, n, steps ? steps->at(r) : gamma, buf.kernel, code, r))
                         err.fetch_or(e, std::memory_order_relaxed);
                 }
                 auto res_of = [&](int64_t k) -> const T * {
@@ -329,7 +329,7 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
             else res = buf.b;
 
             uint8_t *code = keep ? ws.code.data() + r * n : nullptr;
-            if (int e = op.prox_row(in, res, n, steps ? steps->at(r) : gamma, buf.kernel, code))
+            if (int e = op.prox_row(in, res, n, steps ? steps->at(r) : gamma, buf.kernel, code, r))
                 err.fetch_or(e, std::memory_order_relaxed);
 
             if (conj) {
@@ -565,7 +565,7 @@ int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr 
                 if (s.sign) std::fill(s.sign, s.sign + n, int8_t{0});
                 no_constraint(s, n);
             } else {
-                k = op.struct_row(x, ws.zs<T>() + r * n, ws.code.data() + r * n, n, ws.step(r), s, buf.kernel);
+                k = op.struct_row(x, ws.zs<T>() + r * n, ws.code.data() + r * n, n, ws.step(r), s, buf.kernel, r);
                 if (count)
                     for (int64_t i = 0; i < n; ++i) local += s.state[i] != FP_ENTRY_FREE;
             }
@@ -662,6 +662,9 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
     const int64_t n = p.n;
     const int64_t sx = p.astride[0], so = p.astride[1];
     const bool alias = dx && dx->data == dout.data;
+    // Parameters per row (op.row_params()): each row reads its own k tangents.
+    const int64_t kp = op.row_params();
+    auto row_dp = [&](int64_t r) -> const double * { return dparams && kp ? dparams + r * kp : dparams; };
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
     const Tiling tl = dxd ? make_tiling(p, 0, sizeof(T)) : Tiling{};
     if (tl.on) {
@@ -683,13 +686,13 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
                     const T *dxr = buf.tin + k * n;
                     T *res = buf.tout + k * n;
                     if (!conj) {
-                        op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, dparams, buf.kernel);
+                        op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, row_dp(r), buf.kernel, r);
                     } else {
                         for (int64_t i = 0; i < n; ++i)
                             buf.c[i] = static_cast<T>(static_cast<double>(dxr[i]) / sigma -
                                                       static_cast<double>(x[i]) * dgamma / sigma);
-                        op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), dparams,
-                                   buf.kernel);
+                        op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), row_dp(r),
+                                   buf.kernel, r);
                         for (int64_t i = 0; i < n; ++i)
                             res[i] = static_cast<T>(static_cast<double>(dxr[i]) -
                                                     dgamma * static_cast<double>(z[i]) -
@@ -734,14 +737,14 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
             T *res = (so == 1 && !alias) ? orow : buf.b;
 
             if (!conj) {
-                op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, dparams, buf.kernel);
+                op.jvp_row(x, z, code, dxr, res, n, ws.step(r), dgamma, row_dp(r), buf.kernel, r);
             } else {
                 // out = y - sigma p(1/sigma, y/sigma); dgamma reads as dsigma.
                 for (int64_t i = 0; i < n; ++i)
                     buf.c[i] = static_cast<T>(static_cast<double>(dxr[i]) / sigma -
                                               static_cast<double>(x[i]) * dgamma / sigma);
-                op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), dparams,
-                           buf.kernel);
+                op.jvp_row(x, z, code, buf.c, buf.d, n, ws.gamma, -dgamma / (sigma * sigma), row_dp(r),
+                           buf.kernel, r);
                 for (int64_t i = 0; i < n; ++i)
                     res[i] = static_cast<T>(static_cast<double>(dxr[i]) -
                                             dgamma * static_cast<double>(z[i]) -
@@ -762,15 +765,48 @@ fp_status jvp_driver(const fp_op &op, const fp_workspace &ws, const Arr *dx, dou
 // (reduction_blocks over rows, or over chunks of kChunk entries) fix the
 // order of the cross-row sums, so they are part of the result: they must not
 // depend on the thread count (no row_grain or elem_piece here).
+// With parameters per row (op.row_params() = k > 0) a block holds k + 2
+// slots, of which only gamma's and the conjugate's are summed: each row's k
+// gradients go straight to its entries of tot (rows are disjoint), so the
+// result does not depend on the blocks either.
 template <class T>
 fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, const Arr &gx,
                      double *tot, bool want = true) {
     int nt = ws.nthreads;
-    const int64_t P = op.nparams();
+    const int64_t kp = op.elementwise() ? 0 : op.row_params();
+    const int64_t P = kp ? kp : op.nparams();  // theta's slots in a block
     const int64_t W = P + 2;
+    const int64_t PT = op.nparams();  // theta's length in tot
     const int64_t nb = ws.nblocks;
     double *acc = ws.acc.data();
     std::fill(acc, acc + nb * W, 0.0);
+    // The totals over the blocks, in block order.
+    auto finish = [&] {
+        if (!kp) {
+            for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
+            for (int64_t b = 0; b < nb; ++b)
+                for (int64_t k = 0; k < W; ++k) tot[k] += acc[b * W + k];
+            return;
+        }
+        tot[PT] = tot[PT + 1] = 0.0;
+        for (int64_t b = 0; b < nb; ++b) {
+            tot[PT] += acc[b * W + kp];
+            tot[PT + 1] += acc[b * W + kp + 1];
+        }
+    };
+    // vjp_row of row r into block slots a; with parameters per row through
+    // the row's local slots (op.hpp, row_params).
+    auto row_vjp = [&](int64_t r, const T *x, const T *z, const uint8_t *code, const T *gr, T *res,
+                       int64_t n, double gamma, double *a, void *kernel) {
+        if (!kp) {
+            op.vjp_row(x, z, code, gr, res, n, gamma, a, kernel, r);
+            return;
+        }
+        double la[kMaxRowParams + 1] = {};
+        op.vjp_row(x, z, code, gr, res, n, gamma, la, kernel, r);
+        for (int64_t j = 0; j < kp; ++j) tot[r * kp + j] = la[j];
+        a[kp] += la[kp];
+    };
     const T *gd = reinterpret_cast<const T *>(g.data);
     T *xd = reinterpret_cast<T *>(gx.data);
     const int64_t *st[2] = {g.strides, gx.strides};
@@ -831,9 +867,9 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                             const T *gr = buf.tin + k * n;
                             T *res = buf.tout + k * n;
                             if (!conj) {
-                                op.vjp_row(x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
+                                row_vjp(r, x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
                             } else {
-                                op.vjp_row(x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
+                                row_vjp(r, x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
                                 double e = 0.0;
                                 for (int64_t i = 0; i < n; ++i) {
                                     const double gi = static_cast<double>(gr[i]);
@@ -859,9 +895,7 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                     }
                 }
             });
-            for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
-            for (int64_t b = 0; b < nb; ++b)
-                for (int64_t k = 0; k < W; ++k) tot[k] += acc[b * W + k];
+            finish();
             return FP_OK;
         }
         parallel_for(nt, nb, 1, [&](int tid, int64_t b0, int64_t b1) {
@@ -883,9 +917,9 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
                     }
                     T *res = (so == 1 && !alias) ? orow : buf.b;
                     if (!conj) {
-                        op.vjp_row(x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
+                        row_vjp(r, x, z, code, gr, res, n, ws.step(r), a, buf.kernel);
                     } else {
-                        op.vjp_row(x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
+                        row_vjp(r, x, z, code, gr, buf.d, n, ws.gamma, a, buf.kernel);
                         double e = 0.0;
                         for (int64_t i = 0; i < n; ++i) {
                             const double gi = static_cast<double>(gr[i]);
@@ -901,9 +935,7 @@ fp_status vjp_driver(const fp_op &op, const fp_workspace &ws, const Arr &g, cons
         });
     }
 
-    for (int64_t k = 0; k < W; ++k) tot[k] = 0.0;
-    for (int64_t b = 0; b < nb; ++b)
-        for (int64_t k = 0; k < W; ++k) tot[k] += acc[b * W + k];
+    finish();
     return FP_OK;
 }
 

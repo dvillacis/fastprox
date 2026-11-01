@@ -280,9 +280,12 @@ fp_status build_workspace(const fp_op &op, const Arr &x, int axis, int nthreads,
         if (op.has_branches()) w.branch.resize(static_cast<size_t>(w.numel) + 1);
         if (!elem && op.has_branches()) w.code_default.resize(static_cast<size_t>(w.numel) + 1);
         const int64_t P = op.nparams();
+        // A block's theta slots: the local ones with parameters per row
+        // (vjp_driver), whose gradients need no cross-row sum.
+        const int64_t PB = !elem && op.row_params() ? op.row_params() : P;
         const int64_t units = elem ? ceil_div(w.numel, kChunk) : w.rows;
-        w.nblocks = reduction_blocks(units, P);
-        w.acc.resize(static_cast<size_t>(w.nblocks * (P + 2)));
+        w.nblocks = reduction_blocks(units, PB);
+        w.acc.resize(static_cast<size_t>(w.nblocks * (PB + 2)));
         if (elem)  // the structure query's three counts per piece (elem_structure_driver)
             w.block_counts.resize(static_cast<size_t>(3 * std::max<int64_t>(1, ceil_div(w.numel, elem_piece(w.numel, w.nthreads)))));
         if (!elem && op.struct_kind() != FP_STRUCT_NONE && w.numel > 0) {
@@ -330,6 +333,17 @@ fp_status step_ok(const fp_op &op, double g) noexcept {
     const double s = op.step_scale();
     if (s > 0.0 && !(g * s <= kMaxScaledStep)) return FP_EPARAM;
     return op.check_step(g);
+}
+
+// The batch shape of a row or elementwise call (x's shape without the axis)
+// against the operator's: FP_ESHAPE for an operator built for another one
+// (parameters per row, since 1.1). Checked even for an empty batch.
+fp_status batch_ok(const fp_op &op, const Arr &x, int axis) noexcept {
+    int64_t b[FP_MAX_NDIM];
+    int nb = 0;
+    for (int d = 0; d < x.ndim; ++d)
+        if (d != axis) b[nb++] = x.shape[d];
+    return op.check_batch(nb, b);
 }
 
 // dst = src entry by entry through both arrays' strides, or every entry of
@@ -452,6 +466,8 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
             return s;
         }
     }
+    if (!k)
+        if (fp_status s = batch_ok(*op, x, axis)) return s;
     // Every argument is checked: a rejected call leaves ws as it was (audit
     // A4). From here the call replaces the saved point, or discards it.
     if (ws) {
@@ -763,7 +779,7 @@ void value_driver(const fp_op &op, const Arr &x, int axis, double tol, const Arr
         p.offsets(r, off);
         for (int64_t i = 0; i < n; ++i) xb[static_cast<size_t>(i)] = static_cast<double>(xd[off[0] + i * p.astride[0]]);
         od[out_at(r)] = any_nan(xb) ? std::numeric_limits<double>::quiet_NaN()
-                                    : op.value_row(xb.data(), n, tol, scr.data());
+                                    : op.value_row_at(r, xb.data(), n, tol, scr.data());
     }
 }
 
@@ -796,6 +812,8 @@ fp_status value_impl(const fp_op *op, const fp_array *xa, const fp_options *opt,
     if (k) {
         if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
     } else if (fp_status s = op->check_n(x.shape[axis])) {
+        return s;
+    } else if (fp_status s = batch_ok(*op, x, axis)) {
         return s;
     }
     if (out.numel() == 0) return FP_OK;
@@ -1365,6 +1383,33 @@ FP_API fp_status fp_op_l2_ball(double radius, fp_op **out) {
     });
 }
 
+FP_API fp_status fp_op_l2_ball_radii(const fp_array *radii, fp_op **out) {
+    return guard([&] {
+        if (!out) return FP_EINVAL;
+        *out = nullptr;
+        if (!radii) return FP_EINVAL;
+        // Any number of axes (0 for a single row) and extents, any strides,
+        // read in C order.
+        fp::Arr a;
+        if (fp_status s = fp::to_arr(radii, a)) return s;
+        const int nd = radii->ndim;
+        const int64_t m = a.numel();
+        fp::Vec v(static_cast<size_t>(m));
+        int64_t idx[FP_MAX_NDIM] = {0};
+        for (int64_t i = 0; i < m; ++i) {
+            int64_t o = 0;
+            for (int d = 0; d < a.ndim; ++d) o += idx[d] * a.strides[d];
+            v[static_cast<size_t>(i)] = a.dtype == FP_F32 ? reinterpret_cast<const float *>(a.data)[o]
+                                                          : reinterpret_cast<const double *>(a.data)[o];
+            for (int d = a.ndim - 1; d >= 0; --d) {
+                if (++idx[d] < a.shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+        return fp::make_l2_ball_radii(std::move(v), nd, a.shape, out);
+    });
+}
+
 FP_API fp_status fp_op_simplex(double radius, fp_op **out) {
     return guard([&] {
         if (!out) return FP_EINVAL;
@@ -1618,8 +1663,10 @@ FP_API fp_status fp_workspace_create(const fp_op *op, const fp_array *like, cons
             if (x.ndim < k) return FP_ESHAPE;
             if (x.numel() > 0)
                 if (fp_status s = op->check_image(x.shape + (x.ndim - k))) return s;
-        } else if (x.numel() > 0) {
-            if (fp_status s = op->check_n(x.shape[axis])) return s;
+        } else {
+            if (x.numel() > 0)
+                if (fp_status s = op->check_n(x.shape[axis])) return s;
+            if (fp_status s = fp::batch_ok(*op, x, axis)) return s;
         }
         std::unique_ptr<fp_workspace> ws;
         if (fp_status s = fp::build_workspace(*op, x, axis, fp::resolve_threads(o),

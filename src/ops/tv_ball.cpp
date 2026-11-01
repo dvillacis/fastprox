@@ -200,7 +200,7 @@ struct TVBall final : RowOp<TVBall> {
         double L = 0.0, R = gamma_max(x, n);
         // phi(R) = -alpha <= 0; the root lies in (0, R].
         auto eval = [&](double g) {
-            tv->prox_row(x, z, n, g, tscr, c);
+            tv->prox_row(x, z, n, g, tscr, c, 0);
             return tv_value(z, n) - alpha;
         };
         if (alpha == 0.0) {
@@ -216,7 +216,7 @@ struct TVBall final : RowOp<TVBall> {
         // left; a secant through gamma_max lands right of it, where the steps
         // fall back to bisection over many orders of magnitude.
         const double phi0 = eval(0.0);
-        tv->jvp_row(x, z, c, zero, zg, n, 0.0, 1.0, nullptr, tscr);
+        tv->jvp_row(x, z, c, zero, zg, n, 0.0, 1.0, nullptr, tscr, 0);
         const double slope0 = tv_lin(c, zg, n);
         double g = slope0 < 0.0 ? -phi0 / slope0 : 0.5 * R;
         if (!(g > L && g < R)) g = 0.5 * (L + R);
@@ -225,7 +225,7 @@ struct TVBall final : RowOp<TVBall> {
             if (ph == 0.0) break;
             if (ph > 0.0) L = g; else R = g;
             // Slope of phi on the current structure: <q, z_gamma>.
-            tv->jvp_row(x, z, c, zero, zg, n, g, 1.0, nullptr, tscr);
+            tv->jvp_row(x, z, c, zero, zg, n, g, 1.0, nullptr, tscr, 0);
             const double slope = tv_lin(c, zg, n);
             // Far above alpha, TV(z) behaves like a power of gamma: a Newton
             // step on log TV against log gamma (exact for a power law) takes
@@ -274,7 +274,7 @@ struct TVBall final : RowOp<TVBall> {
         if (!s.constraint) return k;  // the regions need no jvp
         T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
-        tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr);
+        tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr, 0);
         const double omega = jump_scale(code, n);
         if (tv_lin(code, zg, n, omega, omega) == 0.0) return k;
         for (int64_t i = 0; s.coef && i < n; ++i) {
@@ -297,8 +297,8 @@ struct TVBall final : RowOp<TVBall> {
         T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
         const double g = gamma_star(x, z, code, n);
-        tv->jvp_row(x, z, code, dx, dz, n, g, 0.0, dp ? dp + 1 : nullptr, tscr);
-        tv->jvp_row(x, z, code, zero, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
+        tv->jvp_row(x, z, code, dx, dz, n, g, 0.0, dp ? dp + 1 : nullptr, tscr, 0);
+        tv->jvp_row(x, z, code, zero, zg, n, g, 1.0, nullptr, tscr, 0);  // z_gamma
         // omega^2 <q, z_gamma>, omega (dalpha - ... - <q, dz0>), and the step
         // dgamma z_gamma as their ratio times omega z_gamma.
         const double omega = jump_scale(code, n);
@@ -330,7 +330,7 @@ struct TVBall final : RowOp<TVBall> {
         double *ia = buffer<double>(scr, n, 2);  // nw + 1 <= n + 1 accumulators
         const double g = gamma_star(x, z, code, n);
         for (int64_t i = 0; i < n; ++i) h[i] = T(0);
-        tv->jvp_row(x, z, code, h, zg, n, g, 1.0, nullptr, tscr);  // z_gamma
+        tv->jvp_row(x, z, code, h, zg, n, g, 1.0, nullptr, tscr, 0);  // z_gamma
         // bs = beta / omega from omega z_gamma and omega^2 <q, z_gamma> (Scale).
         const double omega = jump_scale(code, n);
         const double kappa = tv_lin(code, zg, n, omega, omega);
@@ -353,7 +353,7 @@ struct TVBall final : RowOp<TVBall> {
             h[i] = static_cast<T>(static_cast<double>(gv[i]) - bs * q);
         }
         for (int64_t k = 0; k < nw + 1; ++k) ia[k] = 0.0;
-        tv->vjp_row(x, z, code, h, gx, n, g, ia, tscr);
+        tv->vjp_row(x, z, code, h, gx, n, g, ia, tscr, 0);
         acc[0] += beta;
         for (int64_t k = 0; k < nw; ++k) acc[1 + k] += ia[k];
         if (beta != 0.0)

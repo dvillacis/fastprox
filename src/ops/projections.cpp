@@ -222,15 +222,36 @@ inline size_t condat_scratch(int64_t n) noexcept {
 
 // ---------------------------------------------------------------------------
 
+// One radius for every row (fp_op_l2_ball), or one per row of the batch
+// shape built for (fp_op_l2_ball_radii, since 1.1; theta = the radii, row
+// parameters in core/op.hpp). Both run the same kernels on the row's radius,
+// so equal radii give the bits of the single radius.
 struct L2Ball final : RowOp<L2Ball> {
     static constexpr int kStruct = FP_STRUCT_CURVED;
-    double r;
-    explicit L2Ball(double rr) : r(rr) {}
+    static constexpr bool kRowIndex = true;
+    double radius;           // every row's radius, without radii
+    Vec radii;               // one per row in canonical order; empty: radius
+    int bndim = -1;          // the batch shape of radii, -1 without
+    int64_t bshape[FP_MAX_NDIM] = {};
+    explicit L2Ball(double rr) : radius(rr) {}
+    L2Ball(Vec rv, int nd, const int64_t *shape) : radius(0.0), radii(std::move(rv)), bndim(nd) {
+        for (int d = 0; d < nd; ++d) bshape[d] = shape[d];
+    }
+    double rad(int64_t row) const noexcept { return bndim < 0 ? radius : radii[static_cast<size_t>(row)]; }
     const char *name() const noexcept override { return "l2_ball"; }
     double step_scale() const noexcept override { return 0.0; }
-    int spectral() const noexcept override { return kSpectralBoth; }  // Frobenius ball
-    int64_t nparams() const noexcept override { return 1; }
+    // The Frobenius ball; a radius per matrix is not a map of the spectrum alone.
+    int spectral() const noexcept override { return bndim < 0 ? kSpectralBoth : 0; }
+    int64_t nparams() const noexcept override { return bndim < 0 ? 1 : static_cast<int64_t>(radii.size()); }
+    int64_t row_params() const noexcept override { return bndim < 0 ? 0 : 1; }
     fp_status check_n(int64_t) const noexcept override { return FP_OK; }
+    fp_status check_batch(int nd, const int64_t *shape) const noexcept override {
+        if (bndim < 0) return FP_OK;
+        if (nd != bndim) return FP_ESHAPE;
+        for (int d = 0; d < nd; ++d)
+            if (shape[d] != bshape[d]) return FP_ESHAPE;
+        return FP_OK;
+    }
 
     // f(m, t) with ||x|| = m / t (with_norm in core/op.hpp), t = 1 unless the
     // norm exceeds the largest double or is subnormal. The formulas read it
@@ -316,14 +337,19 @@ struct L2Ball final : RowOp<L2Ball> {
     }
 
     bool has_value() const noexcept override { return true; }
-    double value_row(const double *x, int64_t n, double tol, double *) const noexcept override {
+    double value_row(const double *x, int64_t n, double tol, double *s) const noexcept override {
+        return value_row_at(0, x, n, tol, s);
+    }
+    double value_row_at(int64_t row, const double *x, int64_t n, double tol, double *) const noexcept override {
+        const double r = rad(row);
         return with_norm(x, n, [=](double m, double t) { return indicator(m / t - r, value_atol(x, n, tol)); });
     }
 
     template <class T>
-    int prox(const T *x, T *z, int64_t n, double, void *, uint8_t *) const noexcept {
+    int prox(const T *x, T *z, int64_t n, double, void *, uint8_t *, int64_t row) const noexcept {
         for (int64_t i = 0; i < n; ++i)
             if (std::isinf(x[i])) return kRowNonFinite;
+        const double r = rad(row);
         return with_norm(x, n, [=](double m, double t) {
             if (m <= r * t) {
                 if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
@@ -339,10 +365,11 @@ struct L2Ball final : RowOp<L2Ball> {
     // is the jvp's: the same norm, bit for bit.
     template <class T>
     int64_t structure(const T *x, const T *, const uint8_t *, int64_t n, double, RowStruct &s,
-                      void *) const noexcept {
+                      void *, int64_t row) const noexcept {
         for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
         const int64_t k = singletons(s, n);
         if (!s.constraint) return k;
+        const double r = rad(row);
         with_norm(x, n, [=, &s](double m, double t) {
             if (m <= r * t) return 0;
             if (s.coef)
@@ -354,7 +381,8 @@ struct L2Ball final : RowOp<L2Ball> {
     }
     template <class T>
     void jvp(const T *x, const T *, const uint8_t *, const T *dx, T *dz, int64_t n, double, double,
-             const double *dp, void *) const noexcept {
+             const double *dp, void *, int64_t row) const noexcept {
+        const double r = rad(row);
         with_norm_dot(x, dx, n, [=](double m, double t, double ud) {
             if (m <= r * t) {
                 if (dz != dx) std::memcpy(dz, dx, static_cast<size_t>(n) * sizeof(T));
@@ -370,7 +398,8 @@ struct L2Ball final : RowOp<L2Ball> {
     }
     template <class T>
     void vjp(const T *x, const T *, const uint8_t *, const T *g, T *gx, int64_t n, double,
-             double *acc, void *) const noexcept {
+             double *acc, void *, int64_t row) const noexcept {
+        const double r = rad(row);
         with_norm_dot(x, g, n, [=](double m, double t, double ug) {
             if (m <= r * t) {
                 if (gx != g) std::memcpy(gx, g, static_cast<size_t>(n) * sizeof(T));
@@ -929,6 +958,13 @@ struct Max final : RowOp<Max> {
 fp_status make_l2_ball(double radius, fp_op **out) {
     if (!finite_nonneg(radius)) return FP_EPARAM;
     *out = new L2Ball(radius);
+    return FP_OK;
+}
+
+fp_status make_l2_ball_radii(Vec radii, int ndim, const int64_t *shape, fp_op **out) {
+    for (double v : radii)
+        if (!finite_nonneg(v)) return FP_EPARAM;
+    *out = new L2Ball(std::move(radii), ndim, shape);
     return FP_OK;
 }
 
