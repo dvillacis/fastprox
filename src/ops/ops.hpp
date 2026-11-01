@@ -36,6 +36,8 @@ fp_status make_soc(fp_op **out);
 
 // projections.cpp
 fp_status make_l2_ball(double radius, fp_op **out);
+// One radius per row of a batch of shape (ndim, shape), radii in C order (since 1.1).
+fp_status make_l2_ball_radii(Vec radii, int ndim, const int64_t *shape, fp_op **out);
 fp_status make_simplex(double radius, fp_op **out);
 fp_status make_l1_ball(double radius, Vec w, fp_op **out);
 fp_status make_linf(double lambda, fp_op **out);

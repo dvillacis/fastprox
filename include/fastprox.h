@@ -170,6 +170,18 @@ FP_API fp_status fp_op_l1_box(double lambda, const fp_array *weights, double lo,
 /* Projection onto ||z||_2 <= radius. theta = (radius). */
 FP_API fp_status fp_op_l2_ball(double radius, fp_op **out);
 
+/* Projection of each row onto ||z||_2 <= r_row, one radius per row (since
+ * 1.1), as the dual step of TV with a weight per pixel. radii: the batch
+ * shape of every call, x's shape without the axis (ndim 0 for a single row),
+ * FP_F32 or FP_F64, any strides; each finite and >= 0, else FP_EPARAM. A
+ * call (fp_prox, fp_prox_steps, fp_prox_conj, fp_value, fp_workspace_create)
+ * with another batch shape gives FP_ESHAPE. theta = the radii in C order, so
+ * fp_vjp's gparams holds one gradient per row and fp_jvp's dparams one
+ * tangent per row; no cross-row sum is formed. Equal radii give the bits of
+ * fp_op_l2_ball for the prox, the derivatives in x and gamma, the value and
+ * the structure. No spectral use (fp_op_spectral_check: FP_EINVAL). */
+FP_API fp_status fp_op_l2_ball_radii(const fp_array *radii, fp_op **out);
+
 /* Projection onto { z >= 0, sum z = radius } (Condat 2016). theta = (radius). */
 FP_API fp_status fp_op_simplex(double radius, fp_op **out);
 

@@ -293,6 +293,10 @@ NB_MODULE(_fastprox, m) {
     m.def("l2_ball", [](double r) {
         return make([&](fp_op **o) { return fp_op_l2_ball(r, o); });
     }, "radius"_a);
+    m.def("l2_ball_radii", [](NdParams radii) {  // since 1.1: one radius per row
+        const fp_array pr = view(radii);
+        return make([&](fp_op **o) { return fp_op_l2_ball_radii(&pr, o); });
+    }, "radii"_a);
     m.def("simplex", [](double r) {
         return make([&](fp_op **o) { return fp_op_simplex(r, o); });
     }, "radius"_a);

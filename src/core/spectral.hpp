@@ -66,7 +66,7 @@ void row_jvp(const fp_op &op, const fp_workspace &ws, int tid, int64_t r, const 
     } else {
         RowBuffers<T> buf(ws, op, tid, n);
         op.jvp_row(ws.xs<T>() + r * n, ws.zs<T>() + r * n, ws.code.data() + r * n, dx, out, n, ws.step(r), 0.0,
-                   nullptr, buf.kernel);
+                   nullptr, buf.kernel, r);
     }
 }
 

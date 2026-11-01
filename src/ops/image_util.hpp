@@ -112,7 +112,7 @@ double fiber_pass_impl(const fp_op &tv, const Geom &g, int a, double lam, const 
             for (int64_t q = 0; q < W; ++q) {
                 if (ident) std::memcpy(bout + q * L, bin + q * L, static_cast<size_t>(L) * sizeof(double));
                 else if (wt) tv.prox_edges(bin + q * L, bout + q * L, L, lam, bw + q * L, scr);
-                else tv.prox_row(bin + q * L, bout + q * L, L, lam, scr, nullptr);
+                else tv.prox_row(bin + q * L, bout + q * L, L, lam, scr, nullptr, 0);
             }
             double acc = 0.0;
             for (int64_t i = 0; i < L; ++i)

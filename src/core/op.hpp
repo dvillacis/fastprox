@@ -47,6 +47,10 @@ namespace fp {
 // Kernels that rescale their input keep the scaled step within it too.
 constexpr double kMaxScaledStep = 0x1p960;
 
+// The most parameters per row an operator may have (fp_op::row_params): the
+// vjp driver gives each row that many local slots on the stack.
+constexpr int64_t kMaxRowParams = 4;
+
 // Derivative of one entry of an elementwise prox:
 //   dz = j dx + dg dgamma + sum_k pv[k] dtheta[pi[k]].
 struct ElemDeriv {
@@ -363,6 +367,21 @@ struct fp_op {
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
 
+    // Parameters per row (since 1.1): k > 0 when theta holds k values for
+    // each row of the one batch shape the operator was built for, row-major
+    // over the rows in canonical order (theta[r k + j]); 0 for every other
+    // operator. Row operators without kinks only. The row kernels get the
+    // row's index r, and read and write theta through the row's own slots:
+    // jvp_row's dparams points at theta's tangent + r k, and vjp_row's acc at
+    // k + 1 local slots (the row's k gradients, then gamma), which the vjp
+    // driver writes to the row's entries of theta's gradient without a
+    // cross-row sum. Parameter gradients then need no reduction blocks of
+    // width nparams() (which grows with the batch).
+    virtual int64_t row_params() const noexcept { return 0; }
+    // Validates the batch shape of a call (x's shape without the axis) for an
+    // operator with row_params(): FP_ESHAPE unless it is the shape built for.
+    virtual fp_status check_batch(int, const int64_t *) const noexcept { return FP_OK; }
+
     // The value g(x) (since 0.5, fp_value), in double: of one row of length n
     // (elementwise and row operators) or one image of the
     // given shape (image operators). The indicator of a set is 0 when x lies
@@ -376,6 +395,11 @@ struct fp_op {
     virtual bool has_value() const noexcept { return false; }
     virtual int64_t value_doubles(int64_t n) const noexcept { return n; }  // scr's length
     virtual double value_row(const double *, int64_t, double, double *) const noexcept { return 0.0; }
+    // value_row of the batch's row r (fp_value's rows): operators with
+    // row_params() override it; the others ignore r.
+    virtual double value_row_at(int64_t, const double *x, int64_t n, double tol, double *scr) const noexcept {
+        return value_row(x, n, tol, scr);
+    }
     virtual double value_image(const double *, const int64_t *, double) const noexcept { return 0.0; }
     // 1D TV only: the row prox with edge weights given per call (n of them,
     // the last 0), for image operators with weights per edge.
@@ -385,32 +409,36 @@ struct fp_op {
     // True when the kernel cannot write its output over its input.
     virtual bool needs_distinct() const noexcept { return false; }
     // Rows are contiguous. code, if not null, receives n bytes of structure.
+    // The last argument of the row kernels is the row's index in the batch
+    // (canonical order), read only by operators with row_params(); callers
+    // outside the drivers (an operator's inner kernel) pass 0.
     virtual int prox_row(const float *, float *, int64_t, double, void *,
-                         uint8_t *) const noexcept {
+                         uint8_t *, int64_t) const noexcept {
         return fp::kRowOk;
     }
     virtual int prox_row(const double *, double *, int64_t, double, void *,
-                         uint8_t *) const noexcept {
+                         uint8_t *, int64_t) const noexcept {
         return fp::kRowOk;
     }
     // x, z, code: the saved row. dx is never null; dparams may be null.
     virtual void jvp_row(const float *, const float *, const uint8_t *, const float *, float *,
-                         int64_t, double, double, const double *, void *) const noexcept {}
+                         int64_t, double, double, const double *, void *, int64_t) const noexcept {}
     virtual void jvp_row(const double *, const double *, const uint8_t *, const double *,
                          double *, int64_t, double, double, const double *,
-                         void *) const noexcept {}
-    // gx = J^T g; acc[0..P) += (dz/dtheta)^T g, acc[P] += <dz/dgamma, g>.
+                         void *, int64_t) const noexcept {}
+    // gx = J^T g; acc[0..P) += (dz/dtheta)^T g, acc[P] += <dz/dgamma, g>
+    // (P = row_params() when it is not 0, see there).
     virtual void vjp_row(const float *, const float *, const uint8_t *, const float *, float *,
-                         int64_t, double, double *, void *) const noexcept {}
+                         int64_t, double, double *, void *, int64_t) const noexcept {}
     virtual void vjp_row(const double *, const double *, const uint8_t *, const double *,
-                         double *, int64_t, double, double *, void *) const noexcept {}
+                         double *, int64_t, double, double *, void *, int64_t) const noexcept {}
     // The structure of the derivative at a saved row (since 1.0.2), read
     // from what jvp_row reads (x, z, code after any override, the step) into
     // s; returns the row's number of regions. scratch: scratch_bytes(n).
     virtual int64_t struct_row(const float *, const float *, const uint8_t *, int64_t, double, fp::RowStruct &,
-                               void *) const noexcept { return 0; }
+                               void *, int64_t) const noexcept { return 0; }
     virtual int64_t struct_row(const double *, const double *, const uint8_t *, int64_t, double, fp::RowStruct &,
-                               void *) const noexcept { return 0; }
+                               void *, int64_t) const noexcept { return 0; }
     // Image operators (since 1.0.2): the region label of each entry (C order)
     // in the image's saved structure, after any override, and their number;
     // every entry FREE with sign +1, no constraint. The driver renumbers the
@@ -965,32 +993,43 @@ struct ElemOp : fp_op {
 template <class D>
 struct RowOp : fp_op {
     static constexpr int kStruct = FP_STRUCT_NONE;
+    // True when D's kernels take the row's index as a last argument (an
+    // operator with row_params()).
+    static constexpr bool kRowIndex = false;
     bool elementwise() const noexcept override { return false; }
     int struct_kind() const noexcept override { return D::kStruct; }
 
 #define FP_ROW_FORWARD(T)                                                                        \
-    int prox_row(const T *x, T *z, int64_t n, double gamma, void *scratch, uint8_t *code)        \
-        const noexcept override {                                                                \
-        return static_cast<const D *>(this)->template prox<T>(x, z, n, gamma, scratch, code);    \
+    int prox_row(const T *x, T *z, int64_t n, double gamma, void *scratch, uint8_t *code,        \
+                 int64_t row) const noexcept override {                                          \
+        const D *d = static_cast<const D *>(this);                                               \
+        if constexpr (D::kRowIndex) return d->template prox<T>(x, z, n, gamma, scratch, code, row); \
+        else return d->template prox<T>(x, z, n, gamma, scratch, code);                          \
     }                                                                                            \
     void jvp_row(const T *x, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n,     \
-                 double gamma, double dgamma, const double *dparams, void *scratch)              \
-        const noexcept override {                                                                \
-        static_cast<const D *>(this)->template jvp<T>(x, z, code, dx, dz, n, gamma, dgamma,      \
-                                                      dparams, scratch);                         \
+                 double gamma, double dgamma, const double *dparams, void *scratch,              \
+                 int64_t row) const noexcept override {                                          \
+        const D *d = static_cast<const D *>(this);                                               \
+        if constexpr (D::kRowIndex)                                                              \
+            d->template jvp<T>(x, z, code, dx, dz, n, gamma, dgamma, dparams, scratch, row);     \
+        else                                                                                     \
+            d->template jvp<T>(x, z, code, dx, dz, n, gamma, dgamma, dparams, scratch);          \
     }                                                                                            \
     void vjp_row(const T *x, const T *z, const uint8_t *code, const T *g, T *gx, int64_t n,      \
-                 double gamma, double *acc, void *scratch) const noexcept override {             \
-        static_cast<const D *>(this)->template vjp<T>(x, z, code, g, gx, n, gamma, acc,          \
-                                                      scratch);                                  \
+                 double gamma, double *acc, void *scratch, int64_t row) const noexcept override { \
+        const D *d = static_cast<const D *>(this);                                               \
+        if constexpr (D::kRowIndex) d->template vjp<T>(x, z, code, g, gx, n, gamma, acc, scratch, row); \
+        else d->template vjp<T>(x, z, code, g, gx, n, gamma, acc, scratch);                      \
     }                                                                                            \
     int64_t struct_row(const T *x, const T *z, const uint8_t *code, int64_t n, double gamma,     \
-                       RowStruct &s, void *scratch) const noexcept override {                    \
-        if constexpr (D::kStruct != FP_STRUCT_NONE)                                              \
-            return static_cast<const D *>(this)->template structure<T>(x, z, code, n, gamma, s,  \
-                                                                       scratch);                 \
-        else                                                                                     \
+                       RowStruct &s, void *scratch, int64_t row) const noexcept override {       \
+        const D *d = static_cast<const D *>(this);                                               \
+        if constexpr (D::kStruct == FP_STRUCT_NONE)                                              \
             return 0;                                                                            \
+        else if constexpr (D::kRowIndex)                                                         \
+            return d->template structure<T>(x, z, code, n, gamma, s, scratch, row);              \
+        else                                                                                     \
+            return d->template structure<T>(x, z, code, n, gamma, s, scratch);                   \
     }
     FP_ROW_FORWARD(float)
     FP_ROW_FORWARD(double)

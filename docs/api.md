@@ -33,6 +33,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Box | $\mathrm{lo} \le z \le \mathrm{hi}$ | `fp_op_box(lo, hi, lower, upper)` | `Box(lower, upper)`, `project_box` | (lower…, upper…) |
 | Nonnegative orthant | $z \ge 0$ | `fp_op_nonneg()` | `NonNeg`, `project_nonneg` | none |
 | ℓ2 ball | $\lVert z \rVert_2 \le r$ | `fp_op_l2_ball(r)` | `L2Ball`, `project_l2_ball` | (r) |
+| ℓ2 ball, one radius per row (*since 1.1*) | $\lVert z_{(b)} \rVert_2 \le r_b$ for each row $b$ | `fp_op_l2_ball_radii(radii)` | `L2Ball(radius=array)`, `project_l2_ball(x, array)` | (r₁…, one per row) |
 | Simplex | $z \ge 0$, $\sum_i z_i = r$ | `fp_op_simplex(r)` | `Simplex`, `project_simplex` | (r) |
 | Weighted ℓ1 ball | $\sum_i w_i \lvert z_i \rvert \le r$ | `fp_op_l1_ball(r, w)` | `L1Ball(radius, weights)`, `project_l1_ball` | (r) |
 | ℓ∞ norm | $\lambda \lVert z \rVert_\infty$ | `fp_op_linf(λ)` | `LInf`, `prox_linf` | (λ) |
@@ -1370,6 +1371,43 @@ With `keep_structure`, the steps are saved for the derivatives:
 There is no conjugate form. In Python, `gamma` may be an array that broadcasts
 to the batch shape, in `prox` (and `prox_from` for spectral operators), and
 so may `gamma` in `fastprox.torch.prox` and `fastprox.jax.prox` (below).
+
+### One radius per row (*since 1.1*)
+
+```c
+/* radii: the batch shape, x's shape without opt.axis (ndim 0 for one row) */
+fp_op_l2_ball_radii(&radii, &op);
+fp_prox(op, 1.0, &x, &z, &opt, ws, NULL);
+fp_vjp(op, ws, &g, &gx, &ggamma, &gradii);  /* gradii: one per row, in C order */
+```
+
+`fp_op_l2_ball_radii` projects each row onto its own ball,
+$\lVert z_{(b)} \rVert_2 \le r_b$. This is the dual step of TV with one
+weight per pixel, as in iteratively reweighted ℓ1: for a dual of shape
+(ny, nx, 2) along the last axis, the radii have shape (ny, nx). The operator
+is built for that batch shape, as weighted isotropic TV is built for one
+image shape. Any call with another batch shape gives `FP_ESHAPE`: `fp_prox`,
+`fp_prox_steps`, `fp_prox_conj`, `fp_value` and `fp_workspace_create`.
+
+- $\theta$ is the radii in C order, so `fp_op_nparams` is the number of rows.
+  `fp_vjp` writes one gradient per row and `fp_jvp` reads one tangent per row.
+  Each row's gradient is computed on that row alone, with no sum across rows,
+  so it does not depend on the thread count.
+- Each row gives the bits of `fp_op_l2_ball` with its radius on that row
+  alone: the prox, the conjugate, the derivatives in x, γ and the row's
+  radius, the value and the structure. Equal radii therefore give the bits
+  of the single radius, except the radius gradient, which is per row here
+  and a sum over rows there.
+- Radii are finite and ≥ 0 (`FP_EPARAM` otherwise), FP_F32 or FP_F64, with
+  any strides. A stride of 0 broadcasts a radius.
+- There is no spectral use: `fp_op_spectral_check` gives `FP_EINVAL`.
+
+In Python, `L2Ball(radius=r)` with an array `r` of the batch shape builds it.
+Its `grads.radius` and `dparams={"radius": ...}` have that shape, and a call
+with another batch shape raises ValueError. `project_l2_ball(x, radius=r)`
+broadcasts `r` to the batch shape first. `fastprox.torch.prox(fp.L2Ball, x,
+radius=r)` and `fastprox.jax.prox` take a tensor `r` of the batch shape and
+return its gradient.
 
 ### Warm starts and the dual (*since 0.2*)
 
