@@ -139,9 +139,26 @@ Notes:
   audit M5: a weight of $10^{-180}$ squared to 0 and dropped its edge at
   $\gamma = 10^{180}$). A positive weight below $2^{-511}$ times the largest,
   whose square would not be a normal number even then, is `FP_EPARAM`.
-  For $n = 2$ it is 1D TV. Derivatives are in closed form: the Hessian of the
-  prox problem is that tridiagonal matrix minus a rank-one term (Sherman–
-  Morrison), so a JVP or VJP costs three $O(n)$ solves.
+  For $n = 2$ it is 1D TV. Derivatives are in closed form. Inside, $J$ is
+  the piecewise mean. Outside, $J = H^{-1}$ with
+  $H = I + \mu^{-1} D^\top W (I - n n^\top) W D$, where $n$ is the unit dual
+  direction. $H$ is symmetric with $H \succeq I$, so the spectrum of $J$ lies
+  in $(0, 1]$. $J$ is applied as a bordered tridiagonal system (two $O(n)$
+  substitutions). The derivatives take $\mu$ and $n$ from the root solve
+  itself, run again on the saved $x$, step and weights, never from differences
+  of the saved $z$. So a JVP or VJP costs about one prox, plus those two
+  passes (*revised in 1.1*, SCD review S2). Before, $n$ was read from $Dz$ and
+  $H$ inverted by Sherman–Morrison. Near the boundary
+  $\lVert u_0 \rVert = \gamma$ that had a cancelling denominator, and gave
+  eigenvalues of $J$ up to 7. Against an 80-digit reference built from the
+  original inputs, the JVPs, VJPs and parameter tangents agree to about
+  $10^{-15}$ on and just outside the boundary (unit-scale rows, weights
+  within four orders of magnitude), and to $3 \cdot 10^{-8}$ in float32. No
+  accuracy is claimed independently of the weights' ratio. Where $\mu$
+  leaves the range of doubles (a tiny step), $J = I$ and $n$ comes from
+  $W D x$, which are both exact to $O(1/\mu)$. A point within the rounding of
+  the inside test can land on either side. The boundary itself,
+  $\lVert u_0 \rVert = \gamma$, is inside.
 - **Isotonic regression** minimises $\sum_i w_i (z_i - x_i)^2$, which is the
   Euclidean projection only for unit (or equal) weights. With unequal
   weights it is the projection $P_C^W$ in the metric $W$, and
@@ -907,7 +924,7 @@ makes each unit's largest $|a_i|$ equal to 1.
 | Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks, $\sigma_i = \operatorname{sign}(x_i)$ | — | PROJECTOR |
 | 1D TV | FREE | the segments | — | PROJECTOR |
 | 1D TV ball | FREE | inside: singletons; on the sphere: the segments | on the sphere: $D^\top(w \odot \operatorname{sign}(Dz))$ | PROJECTOR |
-| 1D TV with ℓ2 of differences | FREE | dual inside its ball: the pieces between zero weights; else singletons | — | CURVED |
+| 1D TV with ℓ2 of differences | FREE | dual inside its ball, $\lVert u_0 \rVert \le \gamma$: the pieces between zero weights; else singletons (a finite root: $J$ positive definite) | — | CURVED |
 | Anisotropic TV, graph TV, tree TV | FREE | the regions | — | PROJECTOR |
 | Isotropic TV | FREE | the flat regions | — | CURVED |
 

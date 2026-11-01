@@ -381,3 +381,101 @@ def graph_tv_kkt_residual(x, z, gamma, edges, w):
     cap[:n, t] = np.maximum(-b, 0.0)
     need = cap[s, :n].sum()
     return (need - _max_flow(cap, s, t) + abs(b.sum())) / scale
+
+
+# --------------------------------------- 1D TV with l2, in high precision (S2)
+#
+# For the SCD review's S2: the prox of gamma ||W D z||_2 in decimal arithmetic
+# from the original inputs, independently of the kernel. The dual u solves
+# (mu I + T) u = W D x with T = W D D^T W (tridiagonal on each run of positive
+# weights), mu = 0 inside (||u0|| <= gamma), else the root of
+# 1/||u(mu)|| = 1/gamma by Newton's method from 0 (concave and increasing:
+# the iterates rise to it); z = x - D^T W u. Derivatives are central
+# differences of it at h = 1e-30 with 80 digits: no Jacobian formula, and no
+# rounded mu or n from the implementation, enters.
+
+def _hp_pieces(w):
+    out, s = [], None
+    for e, v in enumerate(w):
+        if v > 0 and s is None:
+            s = e
+        if v == 0 and s is not None:
+            out.append((s, e))
+            s = None
+    if s is not None:
+        out.append((s, len(w)))
+    return out
+
+
+def _hp_solve(mu, w, b):
+    """(mu I + T) u = b, by the Thomas algorithm on each run of positive weights."""
+    from decimal import Decimal
+    u = [Decimal(0)] * len(w)
+    for lo, hi in _hp_pieces(w):
+        m = hi - lo
+        c, d = [Decimal(0)] * m, [Decimal(0)] * m
+        for k in range(m):
+            e = lo + k
+            off = -w[e - 1] * w[e] if k > 0 else Decimal(0)
+            den = mu + 2 * w[e] * w[e] - (off * c[k - 1] if k > 0 else 0)
+            c[k] = -w[e] * w[e + 1] / den if k + 1 < m else Decimal(0)
+            d[k] = (b[e] - (off * d[k - 1] if k > 0 else 0)) / den
+        for k in range(m - 1, -1, -1):
+            u[lo + k] = d[k] - (c[k] * u[lo + k + 1] if k + 1 < m else 0)
+    return u
+
+
+def tv1d_l2_hp(x, gamma, w, prec=80):
+    """(z, inside) in decimal for inputs given as Decimals or floats (taken exactly)."""
+    from decimal import Decimal, localcontext
+    D = lambda v: v if isinstance(v, Decimal) else Decimal(float(v))
+    with localcontext() as ctx:
+        ctx.prec = prec
+        x, w, gamma = [D(v) for v in x], [D(v) for v in w], D(gamma)
+        n = len(x)
+        b = [w[e] * (x[e + 1] - x[e]) for e in range(n - 1)]
+        z_of = lambda u: [x[i] - (w[i - 1] * u[i - 1] if i > 0 else 0) + (w[i] * u[i] if i < n - 1 else 0)
+                          for i in range(n)]
+        u = _hp_solve(Decimal(0), w, b)
+        if gamma == 0:
+            return x, False
+        if sum(v * v for v in u).sqrt() <= gamma:
+            return z_of(u), True
+        mu = Decimal(0)
+        for _ in range(400):
+            u = _hp_solve(mu, w, b)
+            nu = sum(v * v for v in u).sqrt()
+            y = _hp_solve(mu, w, u)
+            step = (1 / nu - 1 / gamma) * nu ** 3 / sum(a * c for a, c in zip(u, y))
+            mu -= step
+            if abs(step) <= mu * Decimal(10) ** (8 - prec):
+                break
+        u = _hp_solve(mu, w, b)
+        nu = sum(v * v for v in u).sqrt()
+        return z_of([v * gamma / nu for v in u]), False
+
+
+def tv1d_l2_hp_dir(x, gamma, w, v=None, dgamma=0.0, dw=None, h="1e-30", prec=80):
+    """The derivative of the prox along (v, dgamma, dw), by central differences in decimal."""
+    from decimal import Decimal, localcontext
+    with localcontext() as ctx:
+        ctx.prec = prec
+        h = Decimal(h)
+        X, W, G = [Decimal(float(a)) for a in x], [Decimal(float(a)) for a in w], Decimal(float(gamma))
+        V = [Decimal(float(a)) for a in v] if v is not None else [Decimal(0)] * len(X)
+        dW = [Decimal(float(a)) for a in dw] if dw is not None else [Decimal(0)] * len(W)
+        dG = Decimal(float(dgamma))
+        side = lambda s: tv1d_l2_hp([a + s * h * b for a, b in zip(X, V)], G + s * h * dG,
+                                    [a + s * h * b for a, b in zip(W, dW)], prec)[0]
+        zp, zm = side(1), side(-1)
+        return np.array([float((p - m) / (2 * h)) for p, m in zip(zp, zm)])
+
+
+def tv1d_l2_hp_margin(x, gamma, w, prec=80):
+    """||u0|| / gamma - 1 in high precision: > 0 outside."""
+    from decimal import Decimal, localcontext
+    with localcontext() as ctx:
+        ctx.prec = prec
+        X, W = [Decimal(float(a)) for a in x], [Decimal(float(a)) for a in w]
+        u = _hp_solve(Decimal(0), W, [W[e] * (X[e + 1] - X[e]) for e in range(len(X) - 1)])
+        return float(sum(v * v for v in u).sqrt() / Decimal(float(gamma)) - 1)
