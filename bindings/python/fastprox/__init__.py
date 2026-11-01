@@ -411,7 +411,10 @@ class Structure:
         (weighted) region means, then, under an active constraint, the
         component along $b = Q a$ removed, $Q v - (\langle b, Q v \rangle /
         \langle b, b \rangle)\, b$ with $Q$ the projector onto
-        $\operatorname{span} M$. For a ``"projector"`` it is ``jvp`` itself."""
+        $\operatorname{span} M$. For a ``"projector"`` it is ``jvp`` itself.
+        For ``"weighted"`` it is not symmetric, so it is not the $P$ of an SCD
+        pair; that is the Euclidean ``expand(reduce(v) / reduce(sign))``, with
+        $W = I - P$ (docs/api.md, "SCD subspaces"; since 1.1)."""
         v = np.asarray(v, np.float64)
         gl, free = self._free()
         K = int(self.offsets[-1])

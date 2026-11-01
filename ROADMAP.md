@@ -23,7 +23,7 @@ A review of 2026-10-28 checked, operator by operator, that the structure of 1.0.
 
 **Docs**
 
-- [ ] S4: Weighted isotonic regression: the (P, W) pair is the Euclidean projector onto L and I − P, with v = D\_w(x − z), not `s.project` (the diag(w) projector, not symmetric) — [spec](docs/scd-review-2026-10.md#s4)
+- [x] S4: Weighted isotonic regression: the (P, W) pair is the Euclidean projector onto L and I − P, with v = D\_w(x − z), not `s.project` (the diag(w) projector, not symmetric) — [spec](docs/scd-review-2026-10.md#s4) — Done (2026-11-01): `docs/api.md` ("SCD subspaces" by kind, the isotonic row, the `s.project` comment), spec Section 7 (the weighted isotonic bullet and "Every kind"), the `Structure.project` docstring; `test_weighted_isotonic_euclidean_pair` in `test_structure.py`
 - [ ] S5: State the SCD assumptions and distinguish limiting pieces, numerical products and range descriptors. One valid element suffices under all hypotheses of Algorithm 3.8/Theorem 3.9; neither arbitrary overrides nor `deriv.exact` certify membership. Branch arrays explore supported selections, not all subspaces. Preserve the discontinuous-class exclusions, explain CURVED inversion and indefinite SCAD/MCP curvature. Update `docs/api.md`, spec Section 7 and the Newton example docstring — [spec](docs/scd-review-2026-10.md#s5)
 
 **Tests and release**
