@@ -4358,6 +4358,105 @@ static void test_group_l2_live_kink() {
     fp_op_free(op);
 }
 
+// 1D TV with the l2 norm of the differences on its boundary (SCD review S2):
+// 1.0.2 read the dual direction from differences of the saved z and inverted
+// H by Sherman-Morrison, which near ||u0|| = gamma gave eigenvalues of J up
+// to 7. A symmetric J has its spectrum in [0, 1] iff ||J v||^2 <= v^T J v for
+// every v, checked on the basis and on random vectors.
+static bool firm(const Vec &J, int64_t n, double tol) {
+    std::mt19937_64 g(5);
+    std::normal_distribution<double> nd;
+    bool ok = true;
+    for (int64_t i = 0; i < n && ok; ++i)
+        for (int64_t j = 0; j < i; ++j) ok = ok && std::fabs(J[i * n + j] - J[j * n + i]) <= tol;
+    for (int k = 0; k < n + 20 && ok; ++k) {
+        Vec v(static_cast<size_t>(n)), Jv(static_cast<size_t>(n), 0.0);
+        for (int64_t i = 0; i < n; ++i) v[i] = k < n ? (i == k ? 1.0 : 0.0) : nd(g);
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j) Jv[i] += J[i * n + j] * v[j];
+        const double vJv = dot(v, Jv), vv = dot(v, v);
+        ok = dot(Jv, Jv) <= vJv + tol * vv && vJv <= vv * (1 + tol) && vJv >= -tol * vv;
+    }
+    return ok;
+}
+
+static void test_tv1d_l2_boundary() {
+    // ||u0|| = 5 exactly (u0 = (1, 2, 2, 4)): inside, the mean; one ulp below
+    // gamma, outside with mu a rounding above 0: J positive definite and the
+    // limit projector onto {d : D d in span u0} to O(mu), singletons.
+    {
+        fp_op *op;
+        CHECK_OK(fp_op_tv1d_l2(nullptr, &op));
+        const int64_t n = 5;
+        Arr x({1, n}, {-1, -1, 0, -2, 4}), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 5.0, &x.a, &z.a, &o, ws, nullptr));
+        Vec J = dense_jacobian(op, ws, n);
+        bool mean = true;
+        for (double v : J) mean = mean && std::fabs(v - 0.2) <= 1e-16;
+        CHECK(mean);
+        CHECK_OK(fp_prox(op, std::nextafter(5.0, 0.0), &x.a, &z.a, &o, ws, nullptr));
+        J = dense_jacobian(op, ws, n);
+        CHECK(firm(J, n, 1e-13));
+        // The limit: d = cumsum(0, u0) / 5 and 1 span the range.
+        const double d[5] = {0, 0.2, 0.6, 1.0, 1.8};
+        double dm = 0.0, dd = 0.0;
+        for (double v : d) dm += v / 5;
+        for (double v : d) dd += (v - dm) * (v - dm);
+        double err = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j)
+                err = std::max(err, std::fabs(J[i * n + j] - (0.2 + (d[i] - dm) * (d[j] - dm) / dd)));
+        CHECK(err <= 1e-13);
+        std::vector<int64_t> rs = {1, n};
+        std::vector<int8_t> st(static_cast<size_t>(n), 7);
+        fp_array sa = i8_view(st, rs);
+        int64_t nreg = 0;
+        CHECK_OK(fp_workspace_states(ws, &sa, nullptr));
+        CHECK_OK(fp_workspace_regions(ws, nullptr, nullptr, &nreg, 1));
+        CHECK(nreg == n);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    // The report's rows: random, centred, scaled so that ||u0|| = gamma = 1 to
+    // rounding (either side), with weights or without.
+    std::mt19937_64 g(28);
+    std::normal_distribution<double> nd;
+    std::uniform_real_distribution<double> ud(0.5, 2.0);
+    int bad = 0;
+    for (int trial = 0; trial < 200; ++trial) {
+        const int64_t n = trial % 2 ? 5 : 9;
+        Vec w(static_cast<size_t>(n - 1), 1.0), x(static_cast<size_t>(n));
+        if (trial % 4 >= 2)
+            for (double &v : w) v = ud(g);
+        double m = 0.0;
+        for (double &v : x) m += (v = nd(g)) / static_cast<double>(n);
+        for (double &v : x) v -= m;
+        double U = 0.0, r = 0.0;  // ||u0||: u0_e = -U_e / w_e
+        for (int64_t e = 0; e + 1 < n; ++e) {
+            U += x[e];
+            r += U * U / (w[e] * w[e]);
+        }
+        r = std::sqrt(r);
+        for (double &v : x) v /= r;
+        fp_op *op;
+        Arr wa({n - 1}, w);
+        CHECK_OK(fp_op_tv1d_l2(&wa.a, &op));
+        Arr xa({1, n}, x), z({1, n});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(op, &xa.a, &o, &ws));
+        CHECK_OK(fp_prox(op, 1.0, &xa.a, &z.a, &o, ws, nullptr));
+        bad += !firm(dense_jacobian(op, ws, n), n, 1e-12);
+        fp_workspace_free(ws);
+        fp_op_free(op);
+    }
+    CHECK(bad == 0);
+    if (bad) std::fprintf(stderr, "  tv1d_l2 boundary: %d of 200 rows outside [0, 1]\n", bad);
+}
+
 // The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.1): each
 // row is fp_op_l2_ball with its radius on that row alone, bit for bit (prox,
 // conjugate, steps per row, jvp with the row's radius tangent, vjp with the
@@ -5730,6 +5829,7 @@ int main() {
     test_row_scratch_bytes();
     test_l2_ball_radii();
     test_group_l2_live_kink();
+    test_tv1d_l2_boundary();
     test_thread_cap();  // last: it grows the pool
     std::printf("%d checks, %d failures (default threads: %d)\n", g_checks, g_fail, fp_default_threads());
     return g_fail != 0;

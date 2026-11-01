@@ -324,3 +324,233 @@ def test_entries_near_overflow():
         y = rng.normal(size=19)
         np.testing.assert_allclose(op.prox(y * 2.0**k, 0.7 * 2.0**(k - 100)) / 2.0**k,
                                    op.prox(y, 0.7 * 2.0**-100), rtol=0, atol=1e-15)
+
+
+# ------------------------------------------- the boundary and scales (SCD review S2)
+
+def _dense(op, x, g, dtype=np.float64):
+    """J densely (rows J e_i, J symmetric) and the context of x itself."""
+    n = x.size
+    _, cb = op.prox(np.tile(x.astype(dtype), (n, 1)), g, keep=True)
+    J = op.jvp(cb, np.eye(n, dtype=dtype)).astype(float)
+    return J, op.prox(x.astype(dtype), g, keep=True)[1]
+
+
+def _inside(ctx, n):
+    """The selected side, from the descriptor: inside has the pieces as regions."""
+    s = ctx.structure()
+    return np.unique(s.labels).size < n or n == 1
+
+
+def _mean_matrix(w, n):
+    M = np.zeros((n, n))
+    s = 0
+    for e in range(n):
+        if e == n - 1 or w[e] == 0:
+            M[s:e + 1, s:e + 1] = 1.0 / (e + 1 - s)
+            s = e + 1
+    return M
+
+
+def _limit_projector(x, w):
+    """The mu -> 0 outside limit: the projector onto {d : W D d in span n},
+    n = u0 / ||u0|| (spec S2, item 5), from the piece indicators and a d with
+    W D d = n."""
+    n = x.size
+    u0 = dual(x, ref.tv1d_l2(x, 1e300, w), w)[0]
+    nd = u0 / np.linalg.norm(u0)
+    d = np.concatenate([[0.0], np.cumsum(np.where(w > 0, nd / np.where(w > 0, w, 1), 0.0))])
+    V = [d] + [np.where(np.cumsum(np.concatenate([[0], w == 0])) == k, 1.0, 0.0) for k in range((w == 0).sum() + 1)]
+    Q, _ = np.linalg.qr(np.column_stack(V))
+    return Q @ Q.T
+
+
+def _boundary_rows(rng, count):
+    """(x, gamma, w, distance) on and just outside the boundary ||u0|| = gamma."""
+    out = []
+    for k in range(count):
+        n = (5, 17, 64)[k % 3]
+        w = rng.uniform(0.5, 2.0, n - 1)
+        if k % 2:
+            w[rng.random(n - 1) < 0.2] = 0.0
+        x = rng.normal(size=n).cumsum()
+        dist = (0.0, 1e-15, 1e-12, 1e-9, 1e-6, 1e-3)[(k // 6) % 6]
+        out.append((x, rho0(x, w) / (1 + dist), w, dist))
+    return out
+
+
+def test_boundary_spectrum():
+    """The report's counterexample: on the boundary to rounding, 1.0.2 gave
+    eigenvalues of J up to 7 (54 of 200 rows outside [0, 1]), and just
+    outside it, above 1 by up to 5e-5. Now J is symmetric with its spectrum
+    in [0, 1], and its descriptor follows the side it selects: inside the
+    piecewise mean and its pieces, outside singletons."""
+    rng = np.random.default_rng(20261101)
+    for x, g, w, _ in _boundary_rows(rng, 200):
+        op = fp.TV1DL2(w)
+        n = x.size
+        J, ctx = _dense(op, x, g)
+        assert np.abs(J - J.T).max() <= 1e-13
+        ev = np.linalg.eigvalsh((J + J.T) / 2)
+        assert ev.min() >= -1e-12 and ev.max() <= 1 + 1e-12, ev
+        if _inside(ctx, n):
+            np.testing.assert_allclose(J, _mean_matrix(w, n), atol=1e-15)
+        else:
+            assert np.unique(ctx.structure().labels).size == n
+
+
+def test_against_high_precision():
+    """J, the parameter tangents and the VJP against central differences of an
+    80-digit prox from the original inputs (reference.tv1d_l2_hp), on and near
+    the boundary and at moderate distances, with and without zero weights.
+    Rows within the rounding of the inside test may select either side: they
+    are counted apart, and the side selected is the documented one."""
+    rng = np.random.default_rng(7)
+    rows = _boundary_rows(rng, 36)
+    for k in range(9):  # moderate distances, and weights over four orders
+        n = (5, 17, 5)[k % 3]
+        w = rng.uniform(0.5, 2.0, n - 1) if k < 6 else 10.0 ** rng.uniform(-2, 2, n - 1)
+        x = rng.normal(size=n).cumsum()
+        rows.append((x, rho0(x, w) * rng.uniform(0.2, 0.8), w, None))
+    ambiguous = 0
+    for x, g, w, _ in rows:
+        n = x.size
+        if n == 64 and rng.random() < 0.75:
+            continue  # a few long rows: the reference costs O(n) solves per direction
+        op = fp.TV1DL2(w)
+        _, ctx = op.prox(x, g, keep=True)
+        margin = ref.tv1d_l2_hp_margin(x, g, w)
+        if _inside(ctx, n) != (margin <= 0):
+            assert abs(margin) <= 1e-14  # the rounding of the inside test
+            ambiguous += 1
+            continue
+        if margin <= 0:
+            continue  # inside: the piecewise mean (test_boundary_spectrum)
+        V = np.eye(n) if n == 5 else rng.normal(size=(3, n))
+        g_out = rng.normal(size=n)
+        gx, grads = op.vjp(ctx, g_out)
+        for v in V:
+            jr = ref.tv1d_l2_hp_dir(x, g, w, v)
+            np.testing.assert_allclose(op.jvp(ctx, v), jr, rtol=0, atol=1e-12 * np.abs(v).max())
+            assert abs(gx @ v - g_out @ jr) <= 1e-12 * np.abs(g_out).sum() * np.abs(v).max()
+        dg = ref.tv1d_l2_hp_dir(x, g, w, dgamma=1.0)
+        np.testing.assert_allclose(op.jvp(ctx, None, 1.0), dg, rtol=0, atol=1e-12 * (1 + np.abs(dg).max()))
+        assert grads.gamma == pytest.approx(g_out @ dg, rel=1e-11, abs=1e-12 * np.abs(g_out).sum())
+        # Positive weights only: a zero weight's direction changes the support
+        # (the continuous extension gives it zero, spec S2 item 3).
+        dw = rng.normal(size=n - 1) * (w > 0)
+        dzw = ref.tv1d_l2_hp_dir(x, g, w, dw=dw)
+        np.testing.assert_allclose(op.jvp(ctx, None, 0.0, dw), dzw, rtol=0, atol=1e-12 * (1 + np.abs(dzw).max()))
+        assert grads.params @ dw == pytest.approx(g_out @ dzw, rel=1e-11, abs=1e-12 * np.abs(g_out).sum())
+    assert ambiguous <= 8
+
+
+def test_high_precision_reference_is_stable():
+    """The reference at 80 digits and h = 1e-30 against 110 digits and
+    h = 1e-45, just outside the boundary, where the prox is least smooth."""
+    rng = np.random.default_rng(3)
+    x, w = rng.normal(size=5).cumsum(), rng.uniform(0.5, 2.0, 4)
+    g = rho0(x, w) / (1 + 1e-12)
+    v = rng.normal(size=5)
+    a = ref.tv1d_l2_hp_dir(x, g, w, v)
+    b = ref.tv1d_l2_hp_dir(x, g, w, v, h="1e-45", prec=110)
+    np.testing.assert_allclose(a, b, rtol=0, atol=1e-20)
+
+
+@pytest.mark.parametrize("x, w", [
+    (np.array([-1.0, -1, 0, -2, 4]), np.ones(4)),  # u0 = (1, 2, 2, 4), ||u0|| = 5
+    (np.array([-3.0, -5, 8]), np.array([1.0, 2])),  # u0 = (3, 4)
+    (np.array([-3.0, 3, -4, 4, 0]), np.array([1.0, 0, 1, 1])),  # pieces; u0 = (3, 0, 4, 0)
+])
+def test_exact_boundary(x, w):
+    """||u0|| = gamma = 5 exactly: inside (the documented side), J the piecewise
+    mean and the pieces as regions. One ulp below, outside: mu is a rounding
+    above 0, J is the limit projector onto {d : W D d in span n} to O(mu), and
+    the descriptor singletons (J is positive definite at a finite root)."""
+    op = fp.TV1DL2(w)
+    n = x.size
+    J, ctx = _dense(op, x, 5.0)
+    assert _inside(ctx, n)
+    np.testing.assert_allclose(J, _mean_matrix(w, n), atol=1e-15)
+    J, ctx = _dense(op, x, np.nextafter(5.0, 0.0))
+    assert not _inside(ctx, n)
+    np.testing.assert_allclose(J, _limit_projector(x, w), atol=1e-13)
+    ev = np.linalg.eigvalsh((J + J.T) / 2)
+    assert ev.min() >= -1e-12 and ev.max() <= 1 + 1e-12
+
+
+def test_derivatives_at_degenerate_scales():
+    """Outside points where the saved z cannot give the direction n, which
+    1.0.2 read from its differences: n and mu come from the root solve."""
+    rng = np.random.default_rng(12)
+    op = fp.TV1DL2()
+    D = np.diff(np.eye(17), axis=0)
+    # gamma so small that the saved z is x: J = I to rounding, dz/dgamma = -D^T n.
+    x = rng.normal(size=17).cumsum()
+    nd = D @ x / np.linalg.norm(D @ x)
+    for g in (1e-20, 1e-310):  # a regular root, and gamma t below the normal range
+        z, ctx = op.prox(x, g, keep=True)
+        np.testing.assert_array_equal(z, x)
+        v = rng.normal(size=17)
+        np.testing.assert_allclose(op.jvp(ctx, v), v, rtol=0, atol=1e-15)
+        np.testing.assert_allclose(op.jvp(ctx, None, 1.0), -D.T @ nd, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(op.jvp(op.prox(x, 1e-20, keep=True)[1], None, 1.0),
+                               ref.tv1d_l2_hp_dir(x, 1e-20, np.ones(16), dgamma=1.0), rtol=0, atol=1e-14)
+    # A root beyond the range of doubles (gamma near its bottom, a long row).
+    xa = np.where(np.arange(64) % 2, 1.0, -1.0)
+    Da = np.diff(np.eye(64), axis=0)
+    _, ctx = op.prox(xa, 4.6e-308, keep=True)
+    np.testing.assert_allclose(op.jvp(ctx, None, 1.0), -Da.T @ (Da @ xa) / np.linalg.norm(Da @ xa), atol=1e-15)
+    np.testing.assert_allclose(op.jvp(ctx, np.ones(64)), np.ones(64), atol=1e-15)
+    # A large common offset, just outside: the saved z is constant (its
+    # differences are below the offset's rounding) though mu > 0. 1.0.2 took
+    # the identity there; J is that of the centred row (translation invariance).
+    # The pattern's mean is exact, so the inside test is exact at the offset.
+    k = np.array([0.0, 1, 3, 2, 4])
+    g = rho0(16 * k, np.ones(4)) / (1 + 1e-6)
+    z, ctx = op.prox(1e17 + 16 * k, g, keep=True)
+    assert np.all(np.diff(z) == 0)
+    _, c0 = op.prox(16 * k, g, keep=True)
+    assert not _inside(ctx, 5)
+    for v in np.eye(5):
+        np.testing.assert_allclose(op.jvp(ctx, v), op.jvp(c0, v), rtol=0, atol=1e-15)
+        np.testing.assert_allclose(op.jvp(ctx, v), ref.tv1d_l2_hp_dir(16 * k, g, np.ones(4), v), rtol=0, atol=1e-12)
+    # All-zero weights: every entry its own piece, J = I.
+    opz = fp.TV1DL2(np.zeros(4))
+    J, cz = _dense(opz, rng.normal(size=5), 1.0)
+    np.testing.assert_array_equal(J, np.eye(5))
+    assert np.unique(cz.structure().labels).size == 5
+
+
+def test_float32_near_boundary():
+    """float32 rows on and near the boundary: J against the float64 reference
+    of the same (float32) inputs, symmetric with its spectrum in [0, 1] at
+    float32 accuracy."""
+    rng = np.random.default_rng(32)
+    for x, g, w, dist in _boundary_rows(rng, 30):
+        x, w = x.astype(np.float32), w.astype(np.float32)
+        g = float(np.float32(g))
+        op = fp.TV1DL2(w)
+        J, ctx = _dense(op, x, g, np.float32)
+        assert np.abs(J - J.T).max() <= 1e-6
+        ev = np.linalg.eigvalsh((J + J.T) / 2)
+        assert ev.min() >= -1e-5 and ev.max() <= 1 + 1e-5
+        if dist and dist >= 1e-6 and not _inside(ctx, x.size):
+            v = rng.normal(size=x.size).astype(np.float32)
+            jr = ref.tv1d_l2_hp_dir(x.astype(float), g, w.astype(float), v.astype(float))
+            np.testing.assert_allclose(op.jvp(ctx, v), jr, rtol=0, atol=1e-5 * np.abs(v).max())
+
+
+def test_conj_near_boundary():
+    """After prox_conj (positively homogeneous: y - prox(y) at step 1), J_conj
+    = I - J_inner and the parameter tangents are the inner's negated, near the
+    boundary too; the tangent in sigma is 0."""
+    rng = np.random.default_rng(13)
+    for x, g, w, _ in _boundary_rows(rng, 12):
+        op = fp.TV1DL2(w * g)  # the boundary at step 1
+        _, cc = op.prox_conj(x, 2.5, keep=True)
+        _, ci = op.prox(x, 1.0, keep=True)
+        v, dw = rng.normal(size=x.size), rng.normal(size=x.size - 1)
+        np.testing.assert_allclose(op.jvp(cc, v), v - op.jvp(ci, v), rtol=0, atol=1e-13)
+        np.testing.assert_allclose(op.jvp(cc, None, 0.0, dw), -op.jvp(ci, None, 0.0, dw), rtol=0, atol=1e-13)
+        np.testing.assert_array_equal(op.jvp(cc, None, 1.0), 0.0)

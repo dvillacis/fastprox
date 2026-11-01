@@ -43,16 +43,22 @@
 // gamma times a power of two that brings the largest entry to [0.5, 1). z then
 // comes from one solve with sigma I + kappa K at the final mu.
 //
-// Derivatives. F(z) = z - x + gamma K z / s = 0. Its Jacobian in z is
-// H = A - (c / s^2) p p^T with c = gamma / s, A = I + c K and p = K z, and
-// (Sherman-Morrison) H^{-1} v = A^{-1} v + c t (t^T v) / (p^T y) with t = A^{-1} p
-// and y = A^{-1} z; p^T y = s^2 (1 - (c / s^2) p^T t) is computed as
-// sum_e a_e Dz_e Dy_e, without the cancellation. JVP: dz = H^{-1} r with
-// r = dx - (dgamma / s) p - gamma sum_e dw_e d(K z / s)/dw_e, and
-// d(K z / s)/dw_e = 2 w_e Dz_e D_e^T / s - p w_e Dz_e^2 / s^3. The VJP is the
-// adjoint. Inside, the Jacobian is the piecewise averaging. All of it runs in
-// scale-free form (see setup): delta = Dz / s, pi = p / s and c, so neither s
-// nor s^3 is formed; they under- or overflowed for |z| beyond 1e+-103.
+// Derivatives (revised in 1.1, SCD review S2). Outside, F(z) = z - x +
+// gamma D^T W n(z) = 0 with n = W D z / s, s = ||W D z|| = mu gamma, has
+// H = I + (1 / mu) D^T W (I - n n^T) W D, symmetric with H >= I, so J = H^{-1}
+// has its spectrum in (0, 1]. With T = W D D^T W and Q a basis of n's
+// complement, J = I - D^T W Q (Q^T (mu I + T) Q)^{-1} Q^T W D (push-through),
+// applied as the bordered system [mu I + T, n; n^T, 0] (apply_j). mu and n
+// come from the root solve, recomputed from the saved x, step and weights
+// (root): n = W dh / ||W dh|| from the solver's scaled differences. The 1.0.2
+// form read n = W D z / s from differences of the saved z and inverted H by
+// Sherman-Morrison; near the boundary (s -> 0) those differences carry a
+// relative error of eps ||x|| / s and the denominator 1 - c pi^T A^-1 pi
+// cancelled, which gave eigenvalues of J up to 7 on the boundary. Parameters:
+// dz = J (dx + r_theta) with r_theta = -dgamma pi - gamma (2 D^T (n o dw) -
+// pi sum_e n_e^2 dw_e / w_e), pi = D^T W n; the VJP is the adjoint. Inside,
+// the Jacobian is the piecewise averaging. Where gamma t is below the normal
+// range (z = x), mu is beyond it: J = I, with n from W D x.
 //
 // Kinks: ||u0|| = gamma is inside.
 //
@@ -100,30 +106,15 @@ struct TV1DL2 final : RowOp<TV1DL2> {
     fp_status check_n(int64_t n) const noexcept override {
         return (w.size() == 1 || static_cast<int64_t>(w.size()) == n - 1) ? FP_OK : FP_ESHAPE;
     }
-    // Four n-entry double arrays.
+    // Five n-entry double arrays: the root solve's four (xc, inv, dh, y)
+    // and the derivative's right-hand side.
     size_t scratch_bytes(int64_t n) const noexcept override {
-        return static_cast<size_t>(4 * n) * sizeof(double);
+        return static_cast<size_t>(5 * n) * sizeof(double);
     }
     bool needs_distinct() const noexcept override { return false; }
     double we(int64_t e) const noexcept { return w.size() == 1 ? w[0] : w[e]; }
     double ae(int64_t e) const noexcept { return a.size() == 1 ? a[0] : a[e]; }
 
-    // 1 / d_j of sigma I + kappa K. The ratio e / d <= 1 comes first: kappa a_j e
-    // underflowed for a_j = 2e-297 and e = 7e-295 and dropped the edge.
-    void factor(double sigma, double kappa, double *inv, int64_t n) const noexcept {
-        double e = sigma;
-        for (int64_t j = 0; j < n; ++j) {
-            const double d = e + (j + 1 < n ? kappa * ae(j) : 0.0);
-            inv[j] = 1.0 / d;
-            if (j + 1 < n) e = sigma + kappa * ae(j) * (e * inv[j]);
-        }
-    }
-    // v <- (sigma I + kappa K)^{-1} v, in place.
-    void solve(double kappa, const double *inv, double *v, int64_t n) const noexcept {
-        for (int64_t j = 1; j < n; ++j) v[j] += kappa * ae(j - 1) * inv[j - 1] * v[j - 1];
-        v[n - 1] *= inv[n - 1];
-        for (int64_t j = n - 2; j >= 0; --j) v[j] = (v[j] + kappa * ae(j) * v[j + 1]) * inv[j];
-    }
     // Factor sigma I + kappa K and solve v = (sigma I + kappa K)^{-1} sigma b in one
     // pass each way, returning ||W D v||^2 (not finite if v is not).
     double factor_solve_z(double sigma, double kappa, double *inv, const double *b, double *v,
@@ -239,16 +230,6 @@ struct TV1DL2 final : RowOp<TV1DL2> {
             s = e + 1;
         }
     }
-    template <class V>
-    double norm_wd(const V *z, int64_t n) const noexcept {
-        double s = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) {
-            const double d = static_cast<double>(z[e + 1]) - static_cast<double>(z[e]);
-            s += ae(e) * d * d;
-        }
-        return std::sqrt(s);
-    }
-
     bool has_value() const noexcept override { return true; }
     double value_row(const double *x, int64_t n, double, double *) const noexcept override {
         double s = 0.0;
@@ -256,22 +237,34 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         return std::ldexp(std::sqrt(s), wk);
     }
 
+    // dh at mu into dh (B = sigma I + kappa T A factored into inv), returning
+    // nu = ||W dh||; sigma and kappa as the solves take them.
+    double solve_dh(double m, double gt, const double *xc, double *inv, double *dh, int64_t n, double &sigma,
+                    double &kappa) const noexcept {
+        sigma = m < 1.0 ? m : 1.0;
+        kappa = m < 1.0 ? 1.0 : 1.0 / m;
+        const double f = m < 1.0 ? 1.0 / gt : 1.0 / (m * gt);
+        return std::sqrt(factor_solve(sigma, kappa, f, xc, inv, dh, n));
+    }
+
+    // The classification and root shared by the prox and the derivatives (SCD
+    // review S2): the derivatives recompute them from the saved x, step and
+    // weights rather than from differences of the saved z. Requires a finite
+    // row with n >= 2; gamma is the stored weights' step.
+    //   kTiny     gamma t below the normal range (gamma = 0 included): z = x
+    //   kMean     inside, or no finite solve: the piecewise mean x - xc / xs
+    //   kOutside  mu, the root, with sigma and kappa; with want_dh, inv holds
+    //             the factors of B at mu and dh the solution there, nu = ||W dh||.
+    // xc holds x minus its piece means, times xs.
+    enum Kind { kTiny, kMean, kOutside };
+    struct Root {
+        Kind kind = kTiny;
+        double t = 1.0, gt = 0.0, xs = 1.0, mu = 0.0, sigma = 1.0, kappa = 1.0, nu = 0.0;
+    };
     template <class T>
-    int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
-        gamma = std::ldexp(gamma, wk);  // the stored weights' step
-        if (!all_finite(x, n)) {
-            bool nan;
-            if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
-            fill_nan(z, n);
-            if (code) std::memset(code, 0, static_cast<size_t>(n));
-            return kRowOk;
-        }
-        if (code) std::memset(code, 0, static_cast<size_t>(n));
-        if (n == 1 || gamma == 0.0) {
-            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
-            return kRowOk;
-        }
-        double *xc = static_cast<double *>(scr), *inv = xc + n, *dh = inv + n, *y = dh + n;
+    Root root(const T *x, int64_t n, double gamma, double *scr, bool want_dh) const noexcept {
+        Root rt;
+        double *xc = scr, *inv = xc + n, *dh = inv + n, *y = dh + n;
         center(x, xc, n);
         // Everything below runs on xc and gamma times t = 2^k with max |t xc| in
         // [0.5, 1): z - mean is homogeneous in (xc, gamma), mu is unchanged, and
@@ -285,14 +278,13 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         std::frexp(t, &k);
         t = std::ldexp(1.0, -k);
         const double gt = gamma * t;
+        rt.t = t;
+        rt.gt = gt;
         // gamma t below the normal range: |z - x| <= 2 gamma, under 2^-1020
         // of the largest entry, so z = x to rounding. Taken as it, since the
         // bracket below would start from [0, inf] (fuzz 2026-10-25: the
         // piecewise mean came back, at gamma = 3.6e-97 with an entry of 1e308).
-        if (gt < DBL_MIN) {
-            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
-            return kRowOk;
-        }
+        if (gt < DBL_MIN) return rt;
         // ||u0||^2 and ||y0||^2 (y0 per piece, mean-free), and ||W D xc||^2.
         double rho0sq = 0.0, kap0 = 0.0, wdx = 0.0;
         {
@@ -321,11 +313,11 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         // R = 0: no differences across nonzero weights, so x is its own
         // piecewise mean whatever rounding left in rho0.
         if (rho0 <= gt || !(R > 0.0)) {
-            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i]);
-            if (code) code[0] = kInside;
-            return kRowOk;
+            rt.kind = kMean;
+            return rt;
         }
         for (int64_t i = 0; i < n; ++i) xc[i] *= t;
+        rt.xs = t;
         // Bisection in the exponent, a dive below R while no lower bound is
         // known: mu* can lie hundreds of orders of magnitude below R (w_e^2 of
         // 2e-297 against R = 1e-146, where ||y0||^2 overflows and Newton has no
@@ -336,21 +328,14 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         // mu >= DBL_MIN keeps 1 / sigma finite; a root below it needs w_e^2 of
         // denormal size, and z is then taken at DBL_MIN.
         if (!(mu >= DBL_MIN)) mu = DBL_MIN;
-        // dh at mu into dh, returning nu; yh likewise from dh, returning Sh.
         double sigma, kappa;
-        auto solve_dh = [&](double m) {
-            sigma = m < 1.0 ? m : 1.0;
-            kappa = m < 1.0 ? 1.0 : 1.0 / m;
-            const double f = m < 1.0 ? 1.0 / gt : 1.0 / (m * gt);
-            return std::sqrt(factor_solve(sigma, kappa, f, xc, inv, dh, n));
-        };
         // The loop sets mu for z: the root, or failing that the last mu whose
         // solve was finite (an overflow far from the root leaves inf or NaN,
         // taken as below it).
-        double good = 0.0, muz = 0.0;
+        double good = 0.0, muz = 0.0, nu = 0.0;
         bool finite = false;  // dh holds a finite solve
         for (int it = 0; it < kMaxIter; ++it) {
-            const double nu = solve_dh(mu);
+            nu = solve_dh(mu, gt, xc, inv, dh, n, sigma, kappa);
             finite = nu <= DBL_MAX;
             if (finite) good = mu;
             if (nu < 1.0) R = mu;
@@ -375,19 +360,54 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         }
         if (!(muz > 0.0) || (muz == mu && !finite)) muz = good;
         if (!(muz > 0.0)) {  // no finite solve: the piecewise mean
-            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i] / t);
+            rt.kind = kMean;
+            return rt;
+        }
+        rt.kind = kOutside;
+        rt.mu = muz;
+        rt.sigma = muz < 1.0 ? muz : 1.0;
+        rt.kappa = muz < 1.0 ? 1.0 : 1.0 / muz;
+        if (want_dh) rt.nu = finite && muz == mu ? nu : solve_dh(muz, gt, xc, inv, dh, n, sigma, kappa);
+        return rt;
+    }
+
+    template <class T>
+    int prox(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code) const noexcept {
+        gamma = std::ldexp(gamma, wk);  // the stored weights' step
+        if (!all_finite(x, n)) {
+            bool nan;
+            if (scan_row(x, n, nan) != kRowOk) return kRowNonFinite;
+            fill_nan(z, n);
+            if (code) std::memset(code, 0, static_cast<size_t>(n));
             return kRowOk;
         }
+        if (code) std::memset(code, 0, static_cast<size_t>(n));
+        if (n == 1 || gamma == 0.0) {
+            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+            return kRowOk;
+        }
+        double *xc = static_cast<double *>(scr), *inv = xc + n, *dh = inv + n, *y = dh + n;
+        const Root rt = root(x, n, gamma, xc, false);
+        if (rt.kind == kTiny) {
+            if (z != x) std::memcpy(z, x, static_cast<size_t>(n) * sizeof(T));
+            return kRowOk;
+        }
+        if (rt.kind == kMean) {
+            for (int64_t i = 0; i < n; ++i) z[i] = static_cast<T>(static_cast<double>(x[i]) - xc[i] / rt.xs);
+            if (code) code[0] = kInside;
+            return kRowOk;
+        }
+        const double t = rt.t;
         // z itself from (sigma I + kappa K) zc = sigma xc, accurate to rounding of
         // xc; its differences were not (above). Should that solve overflow,
         // z = x - gamma D^T W uh from dh takes over.
-        const double sg = muz < 1.0 ? muz : 1.0, kp = muz < 1.0 ? 1.0 : 1.0 / muz;
-        if (factor_solve_z(sg, kp, inv, xc, y, n) <= DBL_MAX) {
+        if (factor_solve_z(rt.sigma, rt.kappa, inv, xc, y, n) <= DBL_MAX) {
             for (int64_t i = 0; i < n; ++i)
                 z[i] = static_cast<T>(static_cast<double>(x[i]) - (xc[i] - y[i]) / t);
             return kRowOk;
         }
-        if (!(finite && muz == mu)) solve_dh(muz);
+        double sigma, kappa;
+        solve_dh(rt.mu, rt.gt, xc, inv, dh, n, sigma, kappa);
         double q = 0.0;  // gamma a_{i-1} dh_{i-1}, with W uh = A dh
         for (int64_t i = 0; i < n; ++i) {
             const double qi = i + 1 < n ? gamma * ae(i) * dh[i] : 0.0;
@@ -397,172 +417,177 @@ struct TV1DL2 final : RowOp<TV1DL2> {
         return kRowOk;
     }
 
-    // The outside structure at the saved z, scale-free (audit K4): H is
-    // unchanged when z and gamma are both multiplied by t, so the setup runs
-    // on the differences t D z with t a power of two that brings max w_e |Dz_e|
-    // to [1/2, 1) (h = 1/2 first when Dz itself overflows). With sh = ||W D(t z)||
-    // = t s: delta_e = Dz_e / s (|w_e delta_e| <= 1), c = gamma / s =
-    // gamma t / sh, pi = K z / s = D^T A delta, and y = A^{-1} (t z_c) with z_c
-    // the centred z. kOutside sets c, pi (into pi), the factored A = I + c K
-    // and y; kIdentity when z has no differences; kMean when c is beyond the
-    // range (the piecewise mean, the limit of A^{-1} as c -> inf).
-    struct Scale {
-        double h = 1.0, t = 1.0, sh = 0.0, f = 0.0;  // f = t / sh: a multiply per delta, not a division
-        template <class T>
-        double delta(const T *z, int64_t e) const noexcept {
-            return (h * static_cast<double>(z[e + 1]) - h * static_cast<double>(z[e])) * f;
-        }
+    // The derivative's setup at the saved x (S2). Inside (code[0]) the
+    // piecewise mean. Otherwise the root solve again, which leaves dh, with
+    // delta = dh / nu = Dz / s and n = W delta the unit dual direction, and
+    // B factored at mu in inv. kappa = 0 is J = I: mu beyond the range (kTiny,
+    // where z = x, or a root that overflows, gamma near the bottom of the range
+    // on a long row), where J and n differ from I and from W D x / ||W D x|| by
+    // O(1 / mu), so delta is taken from W D x. No direction at all (W D x = 0,
+    // or a solve without a finite one, which the prox's own success rules out)
+    // is the identity with no parameter terms.
+    enum DKind { kDMean, kDIdentity, kDLive };
+    struct DSetup {
+        DKind kind = kDIdentity;
+        double kappa = 0.0, rnu = 0.0;  // rnu = 1 / nu
     };
-    enum Kind { kIdentity, kMean, kOutside };
     template <class T>
-    Kind setup(const T *z, int64_t n, double gamma, Scale &sc, double &c, double *inv, double *pi,
-               double *y) const noexcept {
-        double M = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e)
-            M = std::max(M, we(e) * std::fabs(static_cast<double>(z[e + 1]) - static_cast<double>(z[e])));
-        if (!(M <= DBL_MAX)) {  // the differences overflow: halves first
-            sc.h = 0.5;
-            M = 0.0;
-            for (int64_t e = 0; e + 1 < n; ++e)
-                M = std::max(M, we(e) * std::fabs(0.5 * static_cast<double>(z[e + 1]) - 0.5 * static_cast<double>(z[e])));
+    DSetup dsetup(const T *x, const uint8_t *code, int64_t n, double gamma, double *scr) const noexcept {
+        DSetup d;
+        if (code[0] == kInside) {
+            d.kind = kDMean;
+            return d;
         }
-        if (!(M > 0.0)) return kIdentity;
-        int k;
-        std::frexp(M, &k);
-        sc.t = std::ldexp(1.0, -k);
-        double ss = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) {
-            const double d = (sc.h * static_cast<double>(z[e + 1]) - sc.h * static_cast<double>(z[e])) * sc.t;
-            ss += ae(e) * d * d;
+        if (n == 1) return d;
+        double *xc = scr, *dh = scr + 2 * n;
+        const Root rt = root(x, n, gamma, xc, true);
+        if (rt.kind == kMean) {  // as the prox's z, should it ever differ
+            d.kind = kDMean;
+            return d;
         }
-        sc.sh = std::sqrt(ss);
-        sc.f = sc.t / sc.sh;
-        c = gamma * sc.h * sc.t / sc.sh;  // gamma / s; with h, s is ||W D(h z)|| / h
-        if (!(c <= DBL_MAX)) return kMean;
-        for (int64_t i = 0; i < n; ++i) pi[i] = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) {
-            const double v = ae(e) * sc.delta(z, e);
-            pi[e + 1] += v;
-            pi[e] -= v;
+        double nu = rt.nu;
+        if (rt.kind == kOutside && rt.kappa > 0.0) {
+            d.kappa = rt.kappa;
+        } else {  // W D x itself, from x centred and times t (|t xc| < 1)
+            const double f = rt.t / rt.xs;
+            double ss = 0.0;
+            for (int64_t e = 0; e + 1 < n; ++e) {
+                dh[e] = ae(e) != 0.0 ? f * (xc[e + 1] - xc[e]) : 0.0;
+                ss += ae(e) * dh[e] * dh[e];
+            }
+            nu = std::sqrt(ss);
         }
-        factor(1.0, c, inv, n);
-        piece_mean(z, y, n);
-        const double tz = sc.h * sc.t;
-        for (int64_t i = 0; i < n; ++i) y[i] = (static_cast<double>(z[i]) - y[i]) * tz;
-        return kOutside;
+        if (!(nu > 0.0 && nu <= DBL_MAX)) return d;
+        d.kind = kDLive;
+        d.rnu = 1.0 / nu;
+        return d;
     }
 
-    // v <- H^{-1} v given t = A^{-1} pi and pty = pi^T A^{-1} (t z_c) / sh: the
-    // Sherman-Morrison term c t (t^T v) / pty, scale-free (K4).
-    void apply_hinv(double c, const double *inv, const double *t, double pty, double *v,
-                    int64_t n) const noexcept {
-        double tv = 0.0;
-        for (int64_t i = 0; i < n; ++i) tv += t[i] * v[i];
-        solve(c, inv, v, n);
-        const double f = c * tv / pty;
-        for (int64_t i = 0; i < n; ++i) v[i] += f * t[i];
+    // v <- J v on the outside piece: J = I - kappa D^T A B^{-1} (rho - eta dh)
+    // with rho = D v and eta = sum_e a_e gd_e gr_e / p_e over sum_e a_e gd_e^2 / p_e,
+    // gd and gr the forward substitutions of dh and rho with B's factors. In
+    // the symmetric form, with T = W D D^T W and the unit direction n = W dh / nu,
+    // this is J = I - D^T W Q (Q^T (mu I + T) Q)^{-1} Q^T W D, Q a basis of n's
+    // complement: the bordered system [mu I + T, n; n^T, 0], solved through
+    // B = W^-1 (sigma I + kappa T) W. The denominator is a sum of squares over
+    // positive pivots, so it does not cancel (the Sherman-Morrison form's
+    // 1 - c pi^T A^-1 pi did, near the boundary). gd and gr are scratch.
+    void apply_j(double kappa, const double *inv, const double *dh, double *v, double *gd, double *gr,
+                 int64_t n) const noexcept {
+        if (kappa == 0.0) return;
+        double num = 0.0, den = 0.0, m = 0.0, pr = 0.0, pd = 0.0;
+        for (int64_t j = 0; j + 1 < n; ++j) {
+            pr = (v[j + 1] - v[j]) + m * pr;
+            pd = dh[j] + m * pd;
+            gr[j] = pr;
+            gd[j] = pd;
+            const double ai = ae(j) * inv[j];
+            num += ai * pd * pr;
+            den += ai * pd * pd;
+            m = kappa * ai;
+        }
+        const double eta = den > 0.0 ? num / den : 0.0;
+        double next = 0.0, kn = 0.0, u = 0.0;  // u = kappa a_j vt_j, of the edge after i
+        for (int64_t j = n - 2; j >= 0; --j) {
+            next = (gr[j] - eta * gd[j] + kn * next) * inv[j];
+            kn = kappa * ae(j);
+            gr[j] = kn * next;  // kappa (A vt)_j
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            const double ui = i + 1 < n ? gr[i] : 0.0;
+            v[i] -= u - ui;  // kappa (D^T A vt)_i
+            u = ui;
+        }
     }
 
-    // y <- A^{-1} y and pi^T y / sh = sum_e a_e delta_e (y_{e+1} - y_e) / sh,
-    // without the cancellation of pi^T y.
+    // Structure (since 1.0.2): inside, the pieces between zero weights as
+    // regions; otherwise singletons, where J is positive definite (a finite
+    // root) or the identity. From the prox's classification, not from the
+    // saved z, whose differences can vanish outside (S2).
     template <class T>
-    double solve_pty(const T *z, const Scale &sc, double c, const double *inv, double *y, int64_t n) const noexcept {
-        solve(c, inv, y, n);
-        double pty = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) pty += ae(e) * sc.delta(z, e) * (y[e + 1] - y[e]);
-        return pty / sc.sh;
-    }
-
-    // Structure (since 1.0.2), on the jvp's kind: the piecewise mean has the
-    // pieces between zero weights as regions; otherwise singletons, where
-    // J = H^{-1} is symmetric positive definite.
-    template <class T>
-    int64_t structure(const T *, const T *z, const uint8_t *code, int64_t n, double gamma, RowStruct &s,
-                      void *scr) const noexcept {
-        gamma = std::ldexp(gamma, wk);
-        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n;
-        Scale sc;
-        double c = 0.0;
-        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
-        if (kind == kMean) return runs(s, n, [this](int64_t i) { return ae(i - 1) == 0.0; });
+    int64_t structure(const T *, const T *, const uint8_t *code, int64_t n, double, RowStruct &s,
+                      void *) const noexcept {
+        if (code[0] == kInside) return runs(s, n, [this](int64_t i) { return ae(i - 1) == 0.0; });
         for (int64_t i = 0; i < n; ++i) s.state[i] = FP_ENTRY_FREE;
         return singletons(s, n);
     }
 
+    // JVP: dz = J (dx + r_theta), r_theta = -dgamma pi - gamma (2 D^T (n o dw)
+    // - pi sum_e n_e^2 dw_e / w_e) with pi = D^T W n = D^T A delta; with
+    // n_e / w_e = delta_e no weight is divided by, and a zero-weight edge,
+    // where dh = 0, contributes nothing. The weights are stored over 2^wk.
     template <class T>
-    void jvp(const T *, const T *z, const uint8_t *code, const T *dx, T *dz, int64_t n,
-             double gamma, double dgamma, const double *dp, void *scr) const noexcept {
+    void jvp(const T *x, const T *, const uint8_t *code, const T *dx, T *dz, int64_t n, double gamma,
+             double dgamma, const double *dp, void *scr) const noexcept {
         gamma = std::ldexp(gamma, wk);
         dgamma = std::ldexp(dgamma, wk);
-        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *r = y + n;
-        Scale sc;
-        double c = 0.0;
-        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
-        if (kind == kMean) {
+        double *g0 = static_cast<double *>(scr), *inv = g0 + n, *dh = inv + n, *g1 = dh + n, *r = g1 + n;
+        const DSetup d = dsetup(x, code, n, gamma, g0);
+        if (d.kind == kDMean) {
             piece_mean(dx, dz, n);
             return;
         }
-        if (kind == kIdentity) {
+        if (d.kind == kDIdentity) {
             for (int64_t i = 0; i < n; ++i) dz[i] = dx[i];
             return;
         }
-        const double pty = solve_pty(z, sc, c, inv, y, n);
-        // r = dx - dgamma pi + sum_e 2 gamma w_e delta_e dw_e (e_e - e_{e+1})
-        //     + gamma (sum_e dw_e w_e delta_e^2) pi.
-        for (int64_t i = 0; i < n; ++i) r[i] = static_cast<double>(dx[i]) - dgamma * pi[i];
-        if (dp) {
-            double wsum = 0.0;
-            for (int64_t e = 0; e + 1 < n; ++e) {
-                const double de = sc.delta(z, e), dwe = std::ldexp(dp[w.size() == 1 ? 0 : e], -wk);
+        for (int64_t i = 0; i < n; ++i) r[i] = static_cast<double>(dx[i]);
+        double wsum = 0.0;
+        for (int64_t e = 0; e + 1 < n; ++e) {
+            const double de = dh[e] * d.rnu, pe = ae(e) * de;  // pi = D^T A delta
+            r[e] += dgamma * pe;
+            r[e + 1] -= dgamma * pe;
+            if (dp) {
+                const double dwe = std::ldexp(dp[w.size() == 1 ? 0 : e], -wk);
                 const double q = 2.0 * gamma * we(e) * de * dwe;
                 r[e] += q;
                 r[e + 1] -= q;
                 wsum += dwe * we(e) * de * de;
             }
-            for (int64_t i = 0; i < n; ++i) r[i] += gamma * wsum * pi[i];
         }
-        solve(c, inv, pi, n);  // tau = A^{-1} pi
-        // The solve is linear: on r over a power of two, so that a large
-        // right-hand side (dgamma 2^k for weights far from unit scale) cannot
-        // overflow inside it where dz itself is in range (M5).
+        if (dp && wsum != 0.0)
+            for (int64_t e = 0; e + 1 < n; ++e) {
+                const double pe = gamma * wsum * ae(e) * dh[e] * d.rnu;
+                r[e] -= pe;
+                r[e + 1] += pe;
+            }
+        // J is linear: on r over a power of two, so that a large right-hand
+        // side (dgamma 2^k for weights far from unit scale) cannot overflow
+        // inside it where dz itself is in range (M5).
         double rm = 0.0;
         for (int64_t i = 0; i < n; ++i) rm = std::fmax(rm, std::fabs(r[i]));
         int re = 0;
         if (rm > 0.0 && std::isfinite(rm)) std::frexp(rm, &re);
         for (int64_t i = 0; i < n; ++i) r[i] = std::ldexp(r[i], -re);
-        apply_hinv(c, inv, pi, pty, r, n);
+        apply_j(d.kappa, inv, dh, r, g0, g1, n);
         for (int64_t i = 0; i < n; ++i) dz[i] = static_cast<T>(std::ldexp(r[i], re));
     }
 
+    // VJP: q = J gv (J is symmetric); gamma's adjoint -pi^T q and w_e's
+    // -gamma w_e delta_e (2 (D q)_e - (pi^T q) delta_e).
     template <class T>
-    void vjp(const T *, const T *z, const uint8_t *code, const T *gv, T *gx, int64_t n,
-             double gamma, double *acc, void *scr) const noexcept {
+    void vjp(const T *x, const T *, const uint8_t *code, const T *gv, T *gx, int64_t n, double gamma,
+             double *acc, void *scr) const noexcept {
         gamma = std::ldexp(gamma, wk);
-        double *inv = static_cast<double *>(scr), *pi = inv + n, *y = pi + n, *q = y + n;
-        Scale sc;
-        double c = 0.0;
-        const Kind kind = code[0] == kInside ? kMean : (n == 1 ? kIdentity : setup(z, n, gamma, sc, c, inv, pi, y));
-        if (kind == kMean) {
+        double *g0 = static_cast<double *>(scr), *inv = g0 + n, *dh = inv + n, *g1 = dh + n, *q = g1 + n;
+        const DSetup d = dsetup(x, code, n, gamma, g0);
+        if (d.kind == kDMean) {
             piece_mean(gv, gx, n);
             return;
         }
-        if (kind == kIdentity) {
+        if (d.kind == kDIdentity) {
             for (int64_t i = 0; i < n; ++i) gx[i] = gv[i];
             return;
         }
-        const double pty = solve_pty(z, sc, c, inv, y, n);
-        // y is free again: keep pi there, and tau = A^{-1} pi in pi's buffer.
-        std::memcpy(y, pi, static_cast<size_t>(n) * sizeof(double));
-        solve(c, inv, pi, n);
         for (int64_t i = 0; i < n; ++i) q[i] = static_cast<double>(gv[i]);
-        apply_hinv(c, inv, pi, pty, q, n);
+        apply_j(d.kappa, inv, dh, q, g0, g1, n);
         for (int64_t i = 0; i < n; ++i) gx[i] = static_cast<T>(q[i]);
-        double piq = 0.0;
-        for (int64_t i = 0; i < n; ++i) piq += y[i] * q[i];
+        double piq = 0.0;  // pi^T q = delta^T A D q
+        for (int64_t e = 0; e + 1 < n; ++e) piq += ae(e) * dh[e] * d.rnu * (q[e + 1] - q[e]);
         const int64_t P = nparams();
         acc[P] -= std::ldexp(piq, wk);  // d/dgamma = 2^k d/d(gamma 2^k)
         for (int64_t e = 0; e + 1 < n; ++e) {
-            const double de = sc.delta(z, e);
+            const double de = dh[e] * d.rnu;
             acc[w.size() == 1 ? 0 : e] -= std::ldexp(gamma * we(e) * de * (2.0 * (q[e + 1] - q[e]) - piq * de), -wk);
         }
     }
