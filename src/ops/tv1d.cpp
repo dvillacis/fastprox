@@ -565,11 +565,19 @@ struct TV1D final : RowOp<TV1D> {
         }
         const double range = hi - lo;
         double wm = 0.0;
-        for (int64_t e = 0; e + 1 < n; ++e) wm = std::max(wm, we[e]);
+        bool equal = true;
+        for (int64_t e = 0; e + 1 < n; ++e) {
+            wm = std::max(wm, we[e]);
+            equal = equal && we[e] == we[0];
+        }
         if (gamma == 0.0 || range == 0.0 || wm == 0.0) {
             std::memcpy(z, x, static_cast<size_t>(n) * sizeof(double));
             return kRowOk;
         }
+        // Equal weights: the uniform solve with step gamma wm, so that edge
+        // weights of one give the unweighted image TV bit for bit (the two
+        // solves clamp the radii differently and may differ in the last bit).
+        if (equal && uniform && wpad[0] == 1.0) return prox(x, z, n, gamma * wm, scr, nullptr);
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e == n - 1 || we[e] == 0.0) {

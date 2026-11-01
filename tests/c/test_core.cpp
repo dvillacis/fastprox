@@ -337,7 +337,8 @@ static void prepare(const OpCase &c, Vec &x, int64_t rows, int64_t n) {
 
 // The group l2 kink at tau = 5: each group's first four entries +-(1, 2, 2, 4)
 // in an order and with signs set by the row, the rest 0, so that ||x_g|| = 5
-// exactly; row 2 a relative 2^-20 above it (live, c just below 1).
+// exactly; row 2 a relative 2^-16 above it (live, c just below 1; at 2^-20
+// its curvature, about the offset, met the CURVED check's 1e-6 on MSVC).
 static void place_group_kink(double *x, int64_t r, int64_t n, const std::vector<int64_t> &gid, int64_t G) {
     static const double pat[4] = {1.0, 2.0, 2.0, 4.0};
     for (int64_t g = 0; g < G; ++g) {
@@ -345,7 +346,7 @@ static void place_group_kink(double *x, int64_t r, int64_t n, const std::vector<
         for (int64_t i = 0; i < n; ++i) {
             if ((gid.empty() ? 0 : gid[static_cast<size_t>(i)]) != g) continue;
             const double v = k < 4 ? pat[(k + r) % 4] * (((i + r) % 3) ? 1.0 : -1.0) : 0.0;
-            x[i] = r == 2 ? v * (1.0 + 0x1p-20) : v;
+            x[i] = r == 2 ? v * (1.0 + 0x1p-16) : v;
             ++k;
         }
     }
@@ -1508,6 +1509,21 @@ static void test_tv_spatial_weights() {
             CHECK_OK(fp_prox(one, c.gamma, &x.a, &z1.a, &o, nullptr, nullptr));
             CHECK_OK(fp_prox(plain, c.gamma, &x.a, &z2.a, &o, nullptr, nullptr));
             CHECK(z1.data == z2.data);
+            // One image line: the result is the 1D solve itself, whose
+            // weighted and uniform forms differed in the last bit on about 6%
+            // of inputs before equal weights took the uniform one. A local
+            // generator, so that later tests keep their inputs.
+            if (Ni == img.back()) {
+                std::mt19937_64 g(7);
+                std::normal_distribution<double> nd(0.0, 0.3);
+                Arr xl(c.shape);
+                for (int t = 0; t < 64; ++t) {
+                    for (int64_t i = 0; i < N; ++i) xl.data[i] = nd(g) + ((i / 5) % 3 == 0 ? 1.0 : 0.0);
+                    CHECK_OK(fp_prox(one, c.gamma, &xl.a, &z1.a, &o, nullptr, nullptr));
+                    CHECK_OK(fp_prox(plain, c.gamma, &xl.a, &z2.a, &o, nullptr, nullptr));
+                    CHECK(z1.data == z2.data);
+                }
+            }
             fp_op_free(one);
             fp_op_free(plain);
             std::vector<Vec> outs;
