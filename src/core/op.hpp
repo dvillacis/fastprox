@@ -345,6 +345,16 @@ struct fp_op {
     // kink_row and branch_row get scratch_bytes(n) of scratch.
     virtual void branch_row(const double *, const double *, uint8_t *, int64_t, double, double,
                             const int8_t *, void *) const noexcept {}
+    // False when side, on this row, selects a piece with no derivative at the
+    // saved point (SCD review S1: group l2 forced live at a zero norm with a
+    // positive threshold, where there is no radial direction). Arguments as
+    // branch_row; every row is checked before any override is applied, and
+    // fp_workspace_set_branch then returns FP_EINVAL with the previous
+    // override in place.
+    virtual bool branch_ok_row(const double *, const double *, int64_t, double, double, const int8_t *,
+                               void *) const noexcept {
+        return true;
+    }
     // Images: rebuild the saved structure of one image from x, z (double) and
     // the dual, with side (C order, never null) applied at its kinks within
     // tol; work: image_bytes(shape) of scratch. The API restores the prox
@@ -439,6 +449,17 @@ struct fp_op {
                                void *, int64_t) const noexcept { return 0; }
     virtual int64_t struct_row(const double *, const double *, const uint8_t *, int64_t, double, fp::RowStruct &,
                                void *, int64_t) const noexcept { return 0; }
+    // Rows whose derivative has a range the descriptor cannot express (SCD
+    // review S1: group l2 forced live at or below its threshold, where the
+    // range on the group is span(x_g)). With has_struct_check(), every query
+    // first runs struct_ok_row on every saved row (the arguments of
+    // struct_row, without the output) and fails with FP_EINVAL, writing
+    // nothing, when one is false. Rows holding a NaN are not checked.
+    virtual bool has_struct_check() const noexcept { return false; }
+    virtual bool struct_ok_row(const float *, const float *, const uint8_t *, int64_t, double, void *,
+                               int64_t) const noexcept { return true; }
+    virtual bool struct_ok_row(const double *, const double *, const uint8_t *, int64_t, double, void *,
+                               int64_t) const noexcept { return true; }
     // Image operators (since 1.0.2): the region label of each entry (C order)
     // in the image's saved structure, after any override, and their number;
     // every entry FREE with sign +1, no constraint. The driver renumbers the
@@ -996,8 +1017,12 @@ struct RowOp : fp_op {
     // True when D's kernels take the row's index as a last argument (an
     // operator with row_params()).
     static constexpr bool kRowIndex = false;
+    // True when D provides struct_ok (fp_op::has_struct_check), with the
+    // arguments of structure but no output.
+    static constexpr bool kStructCheck = false;
     bool elementwise() const noexcept override { return false; }
     int struct_kind() const noexcept override { return D::kStruct; }
+    bool has_struct_check() const noexcept override { return D::kStructCheck; }
 
 #define FP_ROW_FORWARD(T)                                                                        \
     int prox_row(const T *x, T *z, int64_t n, double gamma, void *scratch, uint8_t *code,        \
@@ -1030,6 +1055,13 @@ struct RowOp : fp_op {
             return d->template structure<T>(x, z, code, n, gamma, s, scratch, row);              \
         else                                                                                     \
             return d->template structure<T>(x, z, code, n, gamma, s, scratch);                   \
+    }                                                                                            \
+    bool struct_ok_row(const T *x, const T *z, const uint8_t *code, int64_t n, double gamma,     \
+                       void *scratch, int64_t) const noexcept override {                         \
+        if constexpr (D::kStructCheck)                                                           \
+            return static_cast<const D *>(this)->template struct_ok<T>(x, z, code, n, gamma, scratch); \
+        else                                                                                     \
+            return true;                                                                         \
     }
     FP_ROW_FORWARD(float)
     FP_ROW_FORWARD(double)

@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Group ℓ2 kept live at its kink (SCD review S1). The override +1 on a group at ‖x\_g‖ = τ\_g, or within `kink_tol` below it, took the shrink's formula at x: J\_g = (1 − c)I + c u uᵀ with c = τ\_g/‖x\_g‖ ≥ 1. That gave rank one at the kink while the structure reported the whole group FREE (rank J = 1 against dim L = 3), and below the kink an eigenvalue 1 − c < 0, which no Jacobian of a convex prox has. The live piece is now taken at the kink: J\_g = u uᵀ, ∂z\_g/∂τ\_g = −u. Its range span(x\_g) has no structure descriptor, so `fp_workspace_states`, `fp_workspace_regions` and `fp_workspace_constraint` return `FP_EINVAL` there and write nothing to any unit; Python's `ctx.structure` raises ValueError. A group with x\_g = 0 cannot be kept live (no direction u): `fp_workspace_set_branch` returns `FP_EINVAL` and keeps the previous override. Results change only under a live override with ‖x\_g‖ ≤ τ\_g.
 - The derivatives of the second-order cone and the tree-structured norms at a subnormal x (fuzz, 2026-10-28): where ‖x‖² underflows, the norm is rescaled, by at most 2^1022, and ⟨u, dx⟩ took the plain sum whenever it was, though for a deep subnormal x the rescaled x stays far below 1 and the products still underflow. At x = (0, 4e-315) and dx near 4e-312 the cone's J dx was 1.6e-6 off and left its constraint. The dot now goes to its scaled path by the range of ‖x‖ · max |dxᵢ| alone, rescaled or not, which leaves every result in range unchanged.
 
 ## [1.0.2] — 2026-10-27

@@ -593,6 +593,29 @@ int64_t row_structure_driver(const fp_op &op, const fp_workspace &ws, const Arr 
     return fixed.load();
 }
 
+// Whether every saved row of an operator with has_struct_check() has a
+// structure the descriptor can express (SCD review S1), checked before a
+// query writes anything. Rows holding a NaN are skipped (they report -1
+// regions). A linear pass on the threads' row scratch: no allocation.
+template <class T>
+bool row_struct_supported(const fp_op &op, const fp_workspace &ws) {
+    const int64_t n = ws.n, rows = ws.rows;
+    const int nt = rows == 1 || rows * n < kParallelMin ? 1 : ws.nthreads;
+    std::atomic<bool> ok{true};
+    parallel_for(nt, rows, row_grain(n, rows, nt), [&](int tid, int64_t r0, int64_t r1) {
+        RowBuffers<T> buf(ws, op, tid, n);
+        for (int64_t r = r0; r < r1 && ok.load(std::memory_order_relaxed); ++r) {
+            const T *x = ws.xs<T>() + r * n;
+            bool nan = false;
+            for (int64_t i = 0; i < n; ++i) nan |= x[i] != x[i];
+            if (!nan && !op.struct_ok_row(x, ws.zs<T>() + r * n, ws.code.data() + r * n, n, ws.step(r),
+                                          buf.kernel, r))
+                ok.store(false, std::memory_order_relaxed);
+        }
+    });
+    return ok.load();
+}
+
 // Kink codes of row operators with has_kinks() (since 0.3): row by row from
 // the saved input and solution, into mask (may be null) through its strides.
 template <class T>

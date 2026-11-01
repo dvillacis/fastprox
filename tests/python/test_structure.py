@@ -306,3 +306,78 @@ def test_errors():
     with pytest.raises(IndexError):
         s.matrix(1)
     assert "projector" in repr(s)
+
+
+# ------------------------------------------- group l2 kept live at its kink (S1)
+
+G0 = np.array([0.25, 0.375, 0.75])  # norm 0.875, exactly
+U0 = np.array([2.0, 3.0, 6.0]) / 7
+GIDS = np.array([0, 0, 0, 1, 1, 1])
+
+
+def _dense(op, ctx, n, **kw):
+    return np.stack([op.jvp(ctx, np.eye(n)[j], **kw) for j in range(n)], 1)
+
+
+@pytest.mark.parametrize("scale, tol", [(1.0, 0.0), (1 - 1e-6, 1e-5), (1 + 1e-6, 1e-5)])
+def test_group_l2_live_at_kink(scale, tol):
+    """Branch +1 on a group at ||x_g|| = tau (or within kink_tol below):
+    J_g = u u^T, the live piece at the kink, with dz/dtheta = -gamma u, and
+    the structure refused; above tau the live formula and a structure."""
+    op = fp.GroupL2(1.0, GIDS)
+    x = np.concatenate([G0 * scale, [2.0, 1.0, 2.0]])
+    gamma = 0.875
+    _, ctx = op.prox(x, gamma, keep=True)
+    J = _dense(op, ctx, 6, branch=1, kink_tol=tol)
+    c0 = 1.0 if scale <= 1 else 1 / scale
+    np.testing.assert_allclose(J[:3, :3], (1 - c0) * np.eye(3) + c0 * np.outer(U0, U0), atol=1e-12)
+    np.testing.assert_allclose(J, J.T, atol=1e-15)
+    w = np.linalg.eigvalsh(J)
+    assert w.min() >= -1e-12 and w.max() <= 1 + 1e-12
+    dz = op.jvp(ctx, None, 0.0, np.ones(1), branch=1, kink_tol=tol)
+    np.testing.assert_allclose(dz[:3], -gamma * U0, atol=1e-12)
+    if scale <= 1:
+        with pytest.raises(ValueError, match="span"):
+            ctx.structure(branch=1, kink_tol=tol)
+    else:
+        assert ctx.structure(branch=1, kink_tol=tol).state.tolist() == [FREE] * 6
+    # Side -1 and the default: a structure.
+    ctx.structure(branch=-1, kink_tol=tol)
+    ctx.structure()
+
+
+def test_group_l2_live_at_kink_parameters_match_the_live_side():
+    """The parameter tangent at the kink is the live side's: one-sided
+    differences in the weight from x_g = tau u, where z_g = (1 - tau/||x_g||) x_g."""
+    op = fp.GroupL2(1.0, GIDS)
+    x = np.concatenate([G0, [2.0, 1.0, 2.0]])
+    _, ctx = op.prox(x, 0.875, keep=True)
+    dz = op.jvp(ctx, None, 0.0, np.ones(1), branch=1)
+    h = 1e-7  # decreasing the weight keeps group 0 live
+    fd = (fp.GroupL2(1.0, GIDS, [1.0]).prox(x, 0.875) - fp.GroupL2(1.0, GIDS, [1.0 - h]).prox(x, 0.875)) / h
+    np.testing.assert_allclose(dz, fd, atol=1e-6)
+
+
+def test_group_l2_zero_norm_cannot_be_kept_live():
+    t = 0.625 * 2.0 ** -20
+    op = fp.GroupL2(1.0, GIDS)
+    x = np.array([0, 0, 0, 0.375 * 2.0 ** -20, 0.5 * 2.0 ** -20, 0])
+    _, ctx = op.prox(x, t, keep=True)
+    with pytest.raises(ValueError, match="no direction"):
+        op.jvp(ctx, np.ones(6), branch=1, kink_tol=1e-5)
+    J = _dense(op, ctx, 6, branch=[-1, -1, -1, 1, 1, 1], kink_tol=1e-5)
+    np.testing.assert_allclose(J[3:5, 3:5], np.outer([0.6, 0.8], [0.6, 0.8]), atol=1e-15)
+    np.testing.assert_array_equal(J[:3], 0.0)
+
+
+def test_group_l2_live_at_kink_conj():
+    """After prox_conj the inner prox at y (step 1, tau = lambda): J_conj =
+    I - u u^T on the group, and the structure (of J_inner) is refused."""
+    op = fp.GroupL2(0.875, GIDS)
+    y = np.concatenate([G0, [2.0, 1.0, 2.0]])
+    _, ctx = op.prox_conj(y, 2.0, keep=True)
+    J = _dense(op, ctx, 6, branch=1)
+    np.testing.assert_allclose(J[:3, :3], np.eye(3) - np.outer(U0, U0), atol=1e-12)
+    with pytest.raises(ValueError, match="span"):
+        ctx.structure(branch=1)
+    ctx.structure()
