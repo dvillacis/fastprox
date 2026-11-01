@@ -917,10 +917,35 @@ form of Gfrerer, Hubmer and Ramlau (Definition 3.6) it is
 
 $$P = P_L, \qquad W = (I - P) + P\,(J_L^{-1} - I)\,P / \gamma,$$
 
-with $J_L$ the restriction of $J$ to $L$. For PROJECTOR operators $J_L = I$,
-so $W = I - P$: the structure alone gives the subspace. For CURVED operators
-$W$'s block on $L$ needs $J$, through `fp_jvp` (CG on $J_L y = s$). After
-`fp_prox_conj` the queries describe the inner prox at $y/\sigma$, whose
+with $J_L$ the restriction of $J$ to $L$. $P$ is always the *Euclidean*
+orthogonal projector onto $L$ (Definition 3.6 requires $P$ symmetric). By
+kind (*revised in 1.1*, SCD review S4):
+- **PROJECTOR:** $J_L = I$, so $P$ = `s.project` (which equals `jvp`) and
+  $W = I - P$: the structure alone gives the subspace.
+- **CURVED:** $P$ = `s.project`, still Euclidean (the region means, then the
+  active constraint's direction removed), and $W$'s block on $L$ needs $J$,
+  through `fp_jvp` (CG on $J_L y = s$).
+- **WEIGHTED** (isotonic regression with unequal weights $w$): here
+  `s.project` is *not* $P$. The operator is the projection onto the
+  monotone cone $C$ in the metric $D_w = \operatorname{diag}(w)$, so its
+  subgradient is $v = D_w (x - z) \in N_C(z)$, not $(x - z)/\gamma$, and its
+  $J = M (M^\top D_w M)^{-1} M^\top D_w$, which `s.project` returns, is the
+  projector onto $L$ orthogonal in $D_w$: not symmetric. Since $M^\top D_w (I
+  - J) = 0$, $\operatorname{rge}(J, D_w (I - J)) = L \times L^\perp$ in the
+  Euclidean sense, the SCD subspace of the polyhedral $N_C$ at $(z, v)$. The
+  pair is the Euclidean
+  $P v$ = `s.expand(s.reduce(v) / s.reduce(s.sign))` (the plain region means,
+  $M^\top M$ being the diagonal of region sizes) and $W = I - P$. Copying the
+  PROJECTOR recipe with $P$ = `s.project` gives an asymmetric $P$
+  (asymmetry 0.29 on the review's example) and the wrong subgradient. A
+  weighted fit inside a forward–backward step is a variable-metric step: the
+  fit of $y$ is $\operatorname{argmin}_{z \in C} \tfrac12 \lVert z - y
+  \rVert_{D_w}^2$, and its contribution to $\hat y$ is $D_w (y - \hat x)$.
+- **NONE** (the spectral operators) has no queries, and a query that meets a
+  range without a descriptor (group ℓ2 kept live at its kink, *since 1.1*)
+  returns `FP_EINVAL` (ValueError in Python): no $(P, W)$ is given there.
+
+After `fp_prox_conj` the queries describe the inner prox at $y/\sigma$, whose
 Jacobian $J$ gives the conjugate's $I - J$: for a PROJECTOR operator the
 conjugate's subspace is $L^\perp$.
 
@@ -941,7 +966,7 @@ makes each unit's largest $|a_i|$ equal to 1.
 | ℓ∞ norm | FREE (ZERO when $z = 0$) | the clipped set, $\sigma_i = \operatorname{sign}(x_i)$; singletons | — | PROJECTOR |
 | Maximum, sum of the $k$ largest | FREE (absolute values with the sum constraint inactive: ZERO at the level) | the entries at the shared level (signed for absolute values); singletons | — | PROJECTOR |
 | Hyperplane, half-space, with a box | LOWER, UPPER on the bounds, FREE | singletons | the hyperplane, and the half-space when active: $a_i$ on the FREE entries | PROJECTOR |
-| Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights |
+| Isotonic regression | FREE | the pooled blocks | — | PROJECTOR; WEIGHTED with unequal weights (SCD pair: the Euclidean $P$, not `s.project`; see above) |
 | Sorted ℓ1 | ZERO on the block at 0, FREE | the blocks, $\sigma_i = \operatorname{sign}(x_i)$ | — | PROJECTOR |
 | 1D TV | FREE | the segments | — | PROJECTOR |
 | 1D TV ball | FREE | inside: singletons; on the sphere: the segments | on the sphere: $D^\top(w \odot \operatorname{sign}(Dz))$ | PROJECTOR |
@@ -1045,7 +1070,7 @@ s.offsets                # int64, units + 1: where each unit's regions start
 s.global_labels()        # int64, x's shape: offsets[unit] + label, -1 where not free
 s.reduce(v)              # M^T v: the signed sum of v over each region
 s.expand(c)              # M c, x's shape (0 where not free)
-s.project(v)             # P_L v (in diag(w) for "weighted"); equals jvp for "projector"
+s.project(v)             # P_L v (in diag(w) for "weighted": not the SCD P); equals jvp for "projector"
 s.dim                    # dim L per unit
 s.matrix(unit)           # M of one unit, dense (size x K)
 

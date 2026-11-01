@@ -381,3 +381,41 @@ def test_group_l2_live_at_kink_conj():
     with pytest.raises(ValueError, match="span"):
         ctx.structure(branch=1)
     ctx.structure()
+
+
+def test_weighted_isotonic_euclidean_pair():
+    """SCD review S4: weighted isotonic regression is the projection onto the
+    monotone cone C in the metric D_w = diag(w), and its J is the projector
+    onto L orthogonal in D_w, not symmetric (s.project returns it). The SCD
+    pair of N_C at (z, v), v = D_w (x - z), is instead the Euclidean P_L =
+    expand(reduce(.) / reduce(sign)) with W = I - P (docs/api.md, "SCD
+    subspaces"): P symmetric and idempotent with range J, and every
+    (J u, D_w (I - J) u) in rge(P, I - P) = L x L^perp."""
+    rng = np.random.default_rng(4)
+    n = 9
+    for t in range(20):
+        w = rng.uniform(0.2, 5.0, size=n)
+        x = rng.normal(size=(3, n)) + np.linspace(1.0, -1.0, n)  # pools of several sizes
+        op = fp.Isotonic(w)
+        _, ctx = op.prox(x, keep=True)
+        s = ctx.structure()
+        assert s.kind == "weighted"
+        I = np.eye(n)
+        for r in range(3):
+            def unit(v):  # the row r of a batch whose other rows are 0
+                out = np.zeros_like(x)
+                out[r] = v
+                return out
+            J = np.column_stack([op.jvp(ctx, unit(e))[r] for e in I])
+            P = np.column_stack([s.expand(s.reduce(unit(e)) / s.reduce(s.sign))[r] for e in I])
+            Pw = np.column_stack([s.project(unit(e))[r] for e in I])
+            np.testing.assert_allclose(P, P.T, atol=1e-15)
+            np.testing.assert_allclose(P @ P, P, atol=1e-14)
+            np.testing.assert_allclose(P @ J, J, atol=1e-13)  # range J within L
+            assert np.linalg.matrix_rank(J, tol=1e-9) == np.linalg.matrix_rank(P, tol=1e-9)
+            np.testing.assert_allclose(Pw, J, atol=1e-13)  # s.project is the D_w projector
+            if t == 0 and r == 0:
+                assert np.abs(Pw - Pw.T).max() > 1e-3  # which is not symmetric
+            # The graph of N_C's SCD subspace: J u in L, D_w (I - J) u in L^perp.
+            U = rng.normal(size=(n, 5))
+            np.testing.assert_allclose(P @ (np.diag(w) @ (I - J) @ U), 0, atol=1e-12)
