@@ -909,11 +909,21 @@ active constraint with $M^\top a \ne 0$, and $K$ otherwise.
    $x$ and the outputs.
 
 **SCD subspaces.** At $z = \operatorname{prox}_{\gamma g}(x)$ with
-$v = (x - z)/\gamma$, the subspace $\operatorname{rge}(J, (I - J)/\gamma)$
-belongs to the SC derivative of $\partial g$ at $(z, v)$ for convex $g$
-(Gfrerer and Outrata, arXiv:2106.00519, Proposition 3.26), and within the step
-conditions for the prox-regular SCAD, MCP and log penalty. In the $(P, W)$
-form of Gfrerer, Hubmer and Ramlau (Definition 3.6) it is
+$v = (x - z)/\gamma$ and $\gamma > 0$, the SC derivative of $\partial g$ at
+$(z, v)$ is exactly $\{\operatorname{rge}(B, (I - B)/\gamma) : B \in
+\bar\nabla \operatorname{prox}_{\gamma g}(x)\}$, the limiting (B-)Jacobians
+$B$ of the prox. Both directions are Proposition 3.17 of Gfrerer and Outrata
+(arXiv:2106.00519v2), applied to $\partial g$, which is graphically
+Lipschitzian with $\Phi(z, v) = (z + \gamma v, z)$: for convex $g$ at every
+$\gamma > 0$ (their Corollary 3.28, there with $\gamma = 1$; apply it to
+$\gamma g$), and for prox-regular, subdifferentially continuous $g$ at small
+enough $\gamma$ (Proposition 3.26), which is where the step conditions of
+SCAD, MCP and the log penalty come from. So $\operatorname{rge}(J, (I -
+J)/\gamma)$ is an SCD subspace when the $J$ that `fp_jvp` applies is such a
+$B$; what supports that, and where it is only a convention, is under "What
+the SCD claims rest on" below. In the $(P, W)$ form of Gfrerer, Hubmer and
+Ramlau (Definition 3.6: $P$ and $W$ symmetric, $P^2 = P$, $W(I - P) = I -
+P$) it is
 
 $$P = P_L, \qquad W = (I - P) + P\,(J_L^{-1} - I)\,P / \gamma,$$
 
@@ -948,6 +958,71 @@ kind (*revised in 1.1*, SCD review S4):
 After `fp_prox_conj` the queries describe the inner prox at $y/\sigma$, whose
 Jacobian $J$ gives the conjugate's $I - J$: for a PROJECTOR operator the
 conjugate's subspace is $L^\perp$.
+
+**What the SCD claims rest on** (*since 1.1*, SCD review S5). GHR is Gfrerer,
+Hubmer and Ramlau, *Inverse Problems* 41 (2025) 075002; GO is Gfrerer and
+Outrata, arXiv:2106.00519v2.
+1. **One subspace is enough.** Step NS of GHR Algorithm 3.8 selects *one*
+   element of $\mathcal S_{P,W}\partial\varphi(\hat x, \hat y)$ (GHR (3.14)),
+   so a valid default piece supplies the step; Lemma 3.7 turns it into the
+   quadratic programme over $\operatorname{rng} P$. Superlinear convergence
+   (GHR Theorem 3.9) needs, besides that element: Assumption 3.1 (the points
+   where $\varphi$ is prox-regular and subdifferentially continuous dense in
+   $\operatorname{gph} \partial\varphi$), $\partial\varphi$ SCD semismooth\*
+   at the solution, the regularity condition $\mathcal S\partial\varphi(\bar
+   x, 0) \subset \mathcal Z_n^{\mathrm{reg}}$, a start close enough to the
+   solution, and an approximation step that meets GHR (3.5). Nothing about
+   convergence follows from the structure queries alone, and branch arrays
+   explore supported selections, not every subspace.
+2. **SCD membership is a separate claim from range, symmetry and spectrum.**
+   A matrix with the right range, symmetric, with its spectrum in $[0, 1]$
+   need not be a limiting Jacobian; only a $B \in \bar\nabla
+   \operatorname{prox}_{\gamma g}(x)$ gives an SCD subspace (GO Proposition
+   3.17). The library does not claim that every default or override is
+   such a $B$ at the supplied input:
+   - At an exact kink, the pieces the review checked are limiting pieces:
+     both sides of an elementwise kink (soft thresholding), the simplex and
+     1D TV, and, in exact arithmetic with exactly zero jumps, the fully
+     joined piece of graph, tree and (since 1.1) anisotropic TV (SCD review,
+     "What holds"; its sampling is evidence, the joined-piece argument a
+     proof). Other operators' kinks are not claimed beyond guarantees 1 and
+     2. Within a nonzero `kink_tol`, a side override evaluates
+     the convention of a nearby boundary, not a piece at $x$. Sides of
+     coupled entries (a row's or an image's kinks) must form a feasible
+     piece together; an arbitrary combination of flagged entries does not
+     establish membership.
+   - Graph TV and anisotropic TV: side +1 on a flagged edge may select no
+     piece, since their masks describe the saved dual (math audit C5, SCD
+     review S3).
+   - Group ℓ2 kept live at its positive threshold has no descriptor (the
+     queries return `FP_EINVAL`); below the threshold its derivative is a
+     convention evaluated at the radial boundary, and a zero-norm group
+     cannot be kept live (SCD review S1).
+   - `ctx.kinks` and `branch=` explore the supported choices; they do not
+     enumerate the SCD derivative. Operators without overrides, masks that
+     depend on the dual, and ranges without a descriptor limit what is
+     reachable.
+   - The discontinuous class (ℓ0, ℓq, the log penalty above its step
+     condition) keeps the exclusion of spec Section 7: the states are a
+     convention there, and nothing more is claimed. The construction also
+     needs $\gamma > 0$, although the prox accepts $\gamma = 0$.
+3. **Numerical solves and selections.** A descriptor describes the selected
+   mathematical piece; `fp_jvp` approximates its products to the accuracy
+   the tests establish. Before a Newton step, check `ctx.deriv.exact` for
+   the iterative operators and refine an inexact solve where supported
+   (`fp_workspace_refine`). Neither the flag nor a refine proves that the
+   piece is a limiting Jacobian, resolves every rounding-level active-set
+   decision (anisotropic TV's rounding-level joins are a convention, S3), or
+   establishes the outer algorithm's approximation step (3.5).
+4. **CURVED operators.** $W$'s block on $L$ is $(J_L^{-1} - I)/\gamma$, which
+   needs $J_L^{-1}$: CG on `fp_jvp` restricted to $L$, nested inside the CG
+   that isotropic TV's `fp_jvp` already runs. A call that applies
+   $J_L^{-1}$ directly is a 1.x candidate (ROADMAP, "Curvature of the
+   CURVED operators").
+5. **SCAD and MCP** are prox-regular, not convex: where their slope exceeds
+   1, $J_L^{-1} - I$ is negative there and $W$ is indefinite. The subspace is
+   still an SCD subspace within the step conditions (GO Proposition 3.26);
+   the QP of GHR (3.16) then asks for a stationary point, not a minimiser.
 
 **Operator by operator.** Constraint: $a$ when active, up to the factor that
 makes each unit's largest $|a_i|$ equal to 1.

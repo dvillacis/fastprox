@@ -11,12 +11,33 @@ with their sum rule, Lemma 4.1) alternates two steps:
   min_s s^T (P H P + W) s / 2 + <y_hat, s> over s in rng P, with H = A^T A,
   and x = x_hat + s.
 
-(P, W) describes a subspace of the SC derivative of d g at the prox point.
-When the prox's Jacobian J is the orthogonal projector onto a subspace L
-(``kind`` "projector"), it is P = P_L and W = I - P (docs/api.md, "Structure
-of the derivative"): the structure alone gives the step, which then solves
-P (H s + y_hat) = 0 on rng P. Once the structure of the solution is found the
-next step lands on the solution, up to rounding.
+(P, W) describes a subspace of the SC derivative of d g at the prox point:
+rge(B, (I - B)/t) for a limiting Jacobian B of the prox (Gfrerer and
+Outrata, arXiv:2106.00519v2, Proposition 3.17). When the prox's Jacobian J is
+the orthogonal projector onto a subspace L (``kind`` "projector"), it is
+P = P_L and W = I - P (docs/api.md, "Structure of the derivative"): the
+structure alone gives the step, which then solves P (H s + y_hat) = 0 on
+rng P. Once the structure of the solution is found the next step lands on the
+solution, up to rounding. Other kinds need more: for "curved", W's block on L
+is (J_L^-1 - I)/t; for "weighted" (isotonic regression with weights), P is
+not ``s.project`` but the Euclidean projector onto L (docs/api.md, "SCD
+subspaces").
+
+What this example does not establish (docs/api.md, "What the SCD claims rest
+on"):
+- One element of the SC derivative is enough for step NS, but the
+  superlinear convergence of Theorem 3.9 also needs Assumption 3.1, SCD
+  semismoothness* and the regularity condition at the solution, a start close
+  enough to it, and an approximation step meeting their (3.5). Here the
+  lasso and 1D TV are convex and polyhedral; the safeguard below is not the
+  paper's globalisation.
+- The default piece the structure describes is a limiting Jacobian for the
+  pieces the SCD review checked (the soft-thresholding kinks and 1D TV among
+  them); a matrix with the right range, symmetry and spectrum need not be
+  one, and an override within a nonzero ``kink_tol`` evaluates a nearby
+  boundary's convention.
+- For the iterative image operators, check ``ctx.deriv.exact`` (and refine)
+  before a step; neither proves membership.
 
 Two problems: the lasso (g = alpha ||x||_1, P keeps the support) and 1D TV
 deblurring (g = alpha TV, P averages over the segments). Each Newton step is
