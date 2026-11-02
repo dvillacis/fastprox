@@ -2267,7 +2267,13 @@ def project_l2_ball(x, radius=1.0, *, axis=-1, out=None, threads=0, copy=False):
 
     ``radius`` is a number or (since 1.0.3) an array that broadcasts to the
     batch shape, ``x``'s shape without the axis, for one radius per row; equal
-    radii give the bits of a number (see :class:`L2Ball`)."""
+    radii give the bits of a number (see :class:`L2Ball`).
+
+    Each call builds the operator, and with an array copies and checks every
+    radius (18 µs for 65536 radii) before the projection reads them. In a
+    loop with the same radii, build ``L2Ball(radius)`` once and call its
+    ``prox``: at 256 × 256 rows that is 60–80 µs per call against 110–120 µs
+    here."""
     if np.ndim(radius) == 0:
         return _once(_C.l2_ball(float(radius)), x, 1.0, axis, out, threads, copy)
     shape = np.shape(x)

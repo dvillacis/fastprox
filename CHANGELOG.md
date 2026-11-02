@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Building `L2Ball` with one radius per row, or calling `project_l2_ball` with an array of radii, is faster. Construction copied the radii one entry at a time through an index walk, about 2 ns per radius. It now copies each innermost axis as one run, a single `memcpy` when the array is contiguous, and checks the radii in a loop that vectorizes. For 65536 radii, construction drops from 125 to 19 µs, and `project_l2_ball` at 256 × 256 rows from 260 to 115 µs, where numpy takes 110–460 µs. The pixel and edge weights of image TV (`fp_op_tv_aniso_weighted` and `fp_op_tv_iso_weighted`) are read the same way. The values are the same, so results are bit-identical. The `project_l2_ball` docstring says to build `L2Ball` once for repeated calls with the same radii.
+
 ### Fixed
 
 - `fp_prox_conj` in float32 for the operators that evaluate y − σ prox\_{g/σ}(y/σ) as written (the projections, the elastic net, Huber, the log barrier, the nonconvex penalties) returns `FP_EPARAM` for σ > 2^64 (ValueError in Python). There y/σ, stored in float32, goes subnormal once σ passes 2^126 |y|, and the output and its derivatives kept an absolute error up to σ·2^-150: the ℓ2 ball's and the 1D TV ball's conjugate of a point inside the ball, which is 0, gave −0.58 at σ = 1.1e45. Up to 2^64 the error is below 2^-86. Positively homogeneous operators and cone indicators, which compute y − prox\_g(y) without scaling, and float64 are unchanged. Found by the nightly fuzz run on 2026-11-02 with the dense Jacobian check of SCD review S6. The same in 1.0.2 and 1.0.3.
