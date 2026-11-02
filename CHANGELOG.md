@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The ℓ2 ball's prox (`L2Ball`, `project_l2_ball`) on rows shorter than 8, such as the per-pixel projection of an image gradient's dual in PDHG, is about 17× faster on one thread. Each row was a separate kernel call with its offset computed by divisions, 7–13 ns per row of 2 against about 1 ns of work, so on one thread it was slower than numpy's formula (reported from research code, 2026-11-02: 413 µs against 179 µs at 256 × 256, with `OMP_NUM_THREADS=1` in worker pools). The driver now hands the operator whole runs of rows (`fp_op::prox_block`), and rows of 2 run in a loop the compiler vectorizes, in the layouts (2, H, W) and (H, W, 2). At 256 × 256 on one thread: 675 → 40 µs, against 124 µs for numpy. Such calls now run on one thread below 2^17 entries, where waking the pool's sleeping workers (20–40 µs) cost more than the work: between numpy steps, 128 × 128 takes 11 µs instead of 27 on 15 threads. Results are bit-identical to before for any thread count, layout and dtype; rows with a zero, tiny, huge, NaN or infinite entry go through the per-row kernel. Calls with `keep=True`, the conjugate or steps per row are unchanged. The fuzz driver now checks that saving the structure does not change any operator's result.
+
 ## [1.0.4] — 2026-11-02
 
 A patch release with two changes and no change to the ABI: no function is added and no signature changes. Calls that newly fail: `fp_prox_conj` in float32 with σ > 2^64 on the operators that evaluate the conjugate's formula as written (`FP_EPARAM`, ValueError in Python), where the result was wrong by up to σ·2^-150. Building the ℓ2 ball with one radius per row, and the weighted image TV operators, is faster, with bit-identical results.

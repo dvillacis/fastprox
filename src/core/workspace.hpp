@@ -15,6 +15,10 @@ namespace fp {
 
 constexpr int64_t kChunk = 16384;          // elementwise work unit
 constexpr int64_t kParallelMin = 1 << 15;  // below this many entries, run serially
+// The same for short rows in blocks (fp_op::prox_block): about 0.3 ns per
+// entry on one thread, so waking the pool (20-40 us when its workers sleep)
+// pays from about 2^17 entries, 256 x 256 rows of 2.
+constexpr int64_t kBlockParallelMin = 1 << 17;
 constexpr int64_t kMaxBlocks = 64;         // vjp reduction blocks
 
 inline int64_t ceil_div(int64_t a, int64_t b) noexcept { return (a + b - 1) / b; }

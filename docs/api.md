@@ -1745,7 +1745,10 @@ sleeping, so that back-to-back calls find them awake. The environment variable
 at once: the least CPU, but about 10–100 µs more latency on the next call) to
 100 000 (*since 1.0*). A call waits only for the workers that joined it, not
 for those still waking up, and its pieces scale with the thread count (*since
-1.0*). When several threads call fastprox at once, one call uses the pool
+1.0*). Small calls run on the calling thread alone: below $2^{15}$ entries for
+row and elementwise operators, and below $2^{17}$ for the prox of `L2Ball` on
+rows shorter than 8, such as the gradient fields of images, where waking the
+pool costs more than the work (*since 1.0.5*). When several threads call fastprox at once, one call uses the pool
 and the others run serially, which avoids oversubscription; a child process
 after `fork()` builds its own pool. Builds with `FASTPROX_THREADS=OFF` are
 serial and `fp_default_threads()` returns 1.

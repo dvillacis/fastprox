@@ -430,6 +430,22 @@ struct fp_op {
                          uint8_t *, int64_t) const noexcept {
         return fp::kRowOk;
     }
+    // Short rows in blocks (since 1.0.5): b rows of length n, row k's entry i
+    // at x[k * xk + i * xi] and z[k * zk + i * zi], the rows r0 .. r0 + b - 1
+    // of the batch; z is x or disjoint from it. The prox driver calls it in
+    // place of prox_row when has_prox_block(n), and only without saved
+    // structure, conjugate or steps. Each row gets the bits of prox_row, and
+    // the return value is prox_row's status bits OR-ed over the rows. A call
+    // per row cost 5-10 ns at n = 2, against about 1 ns of work.
+    virtual bool has_prox_block(int64_t) const noexcept { return false; }
+    virtual int prox_block(const float *, int64_t, int64_t, float *, int64_t, int64_t, int64_t, int64_t,
+                           double, int64_t) const noexcept {
+        return fp::kRowOk;
+    }
+    virtual int prox_block(const double *, int64_t, int64_t, double *, int64_t, int64_t, int64_t,
+                           int64_t, double, int64_t) const noexcept {
+        return fp::kRowOk;
+    }
     // x, z, code: the saved row. dx is never null; dparams may be null.
     virtual void jvp_row(const float *, const float *, const uint8_t *, const float *, float *,
                          int64_t, double, double, const double *, void *, int64_t) const noexcept {}

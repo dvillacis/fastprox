@@ -360,6 +360,90 @@ struct L2Ball final : RowOp<L2Ball> {
             return kRowOk;
         });
     }
+    // Rows shorter than the lanes in blocks (fp_op::prox_block, since 1.0.5):
+    // rows of 2, the gradients of images, run in a loop over the rows that
+    // the compiler vectorizes for the layouts (2, ...) and (..., 2). Its sums
+    // are sumsq's (one lane, then the fold's additions of +0, which leave a
+    // sum of squares unchanged), so each row gets prox's bits; a block with a
+    // sum out of range (an infinite, NaN, zero or tiny row) runs row by row
+    // through prox.
+    bool has_prox_block(int64_t n) const noexcept override { return n >= 1 && n < kLanes; }
+    int prox_block(const float *x, int64_t xi, int64_t xk, float *z, int64_t zi, int64_t zk, int64_t n,
+                   int64_t b, double, int64_t r0) const noexcept override {
+        return block(x, xi, xk, z, zi, zk, n, b, r0);
+    }
+    int prox_block(const double *x, int64_t xi, int64_t xk, double *z, int64_t zi, int64_t zk, int64_t n,
+                   int64_t b, double, int64_t r0) const noexcept override {
+        return block(x, xi, xk, z, zi, zk, n, b, r0);
+    }
+    template <class T>
+    int block(const T *x, int64_t xi, int64_t xk, T *z, int64_t zi, int64_t zk, int64_t n, int64_t b,
+              int64_t r0) const noexcept {
+        if (n == 2) {
+            if (bndim < 0) {
+                const double r = radius;
+                return pairs(x, xi, xk, z, zi, zk, b, r0, [r](int64_t) { return r; });
+            }
+            const double *rp = radii.data() + r0;
+            return pairs(x, xi, xk, z, zi, zk, b, r0, [rp](int64_t k) { return rp[k]; });
+        }
+        int e = kRowOk;
+        for (int64_t k = 0; k < b; ++k) e |= gathered(x + k * xk, xi, z + k * zk, zi, n, r0 + k);
+        return e;
+    }
+    // The layouts with a constant stride get their own copy of the loop.
+    template <class T, class R>
+    int pairs(const T *x, int64_t xi, int64_t xk, T *z, int64_t zi, int64_t zk, int64_t b, int64_t r0,
+              R rad_k) const noexcept {
+        if (xk == 1 && zk == 1) return pairs_at(x, xi, int64_t(1), z, zi, int64_t(1), b, r0, rad_k);
+        if (xi == 1 && zi == 1 && xk == 2 && zk == 2)
+            return pairs_at(x, int64_t(1), int64_t(2), z, int64_t(1), int64_t(2), b, r0, rad_k);
+        return pairs_at(x, xi, xk, z, zi, zk, b, r0, rad_k);
+    }
+    template <class T, class R>
+    FP_INLINE int pairs_at(const T *x, int64_t xi, int64_t xk, T *z, int64_t zi, int64_t zk, int64_t b,
+                           int64_t r0, R rad_k) const noexcept {
+        constexpr int64_t kB = 64;
+        double S[kB];
+        int e = kRowOk;
+        for (int64_t k0 = 0; k0 < b; k0 += kB) {
+            const int64_t kb = std::min(kB, b - k0);
+            const T *xb = x + k0 * xk;
+            T *zb = z + k0 * zk;
+            bool ok = true;
+            for (int64_t k = 0; k < kb; ++k) {
+                const double u = static_cast<double>(xb[k * xk]), v = static_cast<double>(xb[k * xk + xi]);
+                double s = 0.0;
+                s += u * u;
+                s += v * v;
+                S[k] = s;
+                ok &= sumsq_in_range(s);
+            }
+            if (!ok) {
+                for (int64_t k = 0; k < kb; ++k) e |= gathered(xb + k * xk, xi, zb + k * zk, zi, 2, r0 + k0 + k);
+                continue;
+            }
+            for (int64_t k = 0; k < kb; ++k) {
+                const double m = std::sqrt(S[k]), r = rad_k(k0 + k), c = r / m;
+                const T u = xb[k * xk], v = xb[k * xk + xi];
+                const bool in = m <= r;
+                zb[k * zk] = in ? u : static_cast<T>(static_cast<double>(u) * c);
+                zb[k * zk + zi] = in ? v : static_cast<T>(static_cast<double>(v) * c);
+            }
+        }
+        return e;
+    }
+    // One row through prox, gathered and scattered (n < kLanes); z is left
+    // as it was when the row fails, as prox leaves it.
+    template <class T>
+    int gathered(const T *x, int64_t xi, T *z, int64_t zi, int64_t n, int64_t row) const noexcept {
+        T a[kLanes], c[kLanes];
+        for (int64_t i = 0; i < n; ++i) a[i] = x[i * xi];
+        const int e = prox(a, c, n, 0.0, nullptr, nullptr, row);
+        if (e == kRowOk)
+            for (int64_t i = 0; i < n; ++i) z[i * zi] = c[i];
+        return e;
+    }
     // Structure (since 1.0.2): every entry FREE; outside the ball, the
     // constraint a = x / ||x||, where J = (r / ||x||) (I - a a^T). The test
     // is the jvp's: the same norm, bit for bit.
