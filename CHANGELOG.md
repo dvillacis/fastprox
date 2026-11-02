@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-11-02
+
+A patch release with two changes and no change to the ABI: no function is added and no signature changes. Calls that newly fail: `fp_prox_conj` in float32 with σ > 2^64 on the operators that evaluate the conjugate's formula as written (`FP_EPARAM`, ValueError in Python), where the result was wrong by up to σ·2^-150. Building the ℓ2 ball with one radius per row, and the weighted image TV operators, is faster, with bit-identical results.
+
+Known issue, also in 1.0.2 and 1.0.3: 1D TV's taut string returns inf on rows whose local sums pass the largest double, near 1e308 (the 1.0.3 known issue). It was planned for 1.0.4 and moves to 1.0.5, so that this release ships today (decision of 2026-11-02).
+
 ### Changed
 
 - Building `L2Ball` with one radius per row, or calling `project_l2_ball` with an array of radii, is faster. Construction copied the radii one entry at a time through an index walk, about 2 ns per radius. It now copies each innermost axis as one run, a single `memcpy` when the array is contiguous, and checks the radii in a loop that vectorizes. For 65536 radii, construction drops from 125 to 19 µs, and `project_l2_ball` at 256 × 256 rows from 260 to 115 µs, where numpy takes 110–460 µs. The pixel and edge weights of image TV (`fp_op_tv_aniso_weighted` and `fp_op_tv_iso_weighted`) are read the same way. The values are the same, so results are bit-identical. The `project_l2_ball` docstring says to build `L2Ball` once for repeated calls with the same radii.
