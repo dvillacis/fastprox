@@ -456,6 +456,13 @@ fp_status prox_impl(const fp_op *op, double step, const fp_array *xa, fp_array *
     } else if (identity) {
     } else if (conj && !homog && !finite(gamma)) {
         return FP_EPARAM;  // 1 / sigma overflows
+    } else if (conj && !homog && x.dtype == FP_F32 && step > 0x1p64) {
+        // y / sigma is staged in float32 and goes subnormal once sigma passes
+        // 2^126 |y|, leaving an absolute error up to sigma 2^-150 in the
+        // output and its derivatives (-0.58 instead of 0 for the l2 ball at
+        // sigma = 1.1e45, nightly fuzz 2026-11-02); below 2^64 it is under
+        // 2^-86. In float64 it is at most DBL_MAX 2^-1075, about 4e-16.
+        return FP_EPARAM;
     } else if (fp_status s = step_ok(*op, gamma)) {
         return s;
     }
