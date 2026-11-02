@@ -9,7 +9,7 @@ section.
 
 Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
-**Where things stand (2026-11-02):** 1.0.3 is being released: the fixes from the review of the SCD subspaces of 2026-10-28 (group ℓ2 at its kink, 1D TV with ℓ2 near its boundary, anisotropic TV on tied images), the docs and tests that go with them, and the ℓ2 ball with one radius per row (decision of 2026-11-02). The version is set; the TestPyPI dry run and the tag follow. 1.0.2 is the current release on PyPI (2026-10-27). The GPU backend and the candidates follow as users need them.
+**Where things stand (2026-11-02):** 1.0.3, the fixes from the review of the SCD subspaces and the ℓ2 ball with one radius per row, is released on PyPI (2026-11-02). 1.0.4 is next: the taut string's overflow near 1e308. The GPU backend and the candidates follow as users need them.
 
 ## Next: 1.0.3 — review of the SCD subspaces
 
@@ -33,7 +33,7 @@ A review of 2026-10-28 checked, operator by operator, that the structure of 1.0.
 **Tests and release**
 
 - [x] S6: Exact-kink and nearby fixtures check supported structure guarantees, atomic rejection of unsupported queries, spectra in the appropriate metric, and B-Jacobian membership separately. Conjugate tests use the inner-prox descriptor and the full Moreau chain rule. Add independent TV1DL2 boundary/scale references, dense short-row fuzz checks and the report counterexamples — [spec](docs/scd-review-2026-10.md#s6) — Done (2026-11-01): `test_exact_kinks` and `test_exact_kinks_are_limits` in `test_structure.py` (18 fixtures: soft, ℓ1 over a box, box, orthant, SCAD, MCP, ℓ0, simplex, ℓ1 ball at τ and on its sphere, group ℓ2, 1D and anisotropic TV, tree and graph TV, and the hyperplane with a box and weighted isotonic at their default piece); `place` in `derivative_cases` (group ℓ2 at ‖x_g‖ = τ, TV1DL2 on its boundary), checked by the dense spectrum; `snap` and `check_jacobian` in `fuzz/fuzz_ops.cpp`. On 1.0.2 the group ℓ2 fixture, the TV1DL2 boundary (79 of 200 rows not firm) and the fuzz check (every seed of 150k inputs, on TV1DL2 and group ℓ2) fail; they pass now (900k fuzz inputs).
-- [ ] R1: 1.0.3: the version, CHANGELOG, full suites, the sanitizer build, an hour of the fuzz driver with the new seeds, the `abi` job (no change), a TestPyPI dry run, then the tag `v1.0.3` — [spec](docs/scd-review-2026-10.md#r1) — In progress (2026-11-02): the version (`project()`, the header macros, the conda recipe, README), the "since 1.0.3" notes, CHANGELOG and "ABI stability" are set; the C suite (1106594 checks), the header test, the Python suite (2712 passed), the strict docs build, ASan/UBSan and TSan pass. Two fuzz hours on 6 workers, rounds of 3M inputs, new seeds: the first found S6's dense Jacobian check taking isotropic TV's smoothed derivative as exact (asymmetric at 1e-5), so the check now runs on image TV only where `fp_workspace_deriv_exact` certifies the derivative, and the six failing seeds pass; in the second, five workers were clean (16 rounds each) and one found the taut string overflowing near 1e308, present in 1.0.2 and deferred to 1.0.4 (decision of 2026-11-02)
+- [x] R1: 1.0.3: the version, CHANGELOG, full suites, the sanitizer build, an hour of the fuzz driver with the new seeds, the `abi` job (no change), a TestPyPI dry run, then the tag `v1.0.3` — [spec](docs/scd-review-2026-10.md#r1) — Done (2026-11-02): the version (`project()`, the header macros, the conda recipe, README), the "since 1.0.3" notes, CHANGELOG and "ABI stability" are set; the C suite (1106594 checks), the header test, the Python suite (2712 passed), the strict docs build, ASan/UBSan and TSan pass. Two fuzz hours on 6 workers, rounds of 3M inputs, new seeds: the first found S6's dense Jacobian check taking isotropic TV's smoothed derivative as exact (asymmetric at 1e-5), so the check now runs on image TV only where `fp_workspace_deriv_exact` certifies the derivative, and the six failing seeds pass; in the second, five workers were clean (16 rounds each) and one found the taut string overflowing near 1e308, present in 1.0.2 and deferred to 1.0.4 (decision of 2026-11-02); the `abi` job passed on the release PR (#148, one function added, filtered by `--no-added-syms`); the TestPyPI dry run installed and ran (per-row radii bit for bit against `L2Ball`), and the tag `v1.0.3` published to PyPI
 
 ## 1.0.4 — fixes
 
@@ -145,6 +145,7 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20 and 
 | 1.0.0 | 2026-10-24 | 1.0 — stable; 1.0 — audit of 2026-10-22; 1.0 — user feedback of 2026-10-23 |
 | 1.0.1 | 2026-10-25 | 1.0.1 — mathematical audit of 2026-10-25 |
 | 1.0.2 | 2026-10-27 | 1.0.2 — structure of the derivative |
+| 1.0.3 | 2026-11-02 | 1.0.3 — review of the SCD subspaces |
 
 ### 0.1 — core and 1D
 
