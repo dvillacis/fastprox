@@ -4047,6 +4047,51 @@ static void test_conj_extremes() {
         fp_op_free(en);
         fp_op_free(ball);
     }
+    // float32 above sigma = 2^64: y / sigma goes subnormal past 2^126 |y|, and
+    // the output kept an absolute error up to sigma 2^-150 (the l2 ball gave
+    // -0.58 for 0 at sigma = 1.1e45, nightly fuzz 2026-11-02), so FP_EPARAM,
+    // keeping the workspace's structure. At 2^64 and in float64 the inner
+    // rows stay normal: the l2 ball's conjugate of a point inside is 0 to
+    // rounding of y. Homogeneous operators are exact at any sigma (above).
+    for (const auto &c : other) {
+        fp_op *op;
+        CHECK_OK(c.first(&op));
+        std::vector<float> f;
+        std::vector<double> z;
+        CHECK_OK(conj_call(op, 0x1p64, {6}, row, f));
+        CHECK(std::isfinite(maxabs(Vec(f.begin(), f.end()))));
+        for (double sg : {0x1.000002p64, 1e30, 1.1277728626179795e45, 1e300})
+            CHECK(conj_call(op, sg, {6}, row, f) == FP_EPARAM);
+        CHECK_OK(conj_call(op, 1e300, {6}, row, z));
+        fp_op_free(op);
+    }
+    {
+        fp_op *ball;
+        CHECK_OK(fp_op_l2_ball(1.0, &ball));
+        const Vec y = {1.0, 3e-4, -2.0};
+        std::vector<float> f;
+        std::vector<double> z;
+        CHECK_OK(conj_call(ball, 0x1p64, {3}, y, f));
+        CHECK(maxabs(Vec(f.begin(), f.end())) <= 4e-7);
+        CHECK_OK(conj_call(ball, 1e300, {3}, y, z));
+        CHECK(maxabs(z) <= 1e-15);
+        // A rejected call leaves the saved structure and its derivatives.
+        const int64_t sh[] = {3};
+        std::vector<float> yf(y.begin(), y.end()), zf(3), gf(3, 1.0f), d0(3), d1(3);
+        fp_array ya{yf.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU}, za{zf.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU};
+        fp_array ga{gf.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU};
+        fp_array a0{d0.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU}, a1{d1.data(), FP_F32, 1, sh, nullptr, FP_DEVICE_CPU};
+        fp_options o = opts(-1, 0, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(ball, &ya, &o, &ws));
+        CHECK_OK(fp_prox_conj(ball, 2.0, &ya, &za, &o, ws, nullptr));
+        CHECK_OK(fp_jvp(ball, ws, &ga, 0.0, nullptr, &a0));
+        CHECK(fp_prox_conj(ball, 1.1277728626179795e45, &ya, &za, &o, ws, nullptr) == FP_EPARAM);
+        CHECK_OK(fp_jvp(ball, ws, &ga, 0.0, nullptr, &a1));
+        CHECK(d0 == d1);
+        fp_workspace_free(ws);
+        fp_op_free(ball);
+    }
     // The step range: gamma lam > 2^960 is FP_EPARAM; inside it, finite.
     {
         const std::vector<std::function<fp_status(fp_op **)>> ranged = {

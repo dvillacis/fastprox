@@ -627,7 +627,9 @@ FP_API fp_status fp_prox_steps(const fp_op *op, const fp_array *gamma, const fp_
  * and y_i / sigma must be finite in the array's dtype, else FP_EPARAM. That
  * is checked for every sigma < 1 in float32, and in float64 for sigma < 2^-64;
  * above that, only entries beyond about 1e289 can overflow, and their outputs
- * are then +-inf or NaN. FP_EINVAL for weighted isotonic regression
+ * are then +-inf or NaN. In float32, sigma > 2^64 is FP_EPARAM too (since
+ * 1.0.4): y_i / sigma would go subnormal, leaving an absolute error up to
+ * sigma 2^-150 in the output and its derivatives. FP_EINVAL for weighted isotonic regression
  * (fp_op_isotonic, since 1.0.1). For the nonconvex penalties (l0, lq, SCAD,
  * MCP, the log penalty and their group and spectral forms) the result is the
  * Moreau residual, not the prox of g*, which is 0: their g* is the indicator

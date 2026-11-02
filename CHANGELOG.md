@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `fp_prox_conj` in float32 for the operators that evaluate y − σ prox\_{g/σ}(y/σ) as written (the projections, the elastic net, Huber, the log barrier, the nonconvex penalties) returns `FP_EPARAM` for σ > 2^64 (ValueError in Python). There y/σ, stored in float32, goes subnormal once σ passes 2^126 |y|, and the output and its derivatives kept an absolute error up to σ·2^-150: the ℓ2 ball's and the 1D TV ball's conjugate of a point inside the ball, which is 0, gave −0.58 at σ = 1.1e45. Up to 2^64 the error is below 2^-86. Positively homogeneous operators and cone indicators, which compute y − prox\_g(y) without scaling, and float64 are unchanged. Found by the nightly fuzz run on 2026-11-02 with the dense Jacobian check of SCD review S6. The same in 1.0.2 and 1.0.3.
+
 ## [1.0.3] — 2026-11-02
 
 A patch release with the fixes from the review of the SCD subspaces of 1.0.2 (2026-10-28) and the ℓ2 ball with one radius per row. It adds one C function, `fp_op_l2_ball_radii`, and changes no signature (the ABI grows, as in 1.0.2; decision of 2026-11-02). Two kinds of call newly fail: a structure query on group ℓ2 with a group kept live at its kink, whose range span(x\_g) has no descriptor, and an override keeping live a zero group with a positive threshold (`FP_EINVAL`, ValueError in Python). Derivatives change for group ℓ2 kept live at or below its threshold (S1); for 1D TV with ℓ2 of differences near its boundary and at extreme scales, and in the last bits elsewhere (S2); and for anisotropic TV where parts of the solution agree to rounding, as on tied images (S3). Image TV with equal edge weights along a line may change in the last bit.
