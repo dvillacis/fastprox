@@ -9,13 +9,13 @@ section.
 
 Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
-**Where things stand (2026-11-02):** 1.0.4 is being released: `fp_prox_conj` in float32 above σ = 2^64 returns FP_EPARAM instead of a wrong result, and the ℓ2 ball with one radius per row is 6.5× faster to build. 1.0.5 is next: the taut string's overflow near 1e308, moved from 1.0.4 (decision of 2026-11-02).
+**Where things stand (2026-11-02):** 1.0.4, `fp_prox_conj` in float32 above σ = 2^64 returning FP_EPARAM instead of a wrong result and the ℓ2 ball with one radius per row 6.5× faster to build, is released on PyPI (2026-11-02). 1.0.5 is next: the taut string's overflow near 1e308, moved from 1.0.4 (decision of 2026-11-02). The GPU backend and the candidates follow as users need them.
 
 ## Next: 1.0.4 — fixes
 
 - [x] `fp_prox_conj` in float32 at large σ for the operators that evaluate the formula as written: y/σ goes subnormal once σ passes 2^126 |y|, leaving an absolute error up to σ·2^-150 (the 1D TV ball's and the ℓ2 ball's J had eigenvalue −0.58 at σ = 1.1e45; nightly fuzz 2026-11-02, the same in 1.0.2). Done (2026-11-02): FP_EPARAM for σ > 2^64 in float32, a regression test in `test_conj_extremes`, docs/api.md "Conjugates" (decision of 2026-11-02)
 - [x] The ℓ2 ball with one radius per row was slower than numpy through `project_l2_ball(x, radius=array)` (about 250 µs at 256 × 256 rows, reported from research code, 2026-11-02): its constructor copied the radii through an index walk per entry, about 2 ns each. Done (2026-11-02, PR #151): `gather_c` copies each innermost axis as one run (one memcpy when contiguous), shared with the weighted image TV constructors, and the radii check vectorizes: 125 → 19 µs to build 65536 radii, 260 → 115 µs per call; a layout test (transposed, reversed, padded, extent-1 axes, float32)
-- [ ] R1: 1.0.4: the version, CHANGELOG, full suites, the sanitizer build, the fuzz driver, the `abi` job (no change at all: no function added), a TestPyPI dry run, then the tag `v1.0.4`
+- [x] R1: 1.0.4: the version, CHANGELOG, full suites, the sanitizer build, the fuzz driver, the `abi` job (no change at all: no function added), a TestPyPI dry run, then the tag `v1.0.4` — Done (2026-11-02, PR #152): the version (`project()`, the header macros, the conda recipe, README), the "since 1.0.4" notes and CHANGELOG are set; the C suite (1106716 checks), the header test, the Python suite (2713 passed), the strict docs build, ASan/UBSan and TSan pass; the nightly crash replays clean and 4 fuzz workers ran 1.5M new inputs each, clean; the `abi` job passed on the release PR with no change; the TestPyPI dry run installed and ran (per-row radii in every layout, the float32 conjugate rejected at σ = 1.13e45), and the tag `v1.0.4` published to PyPI
 
 ## 1.0.5 — fixes
 
