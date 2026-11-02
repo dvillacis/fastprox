@@ -22,7 +22,8 @@ def awkward(x, rng, tiny, huge, tinier):
     m = v.shape[0]
     kinds = rng.integers(0, 8, m)
     v[kinds == 1] *= 1e-3
-    v[kinds == 2] = 0.0
+    zero = np.flatnonzero(kinds == 2)
+    v[zero] = np.where(rng.random((zero.size, v.shape[1])) < 0.5, -0.0, 0.0)  # signed zeros
     v[kinds == 3] *= tiny
     v[kinds == 4] *= huge
     v[kinds == 5] *= tinier
@@ -111,3 +112,23 @@ def test_infinite_row(dtype, axis):
     for keep in (False, True):
         with pytest.raises(ValueError):
             op.prox(x, axis=axis, keep=keep)
+
+
+@pytest.mark.parametrize("frac", [0.1, 0.5, 1.0])
+def test_zero_rows(frac):
+    """Zero rows (signed zeros kept) among ordinary ones, and a NaN or tiny
+    row among them, which are redone through prox one by one: the bits of
+    the row-by-row path. Zero rows are common in the dual of PDHG, which
+    starts at 0 and stays 0 where the image is flat."""
+    rng = np.random.default_rng(4)
+    x = rng.normal(size=(2, 96, 80))
+    zero = rng.random((96, 80)) < frac
+    x[:, zero] = np.where(rng.random((2, int(zero.sum()))) < 0.5, -0.0, 0.0)
+    x[:, 5, 7] = (np.nan, 1.0)
+    x[:, 50, 3] = (1e-170, -1e-171)
+    for r in (0.0, 0.8, rng.uniform(0.0, 1.5, (96, 80))):
+        op = fp.L2Ball(r)
+        z = op.prox(x, axis=0)
+        zr, _ = op.prox(x, axis=0, keep=True)
+        assert z.tobytes() == zr.tobytes()
+        assert np.signbit(z[:, zero]).tolist() == np.signbit(x[:, zero]).tolist()
