@@ -414,7 +414,7 @@ class Structure:
         $\operatorname{span} M$. For a ``"projector"`` it is ``jvp`` itself.
         For ``"weighted"`` it is not symmetric, so it is not the $P$ of an SCD
         pair; that is the Euclidean ``expand(reduce(v) / reduce(sign))``, with
-        $W = I - P$ (docs/api.md, "SCD subspaces"; since 1.1)."""
+        $W = I - P$ (docs/api.md, "SCD subspaces"; since 1.0.3)."""
         v = np.asarray(v, np.float64)
         gl, free = self._free()
         K = int(self.offsets[-1])
@@ -1284,7 +1284,7 @@ class GroupMCP(_GroupRadial):
 class L2Ball(Operator):
     r"""Projection onto $\lVert z \rVert_2 \le \mathrm{radius}$ along the axis.
 
-    ``radius`` is a number, the same for every row, or (since 1.1) an array of
+    ``radius`` is a number, the same for every row, or (since 1.0.3) an array of
     the batch shape, ``x``'s shape without the axis, with one radius per row,
     as in the dual step of TV with a weight per pixel. The operator is then
     built for that batch shape: a call with another raises ValueError
@@ -2265,7 +2265,7 @@ def project_nonneg(x, *, out=None, threads=0, copy=False):
 def project_l2_ball(x, radius=1.0, *, axis=-1, out=None, threads=0, copy=False):
     r"""Projection onto $\lVert z \rVert_2 \le \mathrm{radius}$ along the axis.
 
-    ``radius`` is a number or (since 1.1) an array that broadcasts to the
+    ``radius`` is a number or (since 1.0.3) an array that broadcasts to the
     batch shape, ``x``'s shape without the axis, for one radius per row; equal
     radii give the bits of a number (see :class:`L2Ball`)."""
     if np.ndim(radius) == 0:

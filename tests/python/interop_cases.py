@@ -45,7 +45,7 @@ def cases():
         ("tree_tv", fp.TreeTV, {"n": 12, "edges": _tree(12, 1)}, {"weights": rng.uniform(0.5, 1.5, 11)},
          rng.normal(size=(2, 12)) * 2, 0.4, False, {}),
     ]
-    # One radius per row (since 1.1), batch shape (2, 3); its own generator,
+    # One radius per row (since 1.0.3), batch shape (2, 3); its own generator,
     # so the cases above keep their data.
     r2 = np.random.default_rng(2)
     xr = r2.normal(size=(2, 3, 6)) * 1.5

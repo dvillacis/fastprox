@@ -962,7 +962,7 @@ struct TVAniso final : ImageOp<TVAniso> {
     // Saved for jvp/vjp: the components of the graph of flat edges and the
     // boundary sign sums S_{C,a} on every axis. Along an active axis an edge
     // is flat when its 1D dual is strictly inside its bound, |p_e| <
-    // lam_a (1 - kPolishEta), as in the polish, or (since 1.1, SCD review S3)
+    // lam_a (1 - kPolishEta), as in the polish, or (since 1.0.3, SCD review S3)
     // when its bound is positive and its jump in z is within tau0 below,
     // whatever its dual; a boundary edge takes the
     // sign of its jump at the solution, sign(z_i - z_j) = -sign(p_e) for
@@ -1152,7 +1152,7 @@ struct TVAniso final : ImageOp<TVAniso> {
                     if constexpr (Wt) le = lam * wt[i];
                     const double jump = std::fabs(z[i + s] - z[i]);
                     const bool certified = cert & (le > 0.0) & (jump > tau);  // a jump at the solution too
-                    // Flat: the dual strictly inside its bound, or (since 1.1,
+                    // Flat: the dual strictly inside its bound, or (since 1.0.3,
                     // SCD review S3) a jump of z within the rounding allowance
                     // tau0, whatever the dual; only edges with a bound (le > 0).
                     // tau0 <= tau, so a certified jump is never within it.

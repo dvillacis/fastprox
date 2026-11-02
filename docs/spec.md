@@ -654,7 +654,7 @@ The constraint is reported scaled so that each unit's largest |a\_i| is 1: the s
 | 1D TV (weighted) | FREE | the segments (an edge with a jump or a zero weight separates) | — | PROJECTOR | stored (edge codes) |
 | 1D TV ball | FREE | inside: singletons; on the sphere: the segments of the 1D TV prox at γ\* | on the sphere: a = Dᵀ(w ⊙ sign(Dz)), with sign 0 where there is no jump (none when its segment means are all 0, as at α = 0) | PROJECTOR | stored |
 | 1D TV with ℓ2 of differences | FREE | dual inside its ball (‖u₀‖ ≤ γ, the boundary included): the pieces between zero weights; otherwise singletons, from the prox's classification and not from the saved z (SCD review S2) | — | CURVED | stored (inside flag) |
-| Anisotropic TV (2D, 3D) | FREE | the regions of the saved structure: an edge with a positive bound joins when its dual is strictly inside the bound or its jump in the saved z is at the rounding level, graph TV's rule (SCD review S3; before 1.1 the dual alone, which is not unique in 2D and 3D) | — | PROJECTOR | stored (`label`, `ncomp`) |
+| Anisotropic TV (2D, 3D) | FREE | the regions of the saved structure: an edge with a positive bound joins when its dual is strictly inside the bound or its jump in the saved z is at the rounding level, graph TV's rule (SCD review S3; before 1.0.3 the dual alone, which is not unique in 2D and 3D) | — | PROJECTOR | stored (`label`, `ncomp`) |
 | Isotropic TV (2D, 3D) | FREE | the flat regions of the derivative's region space | — | CURVED | stored (`label`, `ncomp`) |
 | Graph TV, tree TV | FREE | the regions | — | PROJECTOR | stored (`label`, `nreg`) |
 | Spectral operators | — | — | — | NONE | — |

@@ -10,7 +10,7 @@
 //     |z_i| <= |x_i| with x's sign (l0: z_i in {0, x_i}), the log barrier
 //     stays in its domain, z > 0 and z >= x, and the exact norm-like proxes
 //     and cone projections keep |z| <= |x|;
-//   * since 1.1 (SCD review S6), on one input in 1000 and on every input
+//   * since 1.0.3 (SCD review S6), on one input in 1000 and on every input
 //     placed on a kink or boundary (snap below: ||x_g|| = tau, entries at
 //     the thresholds, the boundary of 1D TV with l2), J formed densely on
 //     units of up to 8 entries is symmetric with its spectrum in [0, 1] for
@@ -112,7 +112,7 @@ struct Case {
     std::vector<int64_t> groups;
     std::vector<float> fparams;  // float32 copy of params[1] (spatial weights)
     int64_t sites = -1;          // kinks on m edges (tree TV): masks of shape (..., m)
-    // Since 1.1 (SCD review S6), for snap() and check_jacobian: the map's
+    // Since 1.0.3 (SCD review S6), for snap() and check_jacobian: the map's
     // lambda and SCAD's a or MCP's b, and whether params[0] are its weights
     // (entry weights, group weights of group l2, edge weights of TV with l2).
     enum Snap { NONE, SOFT, SCAD, MCP, GROUP, TVL2 } snap = NONE;
@@ -537,7 +537,7 @@ void check_structure(const fp_op *op, fp_workspace *ws, const char *opname, fp_d
         }
 }
 
-// ---- exact kinks, boundaries and dense Jacobians (since 1.1, SCD review S6)
+// ---- exact kinks, boundaries and dense Jacobians (since 1.0.3, SCD review S6)
 
 // Entry i (C order) of the strided view x as a double, and assignment.
 struct View {
@@ -701,7 +701,9 @@ void sym_eig(std::vector<double> A, int m, double *ev) {
 // D_w^1/2 J D_w^-1/2 for weighted isotonic regression; diagonal in [0, b_i]
 // for SCAD and MCP, b_i = (a - 1) / (a - 1 - g w_i) and b / (b - g w_i) at
 // the inner step g ([1 - b_i, 1] for the conjugate). The nonconvex maps with
-// jumps (l0, lq, the log penalty) and group SCAD and MCP are not checked.
+// jumps (l0, lq, the log penalty) and group SCAD and MCP are not checked,
+// nor anisotropic, isotropic and graph TV where fp_workspace_deriv_exact
+// does not certify the derivative.
 // Calls the library rejects (fp_jvp failing) are skipped, as are units with
 // a non-finite entry. Tolerances: rounding of float64 or float32 relative
 // to the bound.
@@ -720,6 +722,15 @@ void check_jacobian(const fp_op *op, fp_workspace *ws, const Case &c, fp_dtype d
                                            "tv1d_ball", "tv1d_l2", "tv1d", "sorted_l1", "tv_aniso", "tv_iso", "tree_tv",
                                            "graph_tv", "group_huber"});
     if (!convex || numel == 0 || numel > 64) return;
+    // The iterative image operators only where fp_workspace_deriv_exact
+    // certifies the derivative: isotropic TV's smoothed one, or a region
+    // set the polish did not certify, is accurate to the solve, not
+    // symmetric to rounding (the 1.0.3 fuzz hour: tv_iso with smoothing,
+    // asymmetric at 1e-5).
+    if (is({"tv_aniso", "tv_iso", "graph_tv"})) {
+        int exact = 0;
+        if (fp_workspace_deriv_exact(ws, &exact, nullptr) != FP_OK || !exact) return;
+    }
     int64_t count = 0, size = 0;
     if (!elementwise && (fp_workspace_units(ws, &count, &size) != FP_OK || size > 8)) return;
     const bool f32 = dt == FP_F32;

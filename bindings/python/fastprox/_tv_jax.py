@@ -270,7 +270,7 @@ def _structure(x, z, u, gap, gamma, w, iso, sw=None):
         h = jnp.where(flat | (rad <= 0), 0.0, rad / jnp.maximum(safe, mu))
     else:
         # As in _tv_torch.Structure: also a jump at the rounding level of x on
-        # an edge with a positive radius (since 1.1, SCD review S3).
+        # an edge with a positive radius (since 1.0.3, SCD review S3).
         floor = jnp.max(w) * 64 * eps * jnp.abs(x).reshape(B, -1).max(1)
         flat = (jnp.abs(u) < inside) | ((jnp.abs(g) <= _bimg(floor, nd)) & (inside > 0))
         join = [flat[a] & live[a] for a in range(k)]

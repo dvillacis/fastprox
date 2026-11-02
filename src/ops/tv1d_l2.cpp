@@ -43,7 +43,7 @@
 // gamma times a power of two that brings the largest entry to [0.5, 1). z then
 // comes from one solve with sigma I + kappa K at the final mu.
 //
-// Derivatives (revised in 1.1, SCD review S2). Outside, F(z) = z - x +
+// Derivatives (revised in 1.0.3, SCD review S2). Outside, F(z) = z - x +
 // gamma D^T W n(z) = 0 with n = W D z / s, s = ||W D z|| = mu gamma, has
 // H = I + (1 / mu) D^T W (I - n n^T) W D, symmetric with H >= I, so J = H^{-1}
 // has its spectrum in (0, 1]. With T = W D D^T W and Q a basis of n's
