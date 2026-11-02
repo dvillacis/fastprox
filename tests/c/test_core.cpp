@@ -4832,6 +4832,71 @@ static void test_l2_ball_radii() {
         CHECK_OK(fp_prox(o1, 1.0, &xe.a, &ze.a, nullptr, nullptr, nullptr));
         fp_op_free(o1);
     }
+    // Radii in any layout read in C order (gather_c, 2026-11-02: one run per
+    // innermost axis, one memcpy when contiguous): a (2, 3, 4) batch given
+    // contiguous, transposed, reversed, with a padded middle axis, with
+    // extent-1 axes of any stride, and in float32. Every row is outside its
+    // ball, so the output's norm is its radius: the same bits for each.
+    {
+        const int64_t B0 = 2, B1 = 3, B2 = 4, m = B0 * B1 * B2;
+        Vec rc(static_cast<size_t>(m));
+        for (int64_t i = 0; i < m; ++i) rc[i] = 0.25 + 0.125 * static_cast<double>(i);  // exact in float32
+        const int64_t bsh[3] = {B0, B1, B2}, xsh[4] = {B0, B1, B2, 2};
+        Vec xv(static_cast<size_t>(2 * m));
+        for (int64_t i = 0; i < m; ++i) {
+            xv[2 * i] = 3e3;
+            xv[2 * i + 1] = 4e3;
+        }
+        fp_array xa{xv.data(), FP_F64, 4, xsh, nullptr, FP_DEVICE_CPU};
+        auto run = [&](const fp_array &ra) {
+            fp_op *p = nullptr;
+            Vec z(static_cast<size_t>(2 * m));
+            fp_array za{z.data(), FP_F64, 4, xsh, nullptr, FP_DEVICE_CPU};
+            if (fp_op_l2_ball_radii(&ra, &p) != FP_OK) return Vec{};
+            CHECK_OK(fp_prox(p, 1.0, &xa, &za, nullptr, nullptr, nullptr));
+            fp_op_free(p);
+            return z;
+        };
+        const Vec ref = run(fp_array{rc.data(), FP_F64, 3, bsh, nullptr, FP_DEVICE_CPU});
+        CHECK(ref.size() == static_cast<size_t>(2 * m));
+        for (int64_t i = 0; i < m; ++i) CHECK(std::fabs(std::hypot(ref[2 * i], ref[2 * i + 1]) - rc[i]) <= 1e-15);
+        // Transposed: a (4, 3, 2) buffer read through strides (1, 4, 12).
+        Vec tb(static_cast<size_t>(m));
+        for (int64_t a = 0; a < B0; ++a)
+            for (int64_t b = 0; b < B1; ++b)
+                for (int64_t c = 0; c < B2; ++c) tb[c * B1 * B0 + b * B0 + a] = rc[(a * B1 + b) * B2 + c];
+        const int64_t tst[3] = {1, B0, B0 * B1};
+        CHECK(run(fp_array{tb.data(), FP_F64, 3, bsh, tst, FP_DEVICE_CPU}) == ref);
+        // Reversed along every axis: negative strides from the last entry.
+        Vec rv(rc.rbegin(), rc.rend());
+        const int64_t rst[3] = {-B1 * B2, -B2, -1};
+        CHECK(run(fp_array{rv.data() + (m - 1), FP_F64, 3, bsh, rst, FP_DEVICE_CPU}) == ref);
+        // A padded middle axis (stride 2 B2) and a stepped last axis (stride 2).
+        Vec pb(static_cast<size_t>(4 * m), -1.0);
+        const int64_t pst[3] = {B1 * 4 * B2, 4 * B2, 2};
+        for (int64_t a = 0; a < B0; ++a)
+            for (int64_t b = 0; b < B1; ++b)
+                for (int64_t c = 0; c < B2; ++c) pb[a * pst[0] + b * pst[1] + c * pst[2]] = rc[(a * B1 + b) * B2 + c];
+        CHECK(run(fp_array{pb.data(), FP_F64, 3, bsh, pst, FP_DEVICE_CPU}) == ref);
+        // Extent-1 axes with arbitrary strides are still contiguous.
+        const int64_t s5[5] = {B0, 1, B1, B2, 1}, st5[5] = {B1 * B2, 999, B2, 1, -7};
+        const int64_t x5[6] = {B0, 1, B1, B2, 1, 2};
+        fp_array x5a{xv.data(), FP_F64, 6, x5, nullptr, FP_DEVICE_CPU};
+        {
+            fp_op *p;
+            Vec z(static_cast<size_t>(2 * m));
+            fp_array za{z.data(), FP_F64, 6, x5, nullptr, FP_DEVICE_CPU};
+            const fp_array r5{rc.data(), FP_F64, 5, s5, st5, FP_DEVICE_CPU};
+            CHECK_OK(fp_op_l2_ball_radii(&r5, &p));
+            CHECK_OK(fp_prox(p, 1.0, &x5a, &za, nullptr, nullptr, nullptr));
+            CHECK(z == ref);
+            fp_op_free(p);
+        }
+        // float32, contiguous and transposed.
+        std::vector<float> rf(rc.begin(), rc.end()), tf(tb.begin(), tb.end());
+        CHECK(run(fp_array{rf.data(), FP_F32, 3, bsh, nullptr, FP_DEVICE_CPU}) == ref);
+        CHECK(run(fp_array{tf.data(), FP_F32, 3, bsh, tst, FP_DEVICE_CPU}) == ref);
+    }
     fp_op_free(op);
 }
 

@@ -962,8 +962,11 @@ fp_status make_l2_ball(double radius, fp_op **out) {
 }
 
 fp_status make_l2_ball_radii(Vec radii, int ndim, const int64_t *shape, fp_op **out) {
-    for (double v : radii)
-        if (!finite_nonneg(v)) return FP_EPARAM;
+    // No early exit, so the check vectorizes (one radius per row: a large
+    // image's worth, checked on every construction).
+    bool ok = true;
+    for (double v : radii) ok &= finite_nonneg(v);
+    if (!ok) return FP_EPARAM;
     *out = new L2Ball(std::move(radii), ndim, shape);
     return FP_OK;
 }
