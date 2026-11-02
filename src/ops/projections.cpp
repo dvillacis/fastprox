@@ -364,9 +364,15 @@ struct L2Ball final : RowOp<L2Ball> {
     // rows of 2, the gradients of images, run in a loop over the rows that
     // the compiler vectorizes for the layouts (2, ...) and (..., 2). Its sums
     // are sumsq's (one lane, then the fold's additions of +0, which leave a
-    // sum of squares unchanged), so each row gets prox's bits; a block with a
-    // sum out of range (an infinite, NaN, zero or tiny row) runs row by row
-    // through prox.
+    // sum of squares unchanged), so each row gets prox's bits. A zero row
+    // (every entry +-0) is kept as it is, as prox keeps it (its norm 0 is
+    // inside the ball); not a row whose sum underflows to 0, such as
+    // (1e-170, 1e-171), which radius 0 maps to 0. The other rows with a sum
+    // out of range (tiny, NaN or infinite) are left unchanged by the loop and
+    // then redone one by one through prox. A block with any of them once ran
+    // whole through prox: with 10% zero rows, as in the dual of PDHG on a
+    // flat background, that took 315 us at 256 x 256 instead of 39 (found by
+    // the 1.0.5 smoke test before its tag, 2026-11-02).
     bool has_prox_block(int64_t n) const noexcept override { return n >= 1 && n < kLanes; }
     int prox_block(const float *x, int64_t xi, int64_t xk, float *z, int64_t zi, int64_t zk, int64_t n,
                    int64_t b, double, int64_t r0) const noexcept override {
@@ -404,7 +410,6 @@ struct L2Ball final : RowOp<L2Ball> {
     FP_INLINE int pairs_at(const T *x, int64_t xi, int64_t xk, T *z, int64_t zi, int64_t zk, int64_t b,
                            int64_t r0, R rad_k) const noexcept {
         constexpr int64_t kB = 64;
-        double S[kB];
         int e = kRowOk;
         for (int64_t k0 = 0; k0 < b; k0 += kB) {
             const int64_t kb = std::min(kB, b - k0);
@@ -412,29 +417,35 @@ struct L2Ball final : RowOp<L2Ball> {
             T *zb = z + k0 * zk;
             bool ok = true;
             for (int64_t k = 0; k < kb; ++k) {
-                const double u = static_cast<double>(xb[k * xk]), v = static_cast<double>(xb[k * xk + xi]);
-                double s = 0.0;
-                s += u * u;
-                s += v * v;
-                S[k] = s;
-                ok &= sumsq_in_range(s);
-            }
-            if (!ok) {
-                for (int64_t k = 0; k < kb; ++k) e |= gathered(xb + k * xk, xi, zb + k * zk, zi, 2, r0 + k0 + k);
-                continue;
-            }
-            for (int64_t k = 0; k < kb; ++k) {
-                const double m = std::sqrt(S[k]), r = rad_k(k0 + k), c = r / m;
                 const T u = xb[k * xk], v = xb[k * xk + xi];
-                const bool in = m <= r;
-                zb[k * zk] = in ? u : static_cast<T>(static_cast<double>(u) * c);
-                zb[k * zk + zi] = in ? v : static_cast<T>(static_cast<double>(v) * c);
+                const double s = pair_sumsq(u, v);
+                const bool fast = sumsq_in_range(s) | ((u == T(0)) & (v == T(0)));
+                const double m = std::sqrt(s), r = rad_k(k0 + k), c = r / m;
+                const bool keep = (m <= r) | !fast;
+                zb[k * zk] = keep ? u : static_cast<T>(static_cast<double>(u) * c);
+                zb[k * zk + zi] = keep ? v : static_cast<T>(static_cast<double>(v) * c);
+                ok &= fast;
             }
+            if (!ok)
+                for (int64_t k = 0; k < kb; ++k) {
+                    const T u = xb[k * xk], v = xb[k * xk + xi];
+                    if (!(sumsq_in_range(pair_sumsq(u, v)) | ((u == T(0)) & (v == T(0)))))
+                        e |= gathered(xb + k * xk, xi, zb + k * zk, zi, 2, r0 + k0 + k);
+                }
         }
         return e;
     }
+    template <class T>
+    static FP_INLINE double pair_sumsq(T a, T b) noexcept {
+        const double u = static_cast<double>(a), v = static_cast<double>(b);
+        double s = 0.0;
+        s += u * u;
+        s += v * v;
+        return s;
+    }
     // One row through prox, gathered and scattered (n < kLanes); z is left
-    // as it was when the row fails, as prox leaves it.
+    // as it was when the row fails (prox's status is then an error, and the
+    // call's output unspecified).
     template <class T>
     int gathered(const T *x, int64_t xi, T *z, int64_t zi, int64_t n, int64_t row) const noexcept {
         T a[kLanes], c[kLanes];
