@@ -4607,6 +4607,69 @@ static void test_tv1d_l2_boundary() {
     if (bad) std::fprintf(stderr, "  tv1d_l2 boundary: %d of 200 rows outside [0, 1]\n", bad);
 }
 
+// The l2 ball's short rows in blocks (fp_op::prox_block, since 1.0.5): the
+// bits of the row-by-row path (keep_structure) in both layouts of a gradient
+// field, above the serial threshold (2^17 entries) on 1 and 4 threads, in
+// place, without allocation, for one radius and a radius per row, with rows
+// that leave the fast loop (zero, tiny, huge, NaN). Under the sanitizers it
+// is the block path's memory and thread test.
+static void test_l2_ball_blocks() {
+    const int64_t H = 300, W = 301, P = H * W;
+    std::mt19937_64 gen(105);  // its own stream: the later tests keep their inputs
+    std::normal_distribution<double> nd(0.0, 1.0);
+    Vec planes(static_cast<size_t>(2 * P));
+    for (auto &v : planes) v = nd(gen);
+    for (int64_t p = 0; p < P; p += 7) {
+        const int kind = static_cast<int>((p / 7) % 5);
+        const double f[5] = {0.0, 1e-170, 1e160, 1e-3, 1.0};
+        planes[p] *= f[kind];
+        planes[P + p] *= f[kind];
+        if (kind == 4) planes[p] = std::nan("");
+    }
+    Vec pairs(2 * P);  // the same field as (H, W, 2)
+    for (int64_t p = 0; p < P; ++p) {
+        pairs[2 * p] = planes[p];
+        pairs[2 * p + 1] = planes[P + p];
+    }
+    Vec rv(static_cast<size_t>(P));
+    for (int64_t p = 0; p < P; ++p) rv[p] = 0.2 + 1.5 * static_cast<double>((p * 37) % 101) / 100.0;
+    for (int per_row = 0; per_row < 2; ++per_row) {
+        for (int layout = 0; layout < 2; ++layout) {
+            const int axis = layout == 0 ? 0 : -1;
+            Arr x(layout == 0 ? std::vector<int64_t>{2, H, W} : std::vector<int64_t>{H, W, 2},
+                  layout == 0 ? planes : pairs);
+            Arr radii({H, W}, rv);
+            fp_op *op;
+            if (per_row) CHECK_OK(fp_op_l2_ball_radii(&radii.a, &op));
+            else CHECK_OK(fp_op_l2_ball(1.1, &op));
+            Arr zr(x.shape);
+            fp_options ko = opts(axis, 1, 1);
+            fp_workspace *kw;
+            CHECK_OK(fp_workspace_create(op, &x.a, &ko, &kw));
+            CHECK_OK(fp_prox(op, 1.0, &x.a, &zr.a, &ko, kw, nullptr));
+            fp_workspace_free(kw);
+            for (int t : {1, 4}) {
+                fp_options o = opts(axis, t, 0);
+                fp_workspace *ws;
+                CHECK_OK(fp_workspace_create(op, &x.a, &o, &ws));
+                Arr z(x.shape), y(x);
+                const long before = g_allocs.load();
+                CHECK_OK(fp_prox(op, 1.0, &x.a, &z.a, &o, ws, nullptr));
+                CHECK_OK(fp_prox(op, 1.0, &y.a, &y.a, &o, ws, nullptr));
+                CHECK(g_allocs.load() == before);
+                const bool same = std::memcmp(z.data.data(), zr.data.data(), 16 * P) == 0 &&
+                                  std::memcmp(y.data.data(), zr.data.data(), 16 * P) == 0;
+                CHECK(same);
+                if (!same)
+                    std::fprintf(stderr, "  l2_ball blocks per_row=%d layout=%d threads=%d differ\n", per_row,
+                                 layout, t);
+                fp_workspace_free(ws);
+            }
+            fp_op_free(op);
+        }
+    }
+}
+
 // The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.0.3): each
 // row is fp_op_l2_ball with its radius on that row alone, bit for bit (prox,
 // conjugate, steps per row, jvp with the row's radius tangent, vjp with the
@@ -6145,6 +6208,7 @@ int main() {
     test_float32();
     test_row_scratch_bytes();
     test_l2_ball_radii();
+    test_l2_ball_blocks();
     test_group_l2_live_kink();
     test_tv1d_l2_boundary();
     test_thread_cap();  // last: it grows the pool

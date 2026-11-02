@@ -233,6 +233,25 @@ fp_status prox_driver(const fp_op &op, const Arr &x, const Arr &out, int axis, d
     const bool distinct = op.needs_distinct();
     if (p.rows == 1 || p.rows * n < kParallelMin) nt = 1;
     std::atomic<int> err{0};
+    if (!keep && !conj && !steps && p.nouter > 0 && !(alias && distinct) && op.has_prox_block(n)) {
+        // Short rows in blocks (fp_op::prox_block): the runs of rows along the
+        // last outer dimension, equally spaced, cut at the pieces' bounds.
+        const int last = p.nouter - 1;
+        const int64_t L = p.oshape[last], xk = p.ostride[0][last], zk = p.ostride[1][last];
+        if (p.rows * n < kBlockParallelMin) nt = 1;
+        parallel_for(nt, p.rows, row_grain(n, p.rows, nt), [&](int, int64_t r0, int64_t r1) {
+            int e = 0;
+            for (int64_t r = r0; r < r1;) {
+                const int64_t b = std::min(L - r % L, r1 - r);
+                int64_t off[2];
+                p.offsets(r, off);
+                e |= op.prox_block(xd + off[0], sx, xk, od + off[1], so, zk, n, b, gamma, r);
+                r += b;
+            }
+            if (e) err.fetch_or(e, std::memory_order_relaxed);
+        });
+        return err.load() ? FP_EINVAL : FP_OK;
+    }
     const Tiling tl = make_tiling(p, 0, sizeof(T));
     if (tl.on) {
         // Strided rows in tiles (audit C8): the same kernel on the same

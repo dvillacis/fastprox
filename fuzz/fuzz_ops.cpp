@@ -1076,8 +1076,14 @@ void run(const uint8_t *data, size_t size) {
         const fp_status ws_s = fp_workspace_create(c.op, &x, &o, &ws);
         if (!valid_status(ws_s)) fail("workspace status");
         if (ws_s == FP_OK) {
+            const std::vector<unsigned char> zplain(z1);
             const fp_status ps = prox(c.op, gamma, &x, &o1, &o, ws, nullptr);
             if (!valid_status(ps)) fail("prox with workspace status");
+            // Saving the structure does not change the result (since 1.0.5:
+            // without it the l2 ball's short rows run in blocks).
+            if (ps == FP_OK && s1 == FP_OK &&
+                std::memcmp(z1.data(), zplain.data(), static_cast<size_t>(numel) * item) != 0)
+                fail("keep_structure changed the result");
             const int64_t P = fp_op_nparams(c.op);
             std::vector<double> dp(static_cast<size_t>(P > 0 ? P : 1)), gp(dp.size());
             for (auto &v : dp) v = b.value();
