@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-11-02
+
+A patch release with one change and no change to the ABI: no function is added and no signature changes. The ℓ2 ball's prox on rows shorter than 8, such as the per-pixel projections of PDHG on images, is about 17× faster on one thread, with bit-identical results; small such calls no longer wake the thread pool.
+
+Known issue, in every 1.0.x release: 1D TV's taut string returns inf on rows whose local sums pass the largest double, near 1e308. It moves to 1.0.6, so that this release ships today (decision of 2026-11-02).
+
 ### Changed
 
 - The ℓ2 ball's prox (`L2Ball`, `project_l2_ball`) on rows shorter than 8, such as the per-pixel projection of an image gradient's dual in PDHG, is about 17× faster on one thread. Each row was a separate kernel call with its offset computed by divisions, 7–13 ns per row of 2 against about 1 ns of work, so on one thread it was slower than numpy's formula (reported from research code, 2026-11-02: 413 µs against 179 µs at 256 × 256, with `OMP_NUM_THREADS=1` in worker pools). The driver now hands the operator whole runs of rows (`fp_op::prox_block`), and rows of 2 run in a loop the compiler vectorizes, in the layouts (2, H, W) and (H, W, 2). At 256 × 256 on one thread: 675 → 40 µs, against 124 µs for numpy. Such calls now run on one thread below 2^17 entries, where waking the pool's sleeping workers (20–40 µs) cost more than the work: between numpy steps, 128 × 128 takes 11 µs instead of 27 on 15 threads. Results are bit-identical to before for any thread count, layout and dtype; rows with a zero, tiny, huge, NaN or infinite entry go through the per-row kernel. Calls with `keep=True`, the conjugate or steps per row are unchanged. The fuzz driver now checks that saving the structure does not change any operator's result.
