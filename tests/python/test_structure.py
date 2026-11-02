@@ -421,7 +421,7 @@ def test_weighted_isotonic_euclidean_pair():
             np.testing.assert_allclose(P @ (np.diag(w) @ (I - J) @ U), 0, atol=1e-12)
 
 
-# ------------------------------------- exact kinks and boundaries (S6, since 1.1)
+# ------------------------------------- exact kinks and boundaries (S6, since 1.0.3)
 #
 # Every operator with kink masks, at inputs built exactly on its kinks from
 # representable values (steps are powers of two, so that the conjugate's

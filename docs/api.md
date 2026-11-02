@@ -33,7 +33,7 @@ gradients for and what `fp_jvp` perturbs; its length is `fp_op_nparams(op)`.
 | Box | $\mathrm{lo} \le z \le \mathrm{hi}$ | `fp_op_box(lo, hi, lower, upper)` | `Box(lower, upper)`, `project_box` | (lower…, upper…) |
 | Nonnegative orthant | $z \ge 0$ | `fp_op_nonneg()` | `NonNeg`, `project_nonneg` | none |
 | ℓ2 ball | $\lVert z \rVert_2 \le r$ | `fp_op_l2_ball(r)` | `L2Ball`, `project_l2_ball` | (r) |
-| ℓ2 ball, one radius per row (*since 1.1*) | $\lVert z_{(b)} \rVert_2 \le r_b$ for each row $b$ | `fp_op_l2_ball_radii(radii)` | `L2Ball(radius=array)`, `project_l2_ball(x, array)` | (r₁…, one per row) |
+| ℓ2 ball, one radius per row (*since 1.0.3*) | $\lVert z_{(b)} \rVert_2 \le r_b$ for each row $b$ | `fp_op_l2_ball_radii(radii)` | `L2Ball(radius=array)`, `project_l2_ball(x, array)` | (r₁…, one per row) |
 | Simplex | $z \ge 0$, $\sum_i z_i = r$ | `fp_op_simplex(r)` | `Simplex`, `project_simplex` | (r) |
 | Weighted ℓ1 ball | $\sum_i w_i \lvert z_i \rvert \le r$ | `fp_op_l1_ball(r, w)` | `L1Ball(radius, weights)`, `project_l1_ball` | (r) |
 | ℓ∞ norm | $\lambda \lVert z \rVert_\infty$ | `fp_op_linf(λ)` | `LInf`, `prox_linf` | (λ) |
@@ -147,7 +147,7 @@ Notes:
   substitutions). The derivatives take $\mu$ and $n$ from the root solve
   itself, run again on the saved $x$, step and weights, never from differences
   of the saved $z$. So a JVP or VJP costs about one prox, plus those two
-  passes (*revised in 1.1*, SCD review S2). Before, $n$ was read from $Dz$ and
+  passes (*revised in 1.0.3*, SCD review S2). Before, $n$ was read from $Dz$ and
   $H$ inverted by Sherman–Morrison. Near the boundary
   $\lVert u_0 \rVert = \gamma$ that had a cancelling denominator, and gave
   eigenvalues of $J$ up to 7. Against an 80-digit reference built from the
@@ -329,10 +329,10 @@ image-by-image calls, for any thread count.
   was 2–5%, against 7–19% from a threshold on the jumps of $z$.
   An edge with a positive bound whose jump in the saved $z$ is at the rounding
   level, at most $64\varepsilon(\max\lvert x \rvert + 2\sum_a \max_e \gamma w_a
-  \beta_e)$, is joined as well, whatever its dual (*since 1.1*, SCD review
+  \beta_e)$, is joined as well, whatever its dual (*since 1.0.3*, SCD review
   S3): graph TV's rule. In 2D and 3D the dual is not unique (only the sum of
   the axes' duals is fixed), and the dual the solver returns can saturate
-  every edge between two parts of one flat region; before 1.1 the region then
+  every edge between two parts of one flat region; before 1.0.3 the region then
   split, and on a tied 6 × 6 image the derivative was 0.54 off central
   differences while reported exact. For an exact solution with exactly zero
   jumps the joined piece is a B-Jacobian (it is the Jacobian wherever the prox
@@ -589,7 +589,7 @@ convention; see "Why these are valid derivatives" below):
 | isotonic regression | adjacent blocks with equal means | blocks not pooled (pooling happens only on a strict violation) |
 | sorted ℓ1 | adjacent blocks with equal values; a block at 0 | blocks not pooled; the block at 0 thresholded |
 | 1D TV | adjacent segments with equal values | the segments the solver returned, each averaged on its own |
-| anisotropic TV | an edge with no jump whose dual is on its bound | joined: its two sides averaged together (*since 1.1*; before, apart with the sign of the dual) |
+| anisotropic TV | an edge with no jump whose dual is on its bound | joined: its two sides averaged together (*since 1.0.3*; before, apart with the sign of the dual) |
 | ℓ0, ℓq, log penalty | $\lvert x_i \rvert$ on the threshold (two minimisers) | *branch:* the branch of the tie rule: nonzero by default, 0 with `FP_TIE_ZERO` |
 | log penalty at $\gamma\lambda = \varepsilon^2$ | $\lvert x_i \rvert = \varepsilon$ (continuous, Hölder-½) | *branch:* thresholded: 0 |
 | SCAD, MCP | $\lvert x_i \rvert$ at a breakpoint | the branch below it (at $\gamma\lambda$: thresholded) |
@@ -695,7 +695,7 @@ SCD subspaces of each entry:
   the kink, $u u^\top$ with $u = x_g / \lVert x_g \rVert_2$, and
   $\partial z_g / \partial \tau_g = -u$: the limit along the live piece,
   which below the threshold is a convention for the nearby kink rather than
-  a derivative at $x$, where the prox is locally zero (*revised in 1.1*, SCD
+  a derivative at $x$, where the prox is locally zero (*revised in 1.0.3*, SCD
   review S1: it took the formula at $x$, whose eigenvalue $1 - \tau_g /
   \lVert x_g \rVert_2$ is negative there). A group with $x_g = 0$ has no
   direction and cannot be kept live: `fp_workspace_set_branch` returns
@@ -721,7 +721,7 @@ SCD subspaces of each entry:
   library returns, but the first flow saturates an edge and the mask flags
   it. A branch override on such an edge may select no piece the prox
   actually has. Anisotropic TV's dual is not unique either in 2D and 3D
-  (only the sum of the axes' duals is fixed; *corrected in 1.1*, SCD review
+  (only the sum of the axes' duals is fixed; *corrected in 1.0.3*, SCD review
   S3, where this said it was), so its mask is likewise a superset of the
   prox's kinks and its side +1 may select no piece. For tree TV and 1D TV,
   where the dual of a region is unique, each side of a flagged edge is the
@@ -929,7 +929,7 @@ $$P = P_L, \qquad W = (I - P) + P\,(J_L^{-1} - I)\,P / \gamma,$$
 
 with $J_L$ the restriction of $J$ to $L$. $P$ is always the *Euclidean*
 orthogonal projector onto $L$ (Definition 3.6 requires $P$ symmetric). By
-kind (*revised in 1.1*, SCD review S4):
+kind (*revised in 1.0.3*, SCD review S4):
 - **PROJECTOR:** $J_L = I$, so $P$ = `s.project` (which equals `jvp`) and
   $W = I - P$: the structure alone gives the subspace.
 - **CURVED:** $P$ = `s.project`, still Euclidean (the region means, then the
@@ -952,14 +952,14 @@ kind (*revised in 1.1*, SCD review S4):
   fit of $y$ is $\operatorname{argmin}_{z \in C} \tfrac12 \lVert z - y
   \rVert_{D_w}^2$, and its contribution to $\hat y$ is $D_w (y - \hat x)$.
 - **NONE** (the spectral operators) has no queries, and a query that meets a
-  range without a descriptor (group ℓ2 kept live at its kink, *since 1.1*)
+  range without a descriptor (group ℓ2 kept live at its kink, *since 1.0.3*)
   returns `FP_EINVAL` (ValueError in Python): no $(P, W)$ is given there.
 
 After `fp_prox_conj` the queries describe the inner prox at $y/\sigma$, whose
 Jacobian $J$ gives the conjugate's $I - J$: for a PROJECTOR operator the
 conjugate's subspace is $L^\perp$.
 
-**What the SCD claims rest on** (*since 1.1*, SCD review S5). GHR is Gfrerer,
+**What the SCD claims rest on** (*since 1.0.3*, SCD review S5). GHR is Gfrerer,
 Hubmer and Ramlau, *Inverse Problems* 41 (2025) 075002; GO is Gfrerer and
 Outrata, arXiv:2106.00519v2.
 1. **One subspace is enough.** Step NS of GHR Algorithm 3.8 selects *one*
@@ -983,7 +983,7 @@ Outrata, arXiv:2106.00519v2.
    - At an exact kink, the pieces the review checked are limiting pieces:
      both sides of an elementwise kink (soft thresholding), the simplex and
      1D TV, and, in exact arithmetic with exactly zero jumps, the fully
-     joined piece of graph, tree and (since 1.1) anisotropic TV (SCD review,
+     joined piece of graph, tree and (since 1.0.3) anisotropic TV (SCD review,
      "What holds"; its sampling is evidence, the joined-piece argument a
      proof). Other operators' kinks are not claimed beyond guarantees 1 and
      2. Within a nonzero `kink_tol`, a side override evaluates
@@ -1065,7 +1065,7 @@ the per-unit counts (Python: `s.offsets`, `s.global_labels()`).
   `fp_workspace_set_branch` they read the overridden piece (side −1 at the
   tail of a 1D TV kink edge joins two segments; +1 at a simplex threshold
   makes the entry FREE); clearing the override restores the default.
-- **Ranges without a descriptor** (*since 1.1*): a group of group ℓ2 kept
+- **Ranges without a descriptor** (*since 1.0.3*): a group of group ℓ2 kept
   live (+1) at or below its threshold has $J_g = u u^\top$, of range
   $\operatorname{span}(x_g)$, which states, regions and one constraint per
   unit cannot express. The three queries then return `FP_EINVAL` and write
@@ -1527,7 +1527,7 @@ There is no conjugate form. In Python, `gamma` may be an array that broadcasts
 to the batch shape, in `prox` (and `prox_from` for spectral operators), and
 so may `gamma` in `fastprox.torch.prox` and `fastprox.jax.prox` (below).
 
-### One radius per row (*since 1.1*)
+### One radius per row (*since 1.0.3*)
 
 ```c
 /* radii: the batch shape, x's shape without opt.axis (ndim 0 for one row) */
@@ -1782,8 +1782,8 @@ with any later 1.y library without being rebuilt:
   `fp_device` values for the GPU backend. A program that uses one needs
   the release that added it: check `FP_VERSION_MINOR` when building, or
   `fp_version_string()` at run time. A patch release may add too (1.0.2
-  added the structure queries, `FP_I32`, `FP_I64` and their enums), so check
-  `FP_VERSION_PATCH` as well for those.
+  added the structure queries, `FP_I32`, `FP_I64` and their enums, and 1.0.3
+  `fp_op_l2_ball_radii`), so check `FP_VERSION_PATCH` as well for those.
 
 `FP_ABI_VERSION` and `fp_abi_version()` give the major version, which is
 also the soname's (`libfastprox.so.1`). Only a release that breaks the ABI
@@ -2123,7 +2123,7 @@ zj = jax.jit(lambda x: fpj.tv_iso(x, 0.1))(xj)          # jit, grad, vmap
   `vmap` too) in `x`, `gamma` and `weights`: the C kernels' systems on the flat
   regions of the solution, with the flat pixels and edges read off the dual and
   the isotropic curvature capped as there (the bound's margin is
-  $\max(10^{-9}, 64\varepsilon)$). A pixel (isotropic) or, *since 1.1*, an
+  $\max(10^{-9}, 64\varepsilon)$). A pixel (isotropic) or, *since 1.0.3*, an
   edge (anisotropic) with a positive radius is also flat when $\lvert G z
   \rvert$ there is at most $w_{\max} 64\varepsilon \max\lvert x \rvert$. That
   allowance is not the C kernel's, and this path has no polish, so its $z$

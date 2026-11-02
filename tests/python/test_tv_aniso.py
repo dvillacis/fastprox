@@ -389,7 +389,7 @@ def test_derivative_bits(name):
     assert _derivatives(op, ctx, np.random.default_rng(7)) == DERIVATIVE_BITS[name]
 
 
-# ---- flat regions at the rounding level (since 1.1, SCD review S3) ----------
+# ---- flat regions at the rounding level (since 1.0.3, SCD review S3) ----------
 #
 # An edge with a positive bound is flat when its dual is strictly inside the
 # bound or when its jump in the saved z is within the rounding allowance
@@ -456,7 +456,7 @@ def _ambiguous(z, edges, scale):
 def test_tied_images_agree_with_graph_tv(shape, levels, count):
     """Same grid and penalties, tight solves: the same piece on every image,
     certified by the polish (deriv.exact) or not (about a third at tol 1e-20,
-    whose target is below the rounding of the gap). Before 1.1
+    whose target is below the rounding of the gap). Before 1.0.3
     the Jacobians differed on 101 of 200 tied 6 x 6 images and on 21 of 30
     5 x 5 x 5 volumes (most of them other valid pieces at kinks)."""
     rng = np.random.default_rng(len(shape) * 100 + levels)

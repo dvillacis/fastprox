@@ -223,7 +223,7 @@ inline size_t condat_scratch(int64_t n) noexcept {
 // ---------------------------------------------------------------------------
 
 // One radius for every row (fp_op_l2_ball), or one per row of the batch
-// shape built for (fp_op_l2_ball_radii, since 1.1; theta = the radii, row
+// shape built for (fp_op_l2_ball_radii, since 1.0.3; theta = the radii, row
 // parameters in core/op.hpp). Both run the same kernels on the row's radius,
 // so equal radii give the bits of the single radius.
 struct L2Ball final : RowOp<L2Ball> {

@@ -337,7 +337,7 @@ fp_status step_ok(const fp_op &op, double g) noexcept {
 
 // The batch shape of a row or elementwise call (x's shape without the axis)
 // against the operator's: FP_ESHAPE for an operator built for another one
-// (parameters per row, since 1.1). Checked even for an empty batch.
+// (parameters per row, since 1.0.3). Checked even for an empty batch.
 fp_status batch_ok(const fp_op &op, const Arr &x, int axis) noexcept {
     int64_t b[FP_MAX_NDIM];
     int nb = 0;

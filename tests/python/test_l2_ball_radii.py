@@ -1,4 +1,4 @@
-"""The l2 ball with one radius per row (since 1.1): ``L2Ball(radius=array)``
+"""The l2 ball with one radius per row (since 1.0.3): ``L2Ball(radius=array)``
 and ``project_l2_ball(x, radius=array)``.
 
 The operator is built for one batch shape, so it cannot join ``CASES`` in

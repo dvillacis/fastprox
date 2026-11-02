@@ -321,7 +321,7 @@ struct OpCase {
     bool smooth_away_from_kinks = true;
     int64_t zero_entry = -1;  // set this entry of every row to exactly 0
     bool has_conj = true;  // false: fp_prox_conj returns FP_EINVAL (math audit M2)
-    // Since 1.1 (SCD review S6): puts row r (n entries) on a kink or boundary
+    // Since 1.0.3 (SCD review S6): puts row r (n entries) on a kink or boundary
     // of the operator at its step; central differences are then not the
     // derivative, and check_derivatives checks J's spectrum instead.
     std::function<void(double *row, int64_t r, int64_t n)> place = nullptr;
@@ -475,7 +475,7 @@ static std::vector<OpCase> derivative_cases(int64_t n) {
         {"tv1d_ball_w", [=](fp_op **o) { return fp_op_tv1d_ball(1.5, wm, o); }, 1.0},
         {"tv1d_l2", [](fp_op **o) { return fp_op_tv1d_l2(nullptr, o); }, 0.6},
         {"tv1d_l2_w", [=](fp_op **o) { return fp_op_tv1d_l2(wm, o); }, 0.6},
-        // On kinks and boundaries (since 1.1, SCD review S6): group l2 at
+        // On kinks and boundaries (since 1.0.3, SCD review S6): group l2 at
         // ||x_g|| = tau = gamma lam = 5, and 1D TV with l2 at ||u0|| = gamma.
         {"l2_kink", [](fp_op **o) { return fp_op_group_l2(5.0, 0, nullptr, 1, nullptr, o); }, 1.0, true, -1, true,
          [](double *x, int64_t r, int64_t n) { place_group_kink(x, r, n, {}, 1); }},
@@ -4562,7 +4562,7 @@ static void test_tv1d_l2_boundary() {
     if (bad) std::fprintf(stderr, "  tv1d_l2 boundary: %d of 200 rows outside [0, 1]\n", bad);
 }
 
-// The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.1): each
+// The l2 ball with one radius per row (fp_op_l2_ball_radii, since 1.0.3): each
 // row is fp_op_l2_ball with its radius on that row alone, bit for bit (prox,
 // conjugate, steps per row, jvp with the row's radius tangent, vjp with the
 // row's radius gradient, value, structure); equal radii give the scalar
@@ -5856,7 +5856,7 @@ static void test_structure_images() {
     // Branch overrides rebuild the saved structure. Two entries 0 and 1 on one
     // edge at gamma = 0.5 meet at z = (0.5, 0.5) with the dual on its bound: a
     // kink. All three join them by default (one region) and side +1 keeps
-    // them apart; before 1.1 anisotropic TV, whose edges were flat only with
+    // them apart; before 1.0.3 anisotropic TV, whose edges were flat only with
     // the dual strictly inside, kept them apart (SCD review S3). Clearing the
     // override restores the default.
     {
@@ -5892,7 +5892,7 @@ static void test_structure_images() {
     }
 }
 
-// SCD review S3 (since 1.1): an anisotropic edge with a positive bound is flat
+// SCD review S3 (since 1.0.3): an anisotropic edge with a positive bound is flat
 // when its dual is strictly inside the bound or its jump in the saved z is
 // within the rounding allowance tau0 = 64 eps (max |x| + 2 sum_a max_e lam_e),
 // graph TV's rule. Before, a flat edge whose non-unique dual saturated split
@@ -5956,7 +5956,7 @@ static void test_tv_aniso_flat_ties() {
     const Vec cex = {2, 2, 2, 2, 1, 0, 2, -1, 1, 0, 1, 0, 0, 1, 2, 1, 1, 1,
                      1, 0, 1, 1, 1, 0, 1, 2, 0, 2, 1, 2, 2, 1, 1, 2, 0, 0};
     CHECK(compare({6, 6}, cex, 0.3, 1) <= 1e-12);
-    // Tied images and volumes (before 1.1 most differed: other valid pieces
+    // Tied images and volumes (before 1.0.3 most differed: other valid pieces
     // at kinks, and on the counterexample a wrong one).
     std::mt19937_64 r(31);
     for (int t = 0; t < 60; ++t) {

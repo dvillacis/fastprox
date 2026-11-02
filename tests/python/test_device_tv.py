@@ -549,7 +549,7 @@ def test_torch_gpu(iso):
     assert st.grad.device.type == dev and torch.isfinite(st.grad).all()
 
 
-# ---- anisotropic flat edges at the rounding level (since 1.1, SCD review S3)
+# ---- anisotropic flat edges at the rounding level (since 1.0.3, SCD review S3)
 
 def _grid_edges(shape):
     i = np.arange(int(np.prod(shape))).reshape(shape)
@@ -579,7 +579,7 @@ def _device_jacobian(fw, x, gamma):
 
 # A kink (rows (0, 1) at gamma = 1/2 meet at their mean with the dual on its
 # bound), a tied 3 x 3 image whose device dual saturates on a flat edge
-# (both split their region before 1.1), and the review's counterexample.
+# (both split their region before 1.0.3), and the review's counterexample.
 S3_DEVICE = [(np.array([[0.0, 1.0], [0.0, 1.0]]), 0.5),
              (np.array([[0.0, 2.0, 0.0], [1.0, 1.0, 1.0], [0.0, 0.0, 2.0]]), 0.5),
              (np.array([[2, 2, 2, 2, 1, 0], [2, -1, 1, 0, 1, 0], [0, 1, 2, 1, 1, 1],

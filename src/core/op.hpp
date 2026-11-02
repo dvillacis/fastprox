@@ -377,7 +377,7 @@ struct fp_op {
     // Bytes of kernel scratch needed for one row of length n.
     virtual size_t scratch_bytes(int64_t) const noexcept { return 0; }
 
-    // Parameters per row (since 1.1): k > 0 when theta holds k values for
+    // Parameters per row (since 1.0.3): k > 0 when theta holds k values for
     // each row of the one batch shape the operator was built for, row-major
     // over the rows in canonical order (theta[r k + j]); 0 for every other
     // operator. Row operators without kinks only. The row kernels get the

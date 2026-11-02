@@ -24,7 +24,7 @@
 
 #define FP_VERSION_MAJOR 1
 #define FP_VERSION_MINOR 0
-#define FP_VERSION_PATCH 2
+#define FP_VERSION_PATCH 3
 #define FP_ABI_VERSION 1 /* bumped only when the ABI breaks */
 
 #define FP_MAX_NDIM 32
@@ -171,7 +171,7 @@ FP_API fp_status fp_op_l1_box(double lambda, const fp_array *weights, double lo,
 FP_API fp_status fp_op_l2_ball(double radius, fp_op **out);
 
 /* Projection of each row onto ||z||_2 <= r_row, one radius per row (since
- * 1.1), as the dual step of TV with a weight per pixel. radii: the batch
+ * 1.0.3), as the dual step of TV with a weight per pixel. radii: the batch
  * shape of every call, x's shape without the axis (ndim 0 for a single row),
  * FP_F32 or FP_F64, any strides; each finite and >= 0, else FP_EPARAM. A
  * call (fp_prox, fp_prox_steps, fp_prox_conj, fp_value, fp_workspace_create)
