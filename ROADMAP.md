@@ -9,12 +9,13 @@ section.
 
 Status: `[x]` done · `[~]` in progress or partly done · `[ ]` not started
 
-**Where things stand (2026-11-02):** 1.0.5 is released: the ℓ2 ball's prox on rows shorter than 8, such as the per-pixel projections of PDHG on images, is about 17× faster on one thread, with bit-identical results. 1.0.6 is next: the taut string's overflow near 1e308, moved from 1.0.5 (decision of 2026-11-02). The GPU backend and the candidates follow as users need them.
+**Where things stand (2026-11-03):** 1.0.6 is being released: 1D TV's taut string no longer overflows near 1e308 (the known issue of every earlier 1.0.x release), and the log barrier is exact on subnormal entries, found by the nightly fuzz run of 2026-11-03. The GPU backend and the candidates follow as users need them.
 
 ## Next: 1.0.6 — fixes
 
 - [x] 1D TV's taut string overflows (moved from 1.0.4, then from 1.0.5, by the decisions of 2026-11-02) where a row's local sums pass the largest double: with `method="taut_string"`, or `"auto"` after Condat's budget, a row with 2.4e307 next to 1.7e308 at γ = 2.5 gives inf (fuzz seed 103550005, 2026-11-02; the same in 1.0.2). Prox of TV is positively homogeneous, so scale the row and the radii by a power of two before the taut string and the result back, exactly, as other kernels do at extreme scales; a regression test, and check Condat's path at the same scales — Done (2026-11-03): a row with max |x| ≥ 2^960 runs scaled by 2^-k to below 2^960 (`tv_scale` in `src/ops/tv1d.cpp`), in `prox` and in `prox_edges` (image TV's 1D steps, which image TV's own rescaling already kept below 2^65); the result goes back by 2^k, clamped to the row's range only where an ulp of rounding would pass DBL_MAX. Since a power of two commutes with rounding, a scaled row has the bits of the same row scaled by hand (12,000 rows: every method, weights with zeros), and rows below 2^960 are untouched (no measurable cost on rows of 4: a comparison, not `frexp`, decides). Condat's path stayed finite at these scales in 1.0.5 (2,000 rows near DBL_MAX: none non-finite, against 1,624 with the taut string); it runs on the scaled row too, so both paths see the same row. Tests: `test_tv1d_overflow_row`, `test_tv1d_huge_rows_bitwise` and `test_tv1d_rows_at_dbl_max` in `test_tv_scaling.py`, and the fuzz row in `test_tv1d` (`test_core.cpp`); without the fix, 4 of the 15 Python cases and the C check fail
 - [x] The log barrier on subnormal entries (nightly fuzz run, 2026-11-03, on 3ce298c: "dense J: spectrum outside its bounds", an eigenvalue of 1.0000057 at γ = 0): z = 0.5 x + 0.5 r rounded each half of an odd subnormal, so prox(x, 0) was not x and its derivative z / r passed 1 (4/3 at x = 3·2^-1074), and d = 0.5 r − 0.5 x was 0 at x = −2^-1074, a NaN prox (present since 0.1). Probing it found the elementwise `jvp`/`vjp` giving NaN for a zero tangent or cotangent where ∂z/∂γ = λ/x overflows. Done (2026-11-03): the sum and difference are halved (the halves only where they overflow), and both sides computed then selected, which also made the barrier about 40% faster on mixed signs (the sign branch mispredicted); `times` in `op.hpp` makes a zero tangent or cotangent contribute nothing, with the vectorised `jvp` branching once on dγ = 0 and the `vjp` redoing a run's sums only when one is NaN (a select per entry cost 10%). Bit-identical to 1.0.5 elsewhere (prox, `jvp`, `vjp`, float32 over 20,000 entries from 1e-300 to 1e300). Tests: `test_log_barrier_subnormal_at_gamma_zero` and `test_log_barrier_derivative_in_unit_interval` in `test_radial.py`, the subnormal block in `test_core.cpp`; the fuzz crash replays clean
+- [ ] R1: 1.0.6: the version, CHANGELOG, full suites, the sanitizer build, the fuzz driver, the `abi` job (no change at all: no function added), a TestPyPI dry run, timing the CI-built macOS wheel against 1.0.5 on 1D TV and the log barrier, then the tag `v1.0.6`
 
 ## 1.x — parameters per row
 
@@ -125,6 +126,7 @@ Nothing planned. Matrix prox maps moved to the 1.x candidates on 2026-10-20 and 
 | 1.0.3 | 2026-11-02 | 1.0.3 — review of the SCD subspaces |
 | 1.0.4 | 2026-11-02 | 1.0.4 — fixes |
 | 1.0.5 | 2026-11-02 | 1.0.5 — fixes |
+| 1.0.6 | 2026-11-03 | 1.0.6 — fixes |
 
 ### 0.1 — core and 1D
 

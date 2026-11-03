@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.6] — 2026-11-03
+
+A patch release with three fixes and no change to the ABI: no function is added and no signature changes. 1D TV's taut string no longer returns inf on rows near 1e308, the known issue of every earlier 1.0.x release; the log barrier is exact on subnormal entries; and a zero tangent or cotangent no longer gives NaN where an elementwise operator's partial derivative overflows. Other results are bit-identical to 1.0.5, and the log barrier is faster on inputs of mixed sign.
+
 ### Fixed
 
 - 1D TV (`TV1D`) no longer returns inf on rows whose local sums pass the largest double, near 1e308: with `method="taut_string"`, or `"auto"` once Condat's budget ran out, a row with 2.4e307 next to 1.7e308 at γ = 2.5 gave inf (found by the fuzz driver, 2026-11-02; present since 0.1). The kernels' local sums reach n max |x|, and max x − min x alone overflows there. A row with max |x| ≥ 2^960 now runs scaled by a power of two, exactly, since the prox of TV is positively homogeneous: its result has the bits of the same row scaled by hand, for every method, with weights and with `keep=True`. Rows below 2^960, every float32 row among them, take the same path as before, bit for bit, at the same speed.
