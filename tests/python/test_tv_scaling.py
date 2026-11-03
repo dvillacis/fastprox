@@ -136,3 +136,76 @@ def test_tree_tv_fuzz_light_edge():
     op = fp.TreeTV(31, [[1, 0]], [2.7461121994333263e-315])
     np.testing.assert_array_equal(op.prox_conj(x, 0.53125), np.zeros(31))
     np.testing.assert_array_equal(op.prox(x, 1.0 / 0.53125), x)
+
+
+# 1D TV on rows beyond 2^960 (since 1.0.6). The local sums of the taut string
+# and of Condat's algorithm reach n max |x|, and max x - min x alone overflows
+# near 1e308: the taut string gave inf on 2.4e307 next to 1.7e308 at
+# gamma = 2.5 (fuzz seed 103550005, 2026-11-02). Such rows now run scaled by
+# a power of two, which commutes with rounding: the bits are those of the
+# same row scaled by hand, and rows below 2^960 are not touched.
+TV1D_METHODS = ("auto", "condat", "taut_string")
+
+
+@pytest.mark.parametrize("method", TV1D_METHODS)
+def test_tv1d_overflow_row(method):
+    op = fp.TV1D(method=method)
+    for x in ([2.4e307, 1.7e308], [2.4e307, 1.7e308, -1.7e308, 1.0e308, 2.4e307]):
+        x = np.array(x)
+        # gamma = 2.5 is far below an ulp of these entries.
+        np.testing.assert_array_equal(op.prox(x, 2.5), x)
+        np.testing.assert_array_equal(op.prox(x, 2.5, keep=True)[0], x)
+
+
+def huge_rows(rng, count):
+    for t in range(count):
+        n = int(rng.integers(2, 60))
+        e = int(rng.integers(961, 1024))
+        if t % 2:  # entries of every size up to 2^e
+            y = rng.standard_normal(n) * rng.choice([1.0, 10.0, 1e3], n)
+            y *= np.ldexp(rng.uniform(0.5, 0.999), e) / np.abs(y).max()
+            g = float(np.ldexp(rng.uniform(0.5, 1.0), int(rng.integers(900, 958))))
+        else:  # an offset near 2^e, with variations that TV moves
+            s = int(rng.integers(30, 60))
+            y = np.ldexp(rng.uniform(0.5, 0.9) * rng.choice([-1, 1]), e) + np.ldexp(rng.standard_normal(n), e - s)
+            g = float(np.ldexp(rng.uniform(0.1, 3.0), min(e - s, 956)))
+        yield y, g
+
+
+@pytest.mark.parametrize("method", TV1D_METHODS)
+@pytest.mark.parametrize("weights", ["none", "positive", "zeros"])
+def test_tv1d_huge_rows_bitwise(method, weights):
+    rng = np.random.default_rng(["none", "positive", "zeros"].index(weights))
+    moved = 0
+    for y, g in huge_rows(rng, 150):
+        n = y.size
+        w = None
+        if weights != "none":
+            w = rng.uniform(0.1, 2.0, n - 1)
+            if weights == "zeros":
+                w[rng.random(n - 1) < 0.2] = 0.0
+        op = fp.TV1D(weights=w, method=method)
+        z = op.prox(y, g)
+        assert np.isfinite(z).all()
+        for k in (64, 300):  # below 2^960 once scaled by hand
+            zh = np.ldexp(op.prox(np.ldexp(y, -k), np.ldexp(g, -k)), k)
+            assert z.tobytes() == zh.tobytes(), (method, n, k)
+        zk, _ = op.prox(y, g, keep=True)
+        assert zk.tobytes() == z.tobytes()
+        moved += not np.array_equal(z, y)
+    assert moved > 75  # TV moves at least half of them
+
+
+@pytest.mark.parametrize("method", TV1D_METHODS)
+def test_tv1d_rows_at_dbl_max(method):
+    M = np.finfo(np.float64).max
+    rng = np.random.default_rng(7)
+    for t in range(300):
+        n = int(rng.integers(2, 40))
+        y = rng.choice([M, -M, 0.9 * M, -0.9 * M, 1e307, 0.0], n) if t % 2 else M * rng.uniform(-1, 1, n)
+        g = float(np.ldexp(rng.uniform(0.5, 1.0), int(rng.integers(800, 959))))
+        w = None if t % 3 else rng.uniform(0.0, 1.0, n - 1)
+        z = fp.TV1D(weights=w, method=method).prox(y, g)
+        # Finite, and within [min y, max y] but for an ulp of max |y|.
+        tol = np.spacing(np.abs(y).max())
+        assert np.isfinite(z).all() and z.min() >= y.min() - tol and z.max() <= y.max() + tol

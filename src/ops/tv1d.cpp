@@ -29,7 +29,9 @@
 #include "ops/ops.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <type_traits>
 #include <utility>
 
 namespace fp {
@@ -225,6 +227,26 @@ inline double inactive_radius(int64_t j, double range) noexcept {
     return 2.0 * static_cast<double>(std::max<int64_t>(j, 1)) * range;
 }
 
+// Rows beyond 2^960 (since 1.0.6). The local sums of both paths (the taut
+// string's chain rises and tube heights, Condat's running sums and bounds)
+// reach n (max |x| + the largest radius), and range = max x - min x alone
+// overflows near 1e308: the taut string gave inf for 2.4e307 next to
+// 1.7e308 at gamma = 2.5 (fuzz seed 103550005, 2026-11-02; since 0.1). The
+// prox of TV is positively homogeneous, prox_{gamma g}(x) = 2^k
+// prox_{2^-k gamma g}(2^-k x), and a power of two commutes with rounding
+// but for underflow, so a row with max |x| >= 2^960 runs scaled by 2^-k to
+// below 2^960, where sums of n < 2^60 terms stay finite. Rows below are not
+// scaled, so their bits are unchanged; in a scaled row only entries below
+// 2^-958 (2^-1918 of the largest) lose bits to subnormals. Float rows never
+// get there. Returns k, or 0.
+inline int tv_scale(double lo, double hi) noexcept {
+    const double m = std::max(-lo, hi);
+    if (m < 0x1p960) return 0;  // a comparison: frexp on every row cost 1-4% on rows of 4
+    int e;
+    std::frexp(m, &e);  // m in [2^(e-1), 2^e), e > 960
+    return e - 960;
+}
+
 // When no edge can be active the prox is the constant mean. A compensated
 // sum keeps u_{n-1} = sum x - n z at rounding level.
 template <class T>
@@ -383,7 +405,21 @@ struct TV1D final : RowOp<TV1D> {
         return (nw == 1 || nw == n - 1) ? FP_OK : FP_ESHAPE;
     }
     size_t scratch_bytes(int64_t n) const noexcept override {
-        return taut_scratch(n) + static_cast<size_t>(n + 1) * sizeof(double);  // chains, radii
+        return taut_scratch(n) + static_cast<size_t>(2 * n + 1) * sizeof(double);  // chains, radii, scaled row
+    }
+    // The row scaled by 2^-k (tv_scale), after the chains and the radii.
+    static double *scaled_row(void *scr, int64_t n) noexcept {
+        return reinterpret_cast<double *>(static_cast<char *>(scr) + taut_scratch(n)) + (n + 1);
+    }
+    // z = 2^k z. The prox keeps to [lo, hi] (the maximum principle) but for
+    // rounding, by an ulp at times; where that ulp would pass DBL_MAX scaled
+    // back, z is clamped to lo or hi. Elsewhere it is left as it is, so that
+    // a scaled row has the bits of the same row scaled by hand.
+    static void unscale(double *z, int64_t n, int k, double lo, double hi) noexcept {
+        for (int64_t i = 0; i < n; ++i) {
+            const double v = std::ldexp(z[i], k);
+            z[i] = std::isinf(v) ? std::ldexp(std::min(std::max(z[i], lo), hi), k) : v;
+        }
     }
     bool needs_distinct() const noexcept override { return true; }
 
@@ -468,35 +504,53 @@ struct TV1D final : RowOp<TV1D> {
             fill_nan(z, n);
             return kRowOk;
         }
+        if constexpr (std::is_same<T, double>::value)
+            if (const int k = tv_scale(lo, hi)) {
+                double *xs = scaled_row(scr, n);
+                for (int64_t i = 0; i < n; ++i) xs[i] = std::ldexp(x[i], -k);
+                lo = std::ldexp(lo, -k);
+                hi = std::ldexp(hi, -k);
+                prox_finite(xs, z, n, std::ldexp(gamma, -k), scr, code, lo, hi);
+                unscale(z, n, k, lo, hi);
+                return kRowOk;
+            }
+        prox_finite(x, z, n, gamma, scr, code, lo, hi);
+        return kRowOk;
+    }
+
+    // prox on a finite row with lo = min x, hi = max x.
+    template <class T>
+    void prox_finite(const T *x, T *z, int64_t n, double gamma, void *scr, uint8_t *code, double lo,
+                     double hi) const noexcept {
         if (code) std::memset(code, 0, static_cast<size_t>(n));
         const double range = hi - lo;
         if (gamma == 0.0 || range == 0.0) {  // z = x
             identity(x, z, n, code);
-            return kRowOk;
+            return;
         }
         if (uniform) {
             // No edge can be active: |u_e| <= min(e + 1, n - 1 - e) range.
             if (gamma * wpad[0] >= static_cast<double>(n / 2) * range) {
                 constant_mean(x, z, n);
-                return kRowOk;
+                return;
             }
             const double lam = std::min(gamma * wpad[0], inactive_radius(n / 2, range));
             if (lam == 0.0) {
                 identity(x, z, n, code);
-                return kRowOk;
+                return;
             }
             if (method != FP_TV1D_TAUT_STRING) {
                 const int64_t budget = method == FP_TV1D_CONDAT ? INT64_MAX : condat_budget(n);
-                if (condat(x, z, n, [lam](int64_t) { return lam; }, code, budget)) return kRowOk;
+                if (condat(x, z, n, [lam](int64_t) { return lam; }, code, budget)) return;
                 if (code) std::memset(code, 0, static_cast<size_t>(n));
             }
             taut_string(x, z, n, [lam](int64_t) { return lam; }, code, scr);
-            return kRowOk;
+            return;
         }
         // Weighted: independent pieces between zero-weight edges.
         if (!has_zero) {
             solve_weighted(x, z, n, gamma, wpad.data(), range, code, scr);
-            return kRowOk;
+            return;
         }
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
@@ -510,7 +564,6 @@ struct TV1D final : RowOp<TV1D> {
                 s = e + 1;
             }
         }
-        return kRowOk;
     }
 
     // Kinks (since 0.3): code 1 at entry e when the edge (e, e + 1) is
@@ -563,6 +616,20 @@ struct TV1D final : RowOp<TV1D> {
             fill_nan(z, n);
             return kRowOk;
         }
+        if (const int k = tv_scale(lo, hi)) {
+            double *xs = scaled_row(scr, n);
+            for (int64_t i = 0; i < n; ++i) xs[i] = std::ldexp(x[i], -k);
+            lo = std::ldexp(lo, -k);
+            hi = std::ldexp(hi, -k);
+            edges_finite(xs, z, n, std::ldexp(gamma, -k), we, scr, lo, hi);
+            unscale(z, n, k, lo, hi);
+            return kRowOk;
+        }
+        edges_finite(x, z, n, gamma, we, scr, lo, hi);
+        return kRowOk;
+    }
+    void edges_finite(const double *x, double *z, int64_t n, double gamma, const double *we, void *scr,
+                      double lo, double hi) const noexcept {
         const double range = hi - lo;
         double wm = 0.0;
         bool equal = true;
@@ -572,12 +639,15 @@ struct TV1D final : RowOp<TV1D> {
         }
         if (gamma == 0.0 || range == 0.0 || wm == 0.0) {
             std::memcpy(z, x, static_cast<size_t>(n) * sizeof(double));
-            return kRowOk;
+            return;
         }
         // Equal weights: the uniform solve with step gamma wm, so that edge
         // weights of one give the unweighted image TV bit for bit (the two
         // solves clamp the radii differently and may differ in the last bit).
-        if (equal && uniform && wpad[0] == 1.0) return prox(x, z, n, gamma * wm, scr, nullptr);
+        if (equal && uniform && wpad[0] == 1.0) {
+            prox_finite(x, z, n, gamma * wm, scr, nullptr, lo, hi);
+            return;
+        }
         int64_t s = 0;
         for (int64_t e = 0; e < n; ++e) {
             if (e == n - 1 || we[e] == 0.0) {
@@ -585,7 +655,6 @@ struct TV1D final : RowOp<TV1D> {
                 s = e + 1;
             }
         }
-        return kRowOk;
     }
 
     // Calls f(s, t, sl, sr) for every segment [s, t] with the dual signs at
