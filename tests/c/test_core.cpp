@@ -4142,6 +4142,29 @@ static void test_conj_extremes() {
         fp_op_free(lb);
         fp_op_free(tt);
     }
+    // Subnormal entries at gamma = 0 (fuzz, 2026-11-03): the identity, a
+    // derivative of 1 rather than 4/3, no NaN from dz/dgamma = lambda / x,
+    // which passes DBL_MAX, times a zero dgamma or cotangent, and 0 rather
+    // than NaN at x = -2^-1074.
+    {
+        fp_op *lb;
+        CHECK_OK(fp_op_log_barrier(1.0, &lb));
+        const Vec sub = {5e-324, 1.5e-323, 8.7e-319, 1e-310, 1.0};
+        Arr x({5}, sub), z({5}), dx({5}, Vec(5, 1.0)), dz({5}), g({5}, {0, 0, 0, 0, 1}), gx({5});
+        fp_options o = opts(-1, 1, 1);
+        fp_workspace *ws;
+        CHECK_OK(fp_workspace_create(lb, &x.a, &o, &ws));
+        CHECK_OK(fp_prox(lb, 0.0, &x.a, &z.a, &o, ws, nullptr));
+        CHECK(z.data == sub);
+        CHECK_OK(fp_jvp(lb, ws, &dx.a, 0.0, nullptr, &dz.a));
+        CHECK(dz.data == Vec(5, 1.0));
+        double gg = 0;
+        CHECK_OK(fp_vjp(lb, ws, &g.a, &gx.a, &gg, nullptr));
+        CHECK(gx.data == g.data && gg == 1.0);
+        fp_workspace_free(ws);
+        CHECK(prox(lb, 0.0, {-5e-324, -1.5e-323}) == Vec({0.0, 0.0}));  // 0 / 0 before: 0.5 r - 0.5 x was 0
+        fp_op_free(lb);
+    }
 }
 
 // ---------------------------------------------------------------- outputs and descriptors

@@ -426,14 +426,26 @@ struct LogBarrier final : ElemOp<LogBarrier> {
         const double r = std::sqrt(x * x + 4.0 * k.gl);
         return r < 0x1p500 && r > 0x1p-400 ? r : std::hypot(x, 2.0 * k.sg);
     }
-    // z = (x + r) / 2, for x < 0 as gl / ((r - x) / 2) without its cancellation.
-    // The halves first: r - x overflowed for x = -1e308, and 0 left the domain
-    // where the answer is 1e-28 (M4). sg (sg / d) where gl underflows.
+    // z = (x + r) / 2, for x < 0 as gl / ((r - x) / 2) without its cancellation;
+    // sg (sg / d) where gl underflows. The sum and the difference are halved,
+    // and the halves added only where they overflow (r - x for x = -1e308; 0
+    // then left the domain where the answer is 1e-28, M4). Halving a subnormal
+    // rounds, so the halves alone gave z > r for odd subnormals, z = 4 2^-1074
+    // for x = 3 2^-1074 at gamma = 0 and a derivative z / r = 4/3, outside
+    // [0, 1], and d = 0 for x = -2^-1074, a NaN prox (fuzz, 2026-11-03).
+    // Rounding once, z <= r, and at gamma = 0 (r = |x|) z = x for x >= 0 and
+    // 0 below; elsewhere halving is exact, so the bits are as before. Both
+    // sides, then a select: a branch on the sign mispredicts on inputs of mixed
+    // sign, and the select is about 40% faster there, in the prox and the
+    // derivatives (2^20 entries, 2026-11-03).
     static double value(double x, double r, Scales k) noexcept {
+        constexpr double big = std::numeric_limits<double>::max();
+        const double s = x + r, t = r - x;
+        const double up = s <= big ? 0.5 * s : 0.5 * x + 0.5 * r;
+        const double d = t <= big ? 0.5 * t : 0.5 * r - 0.5 * x;
+        const double down = k.gl >= 0x1p-1000 ? k.gl / d : k.sg * (k.sg / d);
         // NaN fails x < 0 and stays NaN; -inf gives 0, +inf stays inf.
-        if (!(x < 0.0)) return 0.5 * x + 0.5 * r;
-        const double d = 0.5 * r - 0.5 * x;
-        return k.gl >= 0x1p-1000 ? k.gl / d : k.sg * (k.sg / d);
+        return x < 0.0 ? down : up;
     }
     // The result in T, kept in the domain: an answer below T's smallest
     // positive value is that value rather than 0 (gamma lambda > 0, x finite).
