@@ -888,6 +888,10 @@ struct ElemOp : fp_op {
         const double v = partial * t;
         return t == 0.0 ? 0.0 : v;
     }
+    template <bool Z>
+    static double mul(double partial, double t) noexcept {
+        return Z ? times(partial, t) : partial * t;
+    }
 
     template <class T, bool Side>
     void run_jvp_(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,
@@ -973,12 +977,14 @@ struct ElemOp : fp_op {
             if constexpr (NP >= 1) l0 = acc[0];
             if constexpr (NP == 2) l1 = acc[1];
         }
-        // Z: products through times (see there); the parameters along the
-        // axis (NP = -1), added in memory, always. Gx: write gx (not on the
-        // redo, since gx may be g).
+        // zc: products through times (see there); the parameters along the
+        // axis (NP = -1), added in memory, always. gxc: write gx (not on the
+        // redo, since gx may be g). Both are types, read as ZC::value and
+        // GxC::value: MSVC rejected a constexpr local of this lambda used in
+        // a nested lambda without a capture (CI, 2026-11-03).
         auto pass = [&](auto zc, auto gxc) {
-            constexpr bool Z = decltype(zc)::value || NP == -1, Gx = decltype(gxc)::value;
-            auto mul = [](double p, double t) { return Z ? times(p, t) : p * t; };
+            using ZC = decltype(zc);
+            using GxC = decltype(gxc);
             for (int64_t i = 0; i < len; ++i) {
                 const int64_t w = widx + i * wstep;
                 const double xi = static_cast<double>(xsave[i]);
@@ -988,26 +994,26 @@ struct ElemOp : fp_op {
                 const double gi = static_cast<double>(g[i * gs]);
                 if constexpr (Acc) {
                     if constexpr (NP == -1) {
-                        for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += mul(e.pv[k], gi);
+                        for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += mul<ZC::value || NP == -1>(e.pv[k], gi);
                     } else if constexpr (NP == 1) {
-                        for (int k = 0; k < 3; ++k) l0 += k < e.np ? mul(e.pv[k], gi) : 0.0;
+                        for (int k = 0; k < 3; ++k) l0 += k < e.np ? mul<ZC::value || NP == -1>(e.pv[k], gi) : 0.0;
                     } else if constexpr (NP == 2) {
                         for (int k = 0; k < 3; ++k) {
-                            const double c = k < e.np ? mul(e.pv[k], gi) : 0.0;
+                            const double c = k < e.np ? mul<ZC::value || NP == -1>(e.pv[k], gi) : 0.0;
                             l0 += k < e.np && e.pi[k] == 0 ? c : 0.0;
                             l1 += k < e.np && e.pi[k] == 1 ? c : 0.0;
                         }
                     }
-                    if constexpr (!D::kGammaFree) aP += mul(e.dg, gi);
+                    if constexpr (!D::kGammaFree) aP += mul<ZC::value || NP == -1>(e.dg, gi);
                 }
                 if (!conj) {
-                    if constexpr (Gx) gx[i * gxs] = static_cast<T>(e.j * gi);
+                    if constexpr (GxC::value) gx[i * gxs] = static_cast<T>(e.j * gi);
                 } else {
                     if constexpr (Acc) {
                         const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
                         aX += -gi * p + e.j * gi * xi;
                     }
-                    if constexpr (Gx) gx[i * gxs] = static_cast<T>(gi - e.j * gi);
+                    if constexpr (GxC::value) gx[i * gxs] = static_cast<T>(gi - e.j * gi);
                 }
             }
         };
