@@ -219,6 +219,25 @@ static void test_tv1d() {
         CHECK(tv_kkt(x, prox(op, gamma, x), gamma, w));
         fp_op_free(op);
     }
+    // Rows beyond 2^960 run scaled by a power of two (since 1.0.6): the taut
+    // string gave inf on 2.4e307 next to 1.7e308 at gamma = 2.5 (fuzz seed
+    // 103550005), whose radius is far below an ulp, so z = x. A row that TV
+    // moves has the bits of the same row scaled by hand.
+    {
+        const Vec big = {2.4e307, 1.7e308, -1.7e308, 1.0e308, 2.4e307};
+        for (fp_op *o : {auto_op, condat, taut}) CHECK(prox(o, 2.5, big) == big);
+        Vec y(40), ys(40);
+        for (size_t i = 0; i < y.size(); ++i) {
+            y[i] = std::ldexp(std::sin(0.7 * static_cast<double>(i)) + (i % 7 == 0 ? 0.5 : 0.0), 1000);
+            ys[i] = std::ldexp(y[i], -100);
+        }
+        for (fp_op *o : {auto_op, condat, taut}) {
+            const Vec z = prox(o, std::ldexp(1.5, 955), y), zs = prox(o, std::ldexp(1.5, 855), ys);
+            bool same = true;
+            for (size_t i = 0; i < y.size(); ++i) same = same && z[i] == std::ldexp(zs[i], 100);
+            CHECK(same && z != y);
+        }
+    }
     // gamma = 0 returns the input.
     const Vec x = randn(50);
     CHECK(prox(auto_op, 0.0, x) == x);
