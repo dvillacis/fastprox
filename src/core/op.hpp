@@ -876,6 +876,23 @@ struct ElemOp : fp_op {
 #undef FP_VJP_
     }
 
+    // A partial derivative times a tangent or cotangent entry, 0 where that
+    // entry is 0 even when the partial is infinite: the log barrier's dz/dgamma
+    // = lambda / r passes DBL_MAX for a subnormal x at gamma = 0, and a jvp
+    // with dgamma = 0, or a vjp with g_i = 0, gave NaN (2026-11-03). For a
+    // finite partial a signed zero changes no sum here (each starts at +0 or
+    // adds 0.0 last), so the bits are as before. The vectorised jvp drops the
+    // term when dgamma = 0, and the vjp's sums use plain products, redone
+    // with these only when a run's sum is NaN: a select per entry cost 10%.
+    static double times(double partial, double t) noexcept {
+        const double v = partial * t;
+        return t == 0.0 ? 0.0 : v;
+    }
+    template <bool Z>
+    static double mul(double partial, double t) noexcept {
+        return Z ? times(partial, t) : partial * t;
+    }
+
     template <class T, bool Side>
     void run_jvp_(const T *xsave, const T *dx, int64_t dxs, T *dz, int64_t dzs, int64_t len,
                   double gamma, double dgamma, const double *dparams, int64_t widx, int64_t wstep,
@@ -887,9 +904,16 @@ struct ElemOp : fp_op {
             // Contiguous, no parameter tangent, not conjugate: the same
             // expression in a loop the compiler can vectorise (audit C5).
             if (!conj && !dparams && dx && dxs == 1 && dzs == 1) {
-                for (int64_t i = 0; i < len; ++i) {
-                    const ElemDeriv e = C::deriv(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie);
-                    dz[i] = static_cast<T>(e.j * static_cast<double>(dx[i]) + e.dg * dgamma + 0.0);
+                if (dgamma == 0.0) {
+                    for (int64_t i = 0; i < len; ++i) {
+                        const ElemDeriv e = C::deriv(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie);
+                        dz[i] = static_cast<T>(e.j * static_cast<double>(dx[i]) + 0.0);
+                    }
+                } else {
+                    for (int64_t i = 0; i < len; ++i) {
+                        const ElemDeriv e = C::deriv(d, static_cast<double>(xsave[i]), gamma, widx + i * wstep, tie);
+                        dz[i] = static_cast<T>(e.j * static_cast<double>(dx[i]) + e.dg * dgamma + 0.0);
+                    }
                 }
                 return;
             }
@@ -903,15 +927,15 @@ struct ElemOp : fp_op {
             const double dxi = dx ? static_cast<double>(dx[i * dxs]) : 0.0;
             double ptheta = 0.0;
             if (dparams)
-                for (int k = 0; k < e.np; ++k) ptheta += e.pv[k] * dparams[e.pi[k]];
+                for (int k = 0; k < e.np; ++k) ptheta += times(e.pv[k], dparams[e.pi[k]]);
             if (!conj) {
-                dz[i * dzs] = static_cast<T>(e.j * dxi + e.dg * dgamma + ptheta);
+                dz[i * dzs] = static_cast<T>(e.j * dxi + times(e.dg, dgamma) + ptheta);
             } else {
                 // out = y - sigma p(gamma = 1/sigma, t = y/sigma), dgamma reads as dsigma.
                 const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
                 const double dt = dxi / sigma - xi * dgamma / sigma;
                 const double dgam = -dgamma / (sigma * sigma);
-                const double dp = e.j * dt + e.dg * dgam + ptheta;
+                const double dp = e.j * dt + times(e.dg, dgam) + ptheta;
                 dz[i * dzs] = static_cast<T>(dxi - dgamma * p - sigma * dp);
             }
         }
@@ -953,35 +977,55 @@ struct ElemOp : fp_op {
             if constexpr (NP >= 1) l0 = acc[0];
             if constexpr (NP == 2) l1 = acc[1];
         }
-        for (int64_t i = 0; i < len; ++i) {
-            const int64_t w = widx + i * wstep;
-            const double xi = static_cast<double>(xsave[i]);
-            ElemDeriv e;
-            if constexpr (Side) e = deriv_at(d, xi, gamma, w, tie, side[i], tol);
-            else e = C::deriv(d, xi, gamma, w, tie);
-            const double gi = static_cast<double>(g[i * gs]);
-            if constexpr (Acc) {
-                if constexpr (NP == -1) {
-                    for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += e.pv[k] * gi;
-                } else if constexpr (NP == 1) {
-                    for (int k = 0; k < 3; ++k) l0 += k < e.np ? e.pv[k] * gi : 0.0;
-                } else if constexpr (NP == 2) {
-                    for (int k = 0; k < 3; ++k) {
-                        const double c = k < e.np ? e.pv[k] * gi : 0.0;
-                        l0 += k < e.np && e.pi[k] == 0 ? c : 0.0;
-                        l1 += k < e.np && e.pi[k] == 1 ? c : 0.0;
-                    }
-                }
-                if constexpr (!D::kGammaFree) aP += e.dg * gi;
-            }
-            if (!conj) {
-                gx[i * gxs] = static_cast<T>(e.j * gi);
-            } else {
+        // zc: products through times (see there); the parameters along the
+        // axis (NP = -1), added in memory, always. gxc: write gx (not on the
+        // redo, since gx may be g). Both are types, read as ZC::value and
+        // GxC::value: MSVC rejected a constexpr local of this lambda used in
+        // a nested lambda without a capture (CI, 2026-11-03).
+        auto pass = [&](auto zc, auto gxc) {
+            using ZC = decltype(zc);
+            using GxC = decltype(gxc);
+            for (int64_t i = 0; i < len; ++i) {
+                const int64_t w = widx + i * wstep;
+                const double xi = static_cast<double>(xsave[i]);
+                ElemDeriv e;
+                if constexpr (Side) e = deriv_at(d, xi, gamma, w, tie, side[i], tol);
+                else e = C::deriv(d, xi, gamma, w, tie);
+                const double gi = static_cast<double>(g[i * gs]);
                 if constexpr (Acc) {
-                    const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
-                    aX += -gi * p + e.j * gi * xi;
+                    if constexpr (NP == -1) {
+                        for (int k = 0; k < e.np; ++k) acc[e.pi[k]] += mul<ZC::value || NP == -1>(e.pv[k], gi);
+                    } else if constexpr (NP == 1) {
+                        for (int k = 0; k < 3; ++k) l0 += k < e.np ? mul<ZC::value || NP == -1>(e.pv[k], gi) : 0.0;
+                    } else if constexpr (NP == 2) {
+                        for (int k = 0; k < 3; ++k) {
+                            const double c = k < e.np ? mul<ZC::value || NP == -1>(e.pv[k], gi) : 0.0;
+                            l0 += k < e.np && e.pi[k] == 0 ? c : 0.0;
+                            l1 += k < e.np && e.pi[k] == 1 ? c : 0.0;
+                        }
+                    }
+                    if constexpr (!D::kGammaFree) aP += mul<ZC::value || NP == -1>(e.dg, gi);
                 }
-                gx[i * gxs] = static_cast<T>(gi - e.j * gi);
+                if (!conj) {
+                    if constexpr (GxC::value) gx[i * gxs] = static_cast<T>(e.j * gi);
+                } else {
+                    if constexpr (Acc) {
+                        const double p = static_cast<double>(C::template prox<double>(d, xi, gamma, w, tie, tied));
+                        aX += -gi * p + e.j * gi * xi;
+                    }
+                    if constexpr (GxC::value) gx[i * gxs] = static_cast<T>(gi - e.j * gi);
+                }
+            }
+        };
+        const double aP0 = aP, aX0 = aX, l00 = l0, l10 = l1;
+        pass(std::false_type{}, std::true_type{});
+        if constexpr (Acc && NP != -1) {
+            if (std::isnan(aP) || std::isnan(l0) || std::isnan(l1)) {
+                aP = aP0;
+                aX = aX0;
+                l0 = l00;
+                l1 = l10;
+                pass(std::true_type{}, std::false_type{});
             }
         }
         if constexpr (Acc) {

@@ -53,6 +53,36 @@ def test_log_barrier_derivative_at_gamma_zero():
     np.testing.assert_array_equal(op.jvp(ctx, np.ones(3)), [0.0, 1.0, 1.0])
 
 
+SUBNORMALS = np.array([5e-324, 3 * 5e-324, 1.75e5 * 5e-324, 8.7e-319, 1e-310, 2.2e-308])
+
+
+@pytest.mark.parametrize("lam", [1.0, 1e-300])
+def test_log_barrier_subnormal_at_gamma_zero(lam):
+    # z = 0.5 x + 0.5 r rounded each half of an odd subnormal: prox(x, 0) was
+    # not x, and its derivative z / r passed 1, 4/3 at x = 3 2^-1074 (fuzz,
+    # 2026-11-03). dz/dgamma = lambda / x passes DBL_MAX there, and a zero
+    # dgamma or cotangent gave NaN.
+    op = fp.LogBarrier(lam)
+    x = np.concatenate([SUBNORMALS, [1e-300, 1.0]])
+    z, ctx = op.prox(x, 0.0, keep=True)
+    np.testing.assert_array_equal(z, x)
+    np.testing.assert_array_equal(op.jvp(ctx, np.ones_like(x)), np.ones_like(x))
+    g = np.where(x < 1e-300, 0.0, 1.0)
+    gx, grads = op.vjp(ctx, g)
+    np.testing.assert_array_equal(gx, g)
+    assert grads.gamma == lam / 1e-300 + lam / 1.0
+
+
+@pytest.mark.parametrize("gamma", [0.0, 5e-324, 1e-320, 1e-310, 1e-300])
+def test_log_barrier_derivative_in_unit_interval(gamma):
+    op = fp.LogBarrier(1.0)
+    x = np.concatenate([SUBNORMALS, -SUBNORMALS, [0.0, 1e-300, 1.0]])
+    z, ctx = op.prox(x, gamma, keep=True)
+    j = op.jvp(ctx, np.ones_like(x))
+    assert np.all((j >= 0.0) & (j <= 1.0)), j
+    assert np.all(z >= 0.0)
+
+
 # ---------------------------------------------------------------- l1 over a box
 
 
