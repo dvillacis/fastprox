@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- SCAD (`SCAD`, `GroupSCAD`) on its linear piece when the concavity a is close to its bound 1 + γw (found by the nightly fuzz run, 2026-11-04): at λ = γ = 32.502 and a − 1 − γ = 1.8e-12, the prox of x = −1089 was −1.8e12, and already at a − 1 − γ = 1e-9 (λ = γ = 1) the prox of 1.3 was 2. The piece was evaluated as x + γ(x/D − λa/D), D = a − 1 − γ (the form of math audit M6), which subtracts two terms of size x/D, the second with relative error ε·a/D. It is now the soft rule plus a bounded step, (x − γλ) + γq with q = (x − (1 + γ)λ)/D in [0, λ], accurate to ε·x·(a − 1)/D, the map's own conditioning. Its derivative (a − 1)/D, formerly 1/(1 − γ/(a − 1)), is now correct to rounding. ∂z/∂γ, ∂z/∂λ and ∂z/∂a are computed from the same q. Elsewhere on the piece the prox moves by a few ulps, mostly closer to the exact value: at a = 3.7, at most 4 ulps, against exact rational arithmetic within 0.9 ulp where the old form was within 3.6. The prox's speed is unchanged.
+
 ## [1.0.6] — 2026-11-03
 
 A patch release with three fixes and no change to the ABI: no function is added and no signature changes. 1D TV's taut string no longer returns inf on rows near 1e308, the known issue of every earlier 1.0.x release; the log barrier is exact on subnormal entries; and a zero tangent or cotangent no longer gives NaN where an elementwise operator's partial derivative overflows. Other results are bit-identical to 1.0.5, and the log barrier is faster on inputs of mixed sign.

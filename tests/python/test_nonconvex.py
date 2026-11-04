@@ -308,6 +308,35 @@ def test_scad_mcp_far_concavity(p, gamma, lam, x):
         np.testing.assert_allclose(op.prox(np.array([x]), gamma), [float(ref_["z"])], rtol=4e-16)
 
 
+@pytest.mark.parametrize("gamma,lam,a", [(32.501960784313724, 32.501960784313724, 33.501960784315543),
+                                         (1.0, 1.0, 2.0 + 1e-9), (0.5, 2.0, 1.5 + 1e-12),
+                                         (1.0, 1.0, float(np.nextafter(2.0, 3.0)))])
+@pytest.mark.parametrize("t", [0.3, 0.999, 1.0])
+def test_scad_near_degenerate_concavity(gamma, lam, a, t):
+    """SCAD's linear piece as x + gamma (x / D - lambda a / D), D = a - 1 - gamma,
+    cancelled two terms of size x / D, the second computed with relative
+    error eps a / D: at D = 1.8e-12 it returned -1.8e12 for x = -1089 (the
+    2026-11-04 nightly fuzz), and at D = 1e-9 it returned 2 for x = 1.3. Now
+    within eps x j of the exact rational answer (j = (a - 1) / D, the map's
+    conditioning), with j itself to rounding, for SCAD and group SCAD."""
+    g, l, A = _fr(gamma), _fr(lam), _fr(a)
+    D = A - 1 - g
+    x = float((1 + g) * l + _fr(t) * D * l)
+    if not (1 + gamma) * lam < x <= a * lam:
+        pytest.skip("x rounded off the linear piece")
+    X = _fr(x)
+    z_ref, j_ref = float(((A - 1) * X - g * A * l) / D), float((A - 1) / D)
+    tol = 4 * np.finfo(float).eps * x * j_ref
+    op = fp.SCAD(lam, a)
+    z, ctx = op.prox(np.array([-x, x]), gamma, keep=True)
+    np.testing.assert_allclose(z, [-z_ref, z_ref], rtol=0, atol=tol)
+    assert 0 < z[1] <= x
+    gx, grads = op.vjp(ctx, np.array([0.0, 1.0]))
+    np.testing.assert_allclose(gx, [0.0, j_ref], rtol=4e-16)
+    assert grads.lam == pytest.approx(float(-g * A / D), rel=1e-14)
+    np.testing.assert_allclose(fp.GroupSCAD(lam, a).prox(np.array([x]), gamma), [z_ref], rtol=0, atol=tol)
+
+
 @pytest.mark.parametrize("k,j", [(1010, 20), (600, -300), (-1000, -23), (-600, 300), (0, 0)])
 def test_reciprocal_scaling(k, j):
     """prox(x; gamma 2^k, lambda 2^j, w 2^-(k+j)) is prox(x; gamma, lambda, w):
