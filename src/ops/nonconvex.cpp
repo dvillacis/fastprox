@@ -38,11 +38,12 @@
 // with gamma = 1 this is Fan and Li's rule. MCP (b > gamma): z = 0 for
 // x <= lam, b (x - lam) / (b - gamma) up to b lambda, x beyond. In both the
 // objective is convex when the condition holds, so the map is continuous.
-// The middle pieces are evaluated as bounded ratios, SCAD's as
-// x + gamma (x / D - lambda a / D) with D = a - 1 - gamma and
-// a / D = 1 / (1 - (1 + gamma) / a), MCP's as (x - lam) / (1 - gamma / b):
+// The middle pieces are evaluated as bounded terms, SCAD's as
+// (x - gamma lambda) + gamma q with q = (x - (1 + gamma) lambda) / D in
+// [0, lambda], D = a - 1 - gamma, MCP's as (x - lam) / (1 - gamma / b):
 // the products with a or b overflowed at a = b = 1e308, where both answers
-// round to 2 at x = 3, gamma = lambda = 1 (math audit M6).
+// round to 2 at x = 3, gamma = lambda = 1 (math audit M6), and SCAD's earlier
+// x + gamma (x / D - lambda a / D) cancelled for D near 0 (fuzz, 1.0.7).
 //
 // log. The nonzero candidate solves z - x + lam / (eps + z) = 0,
 //   r = (x - eps + sqrt((x + eps)^2 - 4 lam)) / 2,
@@ -459,14 +460,22 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
         if (c == 0.0) m = ax;  // zero weight or step: the identity, exactly
         return std::isnan(xd) ? x : static_cast<T>(std::copysign(m, xd));
     }
-    // The linear piece ((a - 1) x - c a lambda) / (a - 1 - c) as x + c (x / D
-    // - lambda r), D = a - 1 - c, r = a / D, so that no product with a
-    // overflows (M6); bitwise it can differ from the quotient by an ulp. It is
-    // at most x on its piece (x <= a lambda), and taken so: rounding put it an
-    // ulp above (since 1.0.1, as for MCP).
-    static double ratio(double c, double a) noexcept { return 1.0 / (1.0 - (1.0 + c) / a); }
+    // The linear piece ((a - 1) x - c a lambda) / (a - 1 - c) as the soft
+    // rule plus a bounded step, (x - c lambda) + c q with D = a - 1 - c and
+    // q = (x - (1 + c) lambda) / D in [0, lambda] on the piece: no product with
+    // a overflows (M6), and no two large terms cancel. The earlier
+    // x + c (x / D - lambda a / D), a / D as 1 / (1 - (1 + c) / a), subtracted
+    // two terms of size x / D, the second with relative error eps a / D, and at
+    // a - 1 - c = 1.8e-12 (lambda = c = 32.5) returned -1.8e12 for x = -1089
+    // (the 2026-11-04 nightly fuzz). Now the error is eps x (a - 1) / D, the
+    // map's own conditioning. Bitwise it can differ from the quotient by an
+    // ulp. It is at most x on its piece (x <= a lambda), and taken so:
+    // rounding put it an ulp above (since 1.0.1, as for MCP).
+    double slope_q(double ax, double c, double a) const noexcept {
+        return (ax - (1.0 + c) * lambda) / ((a - 1.0) - c);
+    }
     double linear(double ax, double c, double a) const noexcept {
-        return std::fmin(ax + c * (ax / (a - 1.0 - c) - lambda * ratio(c, a)), ax);
+        return std::fmin((ax - c * lambda) + c * slope_q(ax, c, a), ax);
     }
     // Pieces (in |x|, with the sign s): 0 thresholded, 1 soft, 2 linear, 3
     // identity. Kinks: 1 at |x| = c lambda, 2 at (1 + c) lambda, 3 at a lambda.
@@ -492,15 +501,18 @@ struct Scad final : ElemOp<Scad<Weighted>>, WeightedPair<Weighted> {
             dzdc = -s * lambda;
             e.pv[0] = -s * c;
         } else if (pc.id == 2) {
-            // With D = a - 1 - c and r = a / D: z = s (x + c (x / D - lambda r)),
-            // j = (a - 1) / D, dz/dc = z / D - s lambda r, dz/dlambda = -s c r,
-            // dz/da = -s (c / D) (x - (1 + c) lambda) / D (M6).
-            const double D = a - 1.0 - c, r = ratio(c, a);
-            const double z = s * linear(ax, c, a);
-            e.j = 1.0 / (1.0 - c / (a - 1.0));
-            dzdc = z / D - s * lambda * r;
-            e.pv[0] = -s * c * r;
-            e.pv[1] = -s * (c / D) * ((ax - (1.0 + c) * lambda) / D);
+            // With D = a - 1 - c and q = (x - (1 + c) lambda) / D:
+            // z = s ((x - c lambda) + c q), j = (a - 1) / D,
+            // dz/dc = (z - s a lambda) / D = s j (q - lambda),
+            // dz/dlambda = -s c a / D, dz/da = -s (c / D) q (M6). D is exact
+            // where it is small (a - 1 and c within a factor 2, a < 2^53), so
+            // j = (a - 1) / D to rounding; 1 / (1 - c / (a - 1)) had relative
+            // error eps (a - 1) / D.
+            const double D = (a - 1.0) - c, q = slope_q(ax, c, a);
+            e.j = (a - 1.0) / D;
+            dzdc = s * e.j * (q - lambda);
+            e.pv[0] = -s * c * (a / D);
+            e.pv[1] = -s * (c / D) * q;
         } else {
             e.j = 1.0;
         }
