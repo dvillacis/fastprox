@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - SCAD (`SCAD`, `GroupSCAD`) on its linear piece when the concavity a is close to its bound 1 + γw (found by the nightly fuzz run, 2026-11-04): at λ = γ = 32.502 and a − 1 − γ = 1.8e-12, the prox of x = −1089 was −1.8e12, and already at a − 1 − γ = 1e-9 (λ = γ = 1) the prox of 1.3 was 2. The piece was evaluated as x + γ(x/D − λa/D), D = a − 1 − γ (the form of math audit M6), which subtracts two terms of size x/D, the second with relative error ε·a/D. It is now the soft rule plus a bounded step, (x − γλ) + γq with q = (x − (1 + γ)λ)/D in [0, λ], accurate to ε·x·(a − 1)/D, the map's own conditioning. Its derivative (a − 1)/D, formerly 1/(1 − γ/(a − 1)), is now correct to rounding. ∂z/∂γ, ∂z/∂λ and ∂z/∂a are computed from the same q. Elsewhere on the piece the prox moves by a few ulps, mostly closer to the exact value: at a = 3.7, at most 4 ulps, against exact rational arithmetic within 0.9 ulp where the old form was within 3.6. The prox's speed is unchanged.
+- The fuzz harness's check that a norm-like prox does not grow the norm, ‖z‖ ≤ ‖x‖, now allows each entry of z a few subnormals, as its structure check already did (nightly fuzz run, 2026-11-11). On the row (d, d, 0, 0) with d = 2^-1074, 1D TV with the ℓ2 norm (`TV1DL2`) returns the piecewise mean d/2 rounded to d, so ‖z‖ = 2d against ‖x‖ = 1.41d: no double is closer to the mean, and the check failed on a correct result. The library is unchanged.
 
 ## [1.0.6] — 2026-11-03
 
