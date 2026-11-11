@@ -1057,7 +1057,16 @@ void run(const uint8_t *data, size_t size) {
                     sx += (xat(i) / m) * (xat(i) / m);
                     sz += (zat(i) / m) * (zat(i) / m);
                 }
-                if (!(sz <= sx * (1.0 + 1e-5) + 1e-280)) {
+                // Each entry of z may also be a few subnormals off, as in
+                // check_structure: the mean of (d, d, 0, 0), d = 2^-1074, is
+                // d / 2 and comes back as d, so |z| = 2 d against |x| = 1.41 d
+                // (tv1d_l2, nightly run of 2026-11-11). q is that floor over
+                // m, and the bound (|x| + sqrt(numel) q)^2; q is below 1e-15
+                // once m is normal.
+                const double q = 4.0 * (f32 ? static_cast<double>(FLT_TRUE_MIN) : DBL_TRUE_MIN) *
+                                 (conj ? std::fmax(gamma, 1.0) : 1.0) / m;
+                const double nq = static_cast<double>(numel) * q;
+                if (!(sz <= sx * (1.0 + 1e-5) + 1e-280 + 2.0 * std::sqrt(sx * nq * q) + nq * q)) {
                     dump();
                     fail("a norm-like prox grew |z| beyond |x|");
                 }
