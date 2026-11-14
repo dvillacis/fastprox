@@ -234,6 +234,19 @@ def test_tv_ball_derivatives_at_extreme_weights():
         np.testing.assert_allclose(z, z1, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(op.jvp(cc, dx), op1.jvp(c1, dx), rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(op.vjp(cc, dx)[0], op1.vjp(c1, dx)[0], rtol=1e-10, atol=1e-10)
+    # float32 at w ~ 1e-42: z_gamma ~ w / |B| was subnormal in the row's dtype,
+    # with a few bits left, and the Jacobian asymmetric (nightly fuzz
+    # 2026-11-14, a jump weight of 2.6e-43); at w ~ 1e42 it was inf, and the
+    # derivatives NaN.
+    x32, dx32 = x.astype(np.float32), dx.astype(np.float32)
+    op1 = fp.TV1DBall(a, w)
+    z1, c1 = op1.prox(x32, keep=True)
+    for c in (2.0**140, 2.0**-140):
+        op = fp.TV1DBall(a * c, w * c)
+        z, cc = op.prox(x32, keep=True)
+        np.testing.assert_allclose(z, z1, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(op.jvp(cc, dx32), op1.jvp(c1, dx32), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(op.vjp(cc, dx32)[0], op1.vjp(c1, dx32)[0], rtol=1e-4, atol=1e-4)
     # The fuzz reproducer: the conjugate at sigma = 1.1e298 works on
     # dx / sigma, whose products with the small weight's q underflowed.
     w = np.array([4.0582731154107899e147, 0, 0, 1.2105675798371893e20, 0])
