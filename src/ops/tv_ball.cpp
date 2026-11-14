@@ -39,7 +39,10 @@
 // omega z_gamma. The plain formulas lost the constraint's term to overflow
 // from w ~ 1e155, to underflow below w ~ 1e-155, and in the conjugate at
 // sigma ~ 1e298, where the inner dx is dx / sigma (found by fuzzing
-// guarantee 1 in 1.0.2).
+// guarantee 1 in 1.0.2). omega z_gamma comes from the 1D TV JVP at
+// dgamma = omega, which forms it in double: z_gamma itself, ~ w / |B|, was
+// subnormal in the row's dtype at small w (float32, a jump weight of 2.6e-43
+// left ~5 bits and an asymmetric Jacobian, nightly fuzz 2026-11-14).
 //
 // SPDX-License-Identifier: MIT
 #include "core/op.hpp"
@@ -274,9 +277,9 @@ struct TVBall final : RowOp<TVBall> {
         if (!s.constraint) return k;  // the regions need no jvp
         T *zero = buffer<T>(scr, n, 0), *zg = buffer<T>(scr, n, 1);
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
-        tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), 1.0, nullptr, scr, 0);
         const double omega = jump_scale(code, n);
-        if (tv_lin(code, zg, n, omega, omega) == 0.0) return k;
+        tv->jvp_row(x, z, code, zero, zg, n, gamma_star(x, z, code, n), omega, nullptr, scr, 0);  // omega z_gamma
+        if (tv_lin(code, zg, n, omega) == 0.0) return k;
         for (int64_t i = 0; s.coef && i < n; ++i) {
             double q = 0.0;
             if (i > 0) q += we(i - 1) * sgn_diff(code, i - 1);
@@ -298,11 +301,11 @@ struct TVBall final : RowOp<TVBall> {
         for (int64_t i = 0; i < n; ++i) zero[i] = T(0);
         const double g = gamma_star(x, z, code, n);
         tv->jvp_row(x, z, code, dx, dz, n, g, 0.0, dp ? dp + 1 : nullptr, tscr, 0);
-        tv->jvp_row(x, z, code, zero, zg, n, g, 1.0, nullptr, tscr, 0);  // z_gamma
         // omega^2 <q, z_gamma>, omega (dalpha - ... - <q, dz0>), and the step
         // dgamma z_gamma as their ratio times omega z_gamma.
         const double omega = jump_scale(code, n);
-        const double kappa = tv_lin(code, zg, n, omega, omega);
+        tv->jvp_row(x, z, code, zero, zg, n, g, omega, nullptr, tscr, 0);  // omega z_gamma
+        const double kappa = tv_lin(code, zg, n, omega);
         if (kappa == 0.0) return;
         double rhs = dp ? dp[0] * omega : 0.0;
         if (dp)
@@ -314,7 +317,7 @@ struct TVBall final : RowOp<TVBall> {
         const double sd = pow2_scale(dmax);
         const double dg = rhs / kappa - tv_lin(code, dz, n, omega, sd) / kappa / sd;
         for (int64_t i = 0; i < n; ++i)
-            dz[i] = static_cast<T>(static_cast<double>(dz[i]) + dg * (omega * static_cast<double>(zg[i])));
+            dz[i] = static_cast<T>(static_cast<double>(dz[i]) + dg * static_cast<double>(zg[i]));
     }
 
     template <class T>
@@ -330,10 +333,10 @@ struct TVBall final : RowOp<TVBall> {
         double *ia = buffer<double>(scr, n, 2);  // nw + 1 <= n + 1 accumulators
         const double g = gamma_star(x, z, code, n);
         for (int64_t i = 0; i < n; ++i) h[i] = T(0);
-        tv->jvp_row(x, z, code, h, zg, n, g, 1.0, nullptr, tscr, 0);  // z_gamma
         // bs = beta / omega from omega z_gamma and omega^2 <q, z_gamma> (Scale).
         const double omega = jump_scale(code, n);
-        const double kappa = tv_lin(code, zg, n, omega, omega);
+        tv->jvp_row(x, z, code, h, zg, n, g, omega, nullptr, tscr, 0);  // omega z_gamma
+        const double kappa = tv_lin(code, zg, n, omega);
         double bs = 0.0;
         if (kappa != 0.0) {
             double gmax = 0.0;
@@ -341,7 +344,7 @@ struct TVBall final : RowOp<TVBall> {
             const double sg = pow2_scale(gmax);
             double gz = 0.0;
             for (int64_t i = 0; i < n; ++i)
-                gz += (sg * static_cast<double>(gv[i])) * (omega * static_cast<double>(zg[i]));
+                gz += (sg * static_cast<double>(gv[i])) * static_cast<double>(zg[i]);
             bs = gz / kappa / sg;
         }
         const double beta = bs * omega;
